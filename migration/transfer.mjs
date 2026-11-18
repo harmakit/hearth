@@ -14,8 +14,8 @@ const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'bloc
 const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'failed', 'interrupted'];
 
 const fields = {
-  studio: ['name', 'brief', 'language'],
-  agent: ['key', 'name', 'description', 'role', 'mode', 'runtime', 'model', 'effort'],
+  studio: ['name', 'brief', 'language', 'allowedMode'],
+  agent: ['key', 'name', 'description', 'role', 'roleTitle', 'mode', 'runtime', 'model', 'effort'],
   director: ['runtime', 'model', 'effort'],
   tasks: ['key', 'title', 'prompt', 'summary', 'artifact', 'error', 'review', 'directorDecision', 'createdAt', 'updatedAt', 'legacyId', 'legacyStatus', 'legacyBranch', 'kind', 'type'],
   inbox: ['title', 'body', 'status', 'kind', 'answer', 'createdAt', 'updatedAt', 'legacyId'],
@@ -132,6 +132,11 @@ function planFields(record, text, agentIds, selectedPaths) {
         for (const field of ['agentKey', 'reviewerKey']) if (agentIds.has(item[field])) copy[field] = agentIds.get(item[field]);
         if (item.artifactPath !== undefined) copy.artifactPath = portablePath(item.artifactPath);
         if (typeof item.requiresAcceptance === 'boolean') copy.requiresAcceptance = item.requiresAcceptance;
+      } else {
+        if (agentIds.has(item.key)) copy.key = agentIds.get(item.key);
+        if (item.recommendation !== undefined) {
+          copy.recommendation = copyFields(object(item.recommendation, 'рекомендация модели'), fields.director, text);
+        }
       }
       return copy;
     });

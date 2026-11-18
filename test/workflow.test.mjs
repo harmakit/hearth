@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +38,121 @@ function database(t) {
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   return join(folder, 'studio.sqlite');
 }
+
+test('initial plan recommends an allowed tuple but executes the owner’s saved fixed choice', async (t) => {
+  const calls = [];
+  let reviewerKey;
+  const recommendation = { runtime: 'codex', model: 'light', effort: 'low' };
+  const fixed = { runtime: 'claude', model: 'deep', effort: 'high' };
+  const allowed = [{ runtime: 'codex', model: 'light', efforts: ['low'] }, { runtime: 'claude', model: 'deep', efforts: ['high'] }];
+  const service = createStudioService({ dbPath: ':memory:', run: async ({ purpose, runtime, model, effort, prompt }) => {
+    calls.push({ purpose, runtime, model, effort, prompt });
+    const results = {
+      plan: { ...draft, agents: [
+        { ...draft.agents[0], roleTitle: 'Редактор концепции', recommendation },
+        { ...draft.agents[1], key: reviewerKey, recommendation: { ...recommendation, effort: 'unlisted' } },
+      ], tasks: [{ ...draft.tasks[0], reviewerKey, artifactPath: undefined }] },
+      task: { summary: 'Done' }, review: { pass: true, summary: 'Accepted' }, director: { action: 'finish' },
+    };
+    return { text: JSON.stringify(results[purpose]) };
+  } });
+  t.after(() => service.close());
+  assert.deepEqual(service.snapshot().modelPolicy, { configured: false, allowed: [] });
+  service.updateModelPolicy({ allowed });
+  const { id: studioId } = service.createStudio({ name: 'Writer', root: '/project' });
+  ({ id: reviewerKey } = service.addAgent({ studioId, role: 'other', name: 'Старое имя', mode: 'dynamic' }));
+  service.initializeStudio({ studioId });
+  const { plans: [plan], studios: [studio] } = await until(service.snapshot, ({ plans }) => plans.length === 1);
+  assert.deepEqual(studio.effectiveAllowed, allowed);
+  assert.deepEqual(JSON.parse(calls[0].prompt.split('\n\n').at(-1)).allowed, allowed);
+  assert.deepEqual(plan.agents[0].recommendation, recommendation);
+  assert.equal(plan.agents[0].roleTitle, 'Редактор концепции');
+  assert.equal(plan.agents[0].mode, 'dynamic');
+  assert.equal(plan.agents[1].recommendation, undefined);
+  const edit = { key: 'writer', mode: 'fixed', ...fixed, name: 'Мария', roleTitle: 'Главный редактор' };
+  assert.throws(() => service.updatePlanAgents({ planId: plan.id, agents: [edit, { key: 'unknown' }] }), /ключ/);
+  assert.deepEqual(service.snapshot().plans[0], plan);
+  assert.throws(() => service.updatePlanAgents({ planId: plan.id, agents: [{ ...edit, effort: 'unlisted' }] }), /разрешённом/);
+  service.updatePlanAgents({ planId: plan.id, agents: [edit, { key: reviewerKey, roleTitle: 'Рецензент', mode: 'inherit' }] });
+  service.updateModelPolicy({ allowed: [allowed[0]] });
+  assert.throws(() => service.decidePlan({ planId: plan.id, decision: 'approve' }), /разрешённом/);
+  assert.equal(service.snapshot().plans[0].status, 'pending');
+  assert.equal(service.snapshot().inbox[0].status, 'open');
+  service.updateModelPolicy({ allowed });
+  service.decidePlan({ planId: plan.id, decision: 'approve' });
+  const finished = await until(service.snapshot, ({ sprints }) => sprints[0]?.status === 'completed');
+  const { name, roleTitle, role, mode, runtime, model, effort } = finished.studios[0].agents.find(({ key }) => key === 'writer');
+  assert.deepEqual({ name, roleTitle, role, mode, runtime, model, effort }, { name: 'Мария', roleTitle: 'Главный редактор', role: 'editor', mode: 'fixed', ...fixed });
+  const { prompt, ...workerCall } = calls.find(({ purpose }) => purpose === 'task');
+  assert.deepEqual(workerCall, { purpose: 'task', ...fixed });
+  assert.equal(JSON.parse(prompt.split('\n\n').at(-1)).roleTitle, 'Главный редактор');
+  const review = calls.find(({ purpose }) => purpose === 'review');
+  assert.equal(JSON.parse(review.prompt.split('\n\n').at(-1)).reviewer.roleTitle, 'Рецензент');
+  assert.equal(finished.studios[0].agents.find(({ id }) => id === reviewerKey).name, 'Старое имя');
+});
+
+test('the initial sprint uses allowed dynamic recommendations and reroutes stale ones', async (t) => {
+  const calls = [];
+  const planModel = { runtime: 'claude', model: 'proposed', effort: 'low' };
+  const staleModel = { runtime: 'codex', model: 'stale', effort: '' };
+  const replacement = { runtime: 'claude', model: 'replacement', effort: 'high' };
+  const allowed = [planModel, staleModel, replacement].map(({ effort, ...choice }) => ({ ...choice, efforts: effort ? [effort] : [] }));
+  const service = createStudioService({ dbPath: ':memory:', run: async ({ purpose, model }) => {
+    calls.push([purpose, model]);
+    const results = {
+      plan: { ...draft, agents: [
+        { ...draft.agents[0], recommendation: planModel }, { ...draft.agents[1], recommendation: staleModel },
+      ], tasks: [{ ...draft.tasks[0], artifactPath: undefined }] },
+      'select-model': replacement, task: { summary: 'Done' }, review: { pass: true, summary: 'Accepted' }, director: { action: 'finish' },
+    };
+    return { text: JSON.stringify(results[purpose]) };
+  } });
+  t.after(() => service.close());
+  service.updateModelPolicy({ allowed });
+  const { id: studioId } = service.createStudio({ name: 'Writer', root: '/project' });
+  service.initializeStudio({ studioId });
+  const { plans: [plan] } = await until(service.snapshot, ({ plans }) => plans.length === 1);
+  service.decidePlan({ planId: plan.id, decision: 'approve' });
+  service.updateModelPolicy({ allowed: [allowed[0], allowed[2]] });
+  await until(service.snapshot, ({ sprints }) => sprints[0]?.status === 'completed');
+  assert.deepEqual(calls, [['plan', undefined], ['task', 'proposed'], ['select-model', undefined], ['review', 'replacement'], ['director', undefined]]);
+});
+
+test('initial team editing includes referenced agents omitted by the planner or older saves', async (t) => {
+  const dbPath = database(t);
+  let workerKey;
+  let reviewerKey;
+  const run = async () => ({ text: JSON.stringify({ ...draft, agents: [], tasks: [
+    { ...draft.tasks[0], agentKey: workerKey, reviewerKey, artifactPath: undefined },
+  ] }) });
+  let service = createStudioService({ dbPath, run });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({ name: 'Writer', root: '/project' });
+  const worker = service.addAgent({ studioId, role: 'editor', name: 'Ирина', roleTitle: 'Редактор', description: 'Ведёт рукопись', mode: 'inherit' });
+  const reviewer = service.addAgent({ studioId, role: 'other', name: 'Николай', mode: 'dynamic' });
+  workerKey = worker.id;
+  reviewerKey = reviewer.id;
+  service.addAgent({ studioId, role: 'artist', name: 'Анна' });
+  service.initializeStudio({ studioId });
+  const { plans: [plan] } = await until(service.snapshot, ({ plans }) => plans.length === 1);
+  const { id: workerId, ...workerSettings } = worker;
+  assert.deepEqual(plan.agents.map(({ key }) => key), [workerId, reviewer.id]);
+  assert.deepEqual(plan.agents[0], { key: workerId, ...workerSettings });
+  service.setStudioRunning({ studioId, action: 'pause' });
+  await service.close();
+
+  const db = new DatabaseSync(dbPath);
+  db.prepare('UPDATE plans SET data = ? WHERE id = ?').run(JSON.stringify({ ...plan, agents: [] }), plan.id);
+  db.close();
+  service = createStudioService({ dbPath, run });
+  assert.deepEqual(service.snapshot().plans[0].agents, plan.agents);
+  service.updatePlanAgents({ planId: plan.id, agents: [{ key: workerId, roleTitle: 'Главный редактор' }] });
+  service.decidePlan({ planId: plan.id, decision: 'approve' });
+  const [savedWorker, savedReviewer] = service.snapshot().studios[0].agents;
+  assert.deepEqual(savedWorker, { ...worker, roleTitle: 'Главный редактор' });
+  const { roleTitle: unusedTitle, ...reviewerSettings } = reviewer;
+  assert.deepEqual(savedReviewer, reviewerSettings);
+});
 
 test('approval creates one dependency-aware sprint, writes the artifact and runs review and director', async (t) => {
   const calls = [];
@@ -136,7 +252,8 @@ test('scheduled workflows retain a queued continuation after hours, manual pause
   assert.deepEqual(calls, ['plan', 'task', 'review', 'director']);
   const other = service.createStudio({ name: 'Other', root: '/project' });
   service.deleteStudio({ studioId, confirmation: 'Writer' });
-  const { studios, ...records } = service.snapshot();
+  const { studios, modelPolicy, ...records } = service.snapshot();
+  assert.deepEqual(modelPolicy, { configured: false, allowed: [] });
   assert.deepEqual(studios.map(({ id }) => id), [other.id]);
   for (const table of Object.keys(records)) assert.deepEqual(records[table], [], table);
 });
@@ -243,7 +360,9 @@ test('rework publishes a distinct file and a reviewer routed by the director see
         'select-model': () => {
           assert.equal(runtime, 'codex');
           routingPrompts.push(prompt);
-          return { runtime: 'claude', model: 'reader', effort: 'high' };
+          return JSON.parse(prompt.split('\n\n').at(-1)).purpose === 'review'
+            ? { runtime: 'claude', model: 'reader', effort: 'high' }
+            : { runtime: 'codex', model: 'director', effort: '' };
         },
         review: () => {
           assert.equal(runtime, 'claude');
@@ -272,8 +391,7 @@ test('rework publishes a distinct file and a reviewer routed by the director see
   const snapshot = await until(service.snapshot, ({ studios }) => studios[0].lifecycle === 'idle');
   assert.deepEqual(writes.map(({ path }) => path), ['outline.md', 'outline-v2.md']);
   assert.notEqual(writes[0].operationId, writes[1].operationId);
-  assert.equal(routingPrompts.length, 2);
-  assert.match(routingPrompts[0], /"purpose": "review"/);
+  assert.deepEqual(routingPrompts.map((prompt) => JSON.parse(prompt.split('\n\n').at(-1)).purpose), ['task', 'review', 'task', 'review']);
   assert.match(reviewPrompts[1], /"artifactPath": "outline-v2.md"/);
   assert.match(reviewPrompts[1], /"previousArtifactPath": "outline.md"/);
   assert.equal(snapshot.tasks[0].artifactPath, 'outline-v2.md');

@@ -117,7 +117,8 @@ async function loadData(source, warn) {
     const header = raw.toString('utf8').match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? '';
     const get = field => header.match(new RegExp(`^${field}:\\s*([^\\r\\n]+)`, 'm'))?.[1]?.trim().replace(/^(['"])(.*)\1$/, '$2') ?? '';
     const name = firstText(get('name'), basename(entry.name, '.md'));
-    const role = roles.has(key(name)) ? key(name) : 'other';
+    const category = key(name) === 'librarian' ? 'library' : key(name);
+    const role = roles.has(category) ? category : 'other';
     agents.push({ id: basename(entry.name, '.md'), name, description: get('description'), role, mode: 'inherit' });
   }
   const registrations = new Map();

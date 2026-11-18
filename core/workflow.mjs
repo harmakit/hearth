@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
-import { directorPrompt, field, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, validatePlan } from './protocol.mjs';
+import { completeInitialRoster, directorPrompt, field, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, validatePlan } from './protocol.mjs';
 
 const now = () => new Date().toISOString();
 
@@ -17,7 +17,8 @@ function artifactPathFor(task, proposedPath) {
 
 export function createWorkflow({
   read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
-  run, writeArtifact, taskControls, runPrompt, report, isClosed, active, availableStudio, onAvailable,
+  run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, effectiveAllowed, validateFixed,
+  runPrompt, report, isClosed, active, availableStudio, onAvailable,
 }) {
   function state(studio, lifecycle, activity, job = null) {
     return update('studios', { ...studio, lifecycle, activity, workflowJob: job });
@@ -52,13 +53,27 @@ export function createWorkflow({
     return schedule(studio, { purpose: 'task', taskId: task.id }, `Готовится задача «${task.title}»`);
   }
 
-  function approve(studio, plan) {
+  function approve(studio, draft) {
+    const plan = completeInitialRoster(draft, studio.agents);
     const { id, studioId } = plan;
     const agents = [...studio.agents];
     const byKey = new Map(agents.map((agent) => [agent.key ?? agent.id, agent]));
+    const agentEdits = new Map(Object.entries(plan.agentEdits ?? {}));
     for (const candidate of plan.agents) {
-      if (byKey.has(candidate.key)) continue;
-      const agent = { ...candidate, id: randomUUID(), mode: 'inherit', runtime: '', model: '', effort: '' };
+      const existing = byKey.get(candidate.key);
+      const ownerFields = agentEdits.get(candidate.key) ?? [];
+      if (existing) {
+        if (ownerFields.length) {
+          const edited = { ...existing };
+          for (const name of ownerFields) edited[name] = candidate[name];
+          if (edited.mode === 'fixed') validateFixed(studio, edited);
+          Object.assign(existing, edited);
+        }
+        continue;
+      }
+      const { key, role, roleTitle, name, description, mode = 'dynamic', runtime = '', model = '', effort = '' } = candidate;
+      const agent = { id: randomUUID(), key, role, roleTitle, name, description, mode, runtime, model, effort };
+      if (mode === 'fixed') validateFixed(studio, agent);
       agents.push(agent);
       byKey.set(agent.key, agent);
     }
@@ -67,12 +82,23 @@ export function createWorkflow({
     const taskIds = new Map(plan.tasks.map(({ key }) => [key, randomUUID()]));
     const sprint = insert('sprints', { id: randomUUID(), studioId, planId: id, title: plan.title, goal: plan.goal, status: 'active', taskIds: [...taskIds.values()] });
     const createdAt = now();
-    const tasks = plan.tasks.map(({ agentKey, reviewerKey, dependsOn, artifactPath, ...task }) => insert('tasks', {
-      ...task, id: taskIds.get(task.key), studioId, agentId: byKey.get(agentKey).id, reviewerId: byKey.get(reviewerKey).id,
-      epicId: epic.id, storyId: story.id, sprintId: sprint.id, dependencies: dependsOn.map((key) => taskIds.get(key)),
-      stage: dependsOn.length ? 'backlog' : 'ready', status: 'queued', summary: '', artifact: '', error: '',
-      artifactTarget: artifactPath, workflowManaged: true, createdAt, updatedAt: createdAt,
-    }));
+    const recommendations = new Map();
+    if (plan.kind === 'initial') {
+      for (const { key, recommendation } of plan.agents) {
+        if (recommendation && byKey.get(key).mode === 'dynamic') recommendations.set(key, recommendation);
+      }
+    }
+    const tasks = plan.tasks.map(({ agentKey, reviewerKey, dependsOn, artifactPath, ...task }) => {
+      const taskRecommendation = recommendations.get(agentKey);
+      const reviewRecommendation = recommendations.get(reviewerKey);
+      return insert('tasks', {
+        ...task, id: taskIds.get(task.key), studioId, agentId: byKey.get(agentKey).id, reviewerId: byKey.get(reviewerKey).id,
+        epicId: epic.id, storyId: story.id, sprintId: sprint.id, dependencies: dependsOn.map((key) => taskIds.get(key)),
+        stage: dependsOn.length ? 'backlog' : 'ready', status: 'queued', summary: '', artifact: '', error: '',
+        artifactTarget: artifactPath, workflowManaged: true, createdAt, updatedAt: createdAt,
+        ...(taskRecommendation || reviewRecommendation ? { modelRecommendations: { task: taskRecommendation, review: reviewRecommendation } } : {}),
+      });
+    });
     insert('meetings', {
       id: randomUUID(), studioId, sprintId: sprint.id, kind: 'planning', title: 'Планирование спринта',
       summary: plan.goal, taskIds: sprint.taskIds, createdAt,
@@ -86,6 +112,43 @@ export function createWorkflow({
       nextTask(roster, ready);
     }
     return result;
+  }
+
+  function updatePlanAgents({ planId, agents }) {
+    const result = transaction(() => {
+      const draft = read('plans', planId, 'План');
+      if (draft.kind !== 'initial' || draft.status !== 'pending') throw new Error('Изменить команду можно только в первоначальном плане, который ожидает согласования.');
+      const studio = read('studios', draft.studioId, 'Студия');
+      const plan = completeInitialRoster(draft, studio.agents);
+      if (!Array.isArray(agents) || agents.length > plan.agents.length) throw new Error('Некорректный список ключей команды.');
+      const byKey = new Map(plan.agents.map((agent) => [agent.key, agent]));
+      const agentEdits = new Map(Object.entries(plan.agentEdits ?? {}));
+      const seen = new Set();
+      for (const input of agents) {
+        const patch = object(input, 'роль в плане');
+        const current = byKey.get(patch.key);
+        if (!current || seen.has(patch.key)) throw new Error('Неизвестный или повторяющийся ключ роли в плане.');
+        seen.add(patch.key);
+        const updated = { ...current, mode: current.mode ?? 'dynamic' };
+        const editedFields = new Set(agentEdits.get(patch.key));
+        if (patch.mode !== undefined && !['inherit', 'dynamic', 'fixed'].includes(patch.mode)) throw new Error('Неизвестная политика модели.');
+        if (patch.runtime !== undefined && !['codex', 'claude', ''].includes(patch.runtime)) throw new Error('Неизвестное подключение агента.');
+        for (const name of ['name', 'roleTitle', 'mode', 'runtime', 'model', 'effort']) {
+          if (patch[name] === undefined) continue;
+          updated[name] = name === 'roleTitle' ? roleTitle(patch[name]) : patch[name] === '' ? '' : field(patch[name], name === 'name' ? 'имя' : name, 120);
+          editedFields.add(name);
+        }
+        if (updated.mode === 'fixed') {
+          const settings = validateFixed(studio, updated);
+          Object.assign(updated, settings);
+          for (const name of Object.keys(settings)) editedFields.add(name);
+        }
+        byKey.set(patch.key, updated);
+        agentEdits.set(patch.key, [...editedFields]);
+      }
+      return update('plans', { ...plan, agents: [...byKey.values()], agentEdits: Object.fromEntries(agentEdits) });
+    });
+    return changed(result);
   }
 
   function decidePlan({ studioId, planId, decision, feedback, comment }) {
@@ -177,13 +240,17 @@ export function createWorkflow({
     if (purpose === 'artifact') return publishArtifact(studio, job.path, task.artifact, job.operationId);
     const agentId = purpose === 'task' ? task.agentId : purpose === 'review' ? task.reviewerId : undefined;
     const agent = studio.agents.find(({ id }) => id === agentId);
-    const { runtime, model, effort } = await taskControls(studio, agent, task, { run, signal, purpose });
+    const selected = recommendedTaskControls(studio, agent, task?.modelRecommendations?.[purpose])
+      ?? await taskControls(studio, agent, task, { run, signal, purpose });
     signal.throwIfAborted();
+    const { runtime, model, effort } = confirmTaskControls(studio, agent, selected);
+    let allowed = [];
     let prompt;
     switch (purpose) {
       case 'plan': {
         const previous = job.previousPlanId ? read('plans', job.previousPlanId, 'План') : undefined;
-        prompt = planPrompt(studio, job, previous);
+        allowed = effectiveAllowed(read('studios', studio.id, 'Студия'));
+        prompt = planPrompt(studio, job, previous, allowed);
         break;
       }
       case 'task': {
@@ -198,7 +265,7 @@ export function createWorkflow({
         break;
       }
       case 'review':
-        prompt = reviewPrompt(studio, task);
+        prompt = reviewPrompt(studio, task, agent);
         break;
       case 'director':
         prompt = directorPrompt(studio, task, readyAfter(task).map(({ key, title }) => ({ key, title })));
@@ -206,7 +273,7 @@ export function createWorkflow({
     }
     const result = await run({ runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal });
     const data = parseResponse(result);
-    if (purpose === 'plan') return validatePlan(data, studio.agents);
+    if (purpose === 'plan') return validatePlan(data, read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
     if (purpose === 'task') {
       const parsed = report(result);
       if (!parsed.question && !['summary', 'artifact'].some((key) => typeof data[key] === 'string' && data[key].trim())) throw new Error('Исполнитель не вернул отчёт.');
@@ -250,7 +317,8 @@ export function createWorkflow({
   function finishStep(studio, job, task, result, attemptId) {
     switch (job.purpose) {
       case 'plan': {
-        const plan = insert('plans', { id: randomUUID(), studioId: studio.id, kind: job.kind, status: 'pending', ...result, createdAt: now() });
+        const draft = { id: randomUUID(), studioId: studio.id, kind: job.kind, status: 'pending', ...result, createdAt: now() };
+        const plan = insert('plans', completeInitialRoster(draft, studio.agents));
         if (job.kind === 'sprint' && !studio.approveSprints) {
           approve(studio, plan);
           return;
@@ -415,5 +483,5 @@ export function createWorkflow({
     }
   }
 
-  return { initializeStudio, decidePlan, setStudioRunning, resumeInbox, queue };
+  return { initializeStudio, decidePlan, updatePlanAgents, setStudioRunning, resumeInbox, queue };
 }

@@ -1,7 +1,8 @@
-import { agentActivity, buildRooms, languageChoices, pendingStudioPlan, roleDetails, roleNames, taskForAgent } from './workshop.mjs';
+import { agentActivity, actorState, buildRooms, languageChoices, pendingStudioPlan, roleDetails, roleNames, taskForAgent } from './workshop.mjs';
 import { paintRooms } from './room-art.mjs';
 import { publishedPaths, renderWork } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
+import { catalogEfforts, fixedModelChoices, modelKey, readPolicyRows } from './model-policy.mjs';
 
 const bridge = window.hearth;
 const $ = selector => document.querySelector(selector);
@@ -49,6 +50,8 @@ let workBusy = false;
 let workTab;
 const expandedEpics = new Set();
 let advancedOpen = false;
+let policyPromptShown = false;
+let policyRowId = 0;
 
 function stored(key, value) {
   try {
@@ -72,7 +75,9 @@ const heading = (title, detail = '', actions = '') => `<header class="page-headi
 const empty = (title, detail, action = '') => `<div class="panel empty"><h2>${safe(title)}</h2><p class="muted">${safe(detail)}</p>${action}</div>`;
 const badge = (label, tone = '') => `<span class="status ${tone}"><span aria-hidden="true"></span>${safe(label)}</span>`;
 const status = task => badge(...(statuses[task.status] ?? [task.status, '']));
-const nameFor = agent => agent ? (agent.name || roleNames[agent.role] || agent.role) : 'Директор';
+const titleFor = agent => agent?.roleTitle || roleNames[agent?.role] || agent?.role || 'Директор';
+const nameFor = agent => agent?.name || titleFor(agent);
+const secondaryTitle = agent => agent?.name && agent.name !== titleFor(agent) ? titleFor(agent) : '';
 const taskAgent = task => studio()?.agents?.find(agent => agent.id === task.agentId);
 const runtimeName = runtime => runtimeNames[runtime] ?? runtime;
 const configText = value => [runtimeName(value?.runtime), value?.model, value?.effort].filter(Boolean).join(' · ');
@@ -108,6 +113,7 @@ async function refresh() {
     if (!studio()) selectStudio(snapshot.studios[0]?.id);
     ready = true;
     render();
+    maybePromptModelPolicy();
     if (dialog.open && !dialogBusy && taskDialog) {
       const latest = snapshot.tasks.find(task => task.id === taskDialog.id);
       if (latest && JSON.stringify(latest) !== JSON.stringify(taskDialog)) openTask(latest);
@@ -125,7 +131,7 @@ function render() {
   const picker = $('#studio-select');
   const focused = document.activeElement;
   const focusRoot = [content, $('#navigation')].find(container => container.contains(focused) && focused !== container);
-  const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'allow', 'plan', 'initialize', 'runAction', 'artifact', 'workTab'].includes(key));
+  const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab'].includes(key));
   const autonomyFocused = focused?.getAttribute('name') === 'approveSprints';
   picker.disabled = !state.studios.length;
   picker.innerHTML = state.studios.map(item => option(String(item.id), item.name, studioId)).join('') || '<option>Нет студий</option>';
@@ -301,10 +307,15 @@ function workshop() {
     const chosen = person === agent;
     const currentJob = jobFor(person);
     const [activity, tone] = activityFor(person);
+    const director = person.id == null;
+    const actor = actorState(currentJob, director ? current.lifecycle : undefined, {
+      paused: current.manualPaused && (director || currentJob?.status === 'queued'),
+      scheduled: current.scheduleWaiting && (director || currentJob?.status === 'queued'),
+    });
     const openJob = pin && currentJob && ['running', 'waiting', 'queued'].includes(currentJob.status) && currentJob.stage !== 'backlog';
     return `<button type="button" class="${pin ? 'map-pin' : 'list-row role-row'}" data-agent="${safe(key)}" data-activity="${tone}" aria-pressed="${chosen}"${openJob ? ` data-desk-task="${safe(currentJob.id)}" aria-haspopup="dialog"` : ''}>
-      <canvas width="40" height="40" data-desk="${props || 'notebook'}" aria-hidden="true"></canvas>
-      <span><strong>${safe(nameFor(person))}</strong><small>${pin ? safe(activity) : safe([roleNames[person.role] || person.role, activity].join(' · '))}</small></span>
+      <canvas width="40" height="40" data-desk="${props || 'notebook'}" data-actor-key="${safe(`${current.id}:${person.id ?? 'director'}`)}" data-actor-state="${actor}" aria-hidden="true"></canvas>
+      <span><strong>${safe(nameFor(person))}</strong><small>${pin ? safe(activity) : safe([secondaryTitle(person), activity].filter(Boolean).join(' · '))}</small></span>
     </button>`;
   };
   return heading('Мастерская', `Комнат: ${rooms.length} · Участников: ${roster.length}`, button('Настроить состав', 'data-view="settings"', true)) +
@@ -315,7 +326,7 @@ function workshop() {
         </div></section>`).join('')}
     </div><div class="split workshop-detail"><article class="panel padded stack compact">
       <div class="row"><h2>${safe(nameFor(agent))}</h2>${badge(...activityFor(agent))}</div>
-      <p class="muted">${room.name}</p>
+      <p class="muted">${safe([room.name, agent.name && agent.roleTitle].filter(Boolean).join(' · '))}</p>
       ${agent.description ? `<p>${safe(agent.description)}</p>` : ''}
       ${job ? `<div class="inline-result"><strong>${safe(job.title)}</strong>${job.summary ? plain(job.summary, 'muted clamp') : ''}</div>`
         : '<p>У агента пока нет задачи.</p>'}
@@ -348,6 +359,12 @@ function settings() {
   }).join('');
   return heading('Настройки', current?.name || 'Подключения приложения') +
     `<div class="stack settings"><section class="stack compact"><h2>Подключения</h2><div class="columns">${providers}</div></section>
+      <section class="stack compact"><h2>Модели приложения</h2><div class="panel padded stack compact">
+        <div class="row allowed-row"><div><h3>Список для студий по умолчанию</h3>
+          <p class="muted">${state.modelPolicy?.configured === false ? 'Список ещё не настроен.' : 'Студии могут использовать этот список или задать свой.'}</p></div>
+          ${button('Настроить список', 'data-open="app-model-policy"', true)}</div>
+        ${policySummary(state.modelPolicy?.allowed)}
+      </div></section>
       ${current ? `<section class="stack compact"><h2>Студия</h2><div class="panel padded stack compact">
         <div class="row"><h3>${safe(current.name)}</h3><div class="actions">${button('Изменить', 'data-open="edit-studio"', true)}${button('Удалить студию', 'data-open="delete-studio"', true)}</div></div>
         ${current.brief ? plain(current.brief) : ''}<dl class="studio-meta"><dt>Рабочая папка</dt><dd>${safe(current.root || 'Не выбрана')}</dd><dt>Язык отчётов</dt><dd>${safe(current.language || 'Не выбран')}</dd>
@@ -360,18 +377,17 @@ function settings() {
         <div class="row allowed-row"><div><h3>Расписание</h3><p class="muted">${safe(scheduleLabel(current.schedule))}</p></div>
           ${button('Настроить расписание', 'data-open="schedule"', true)}</div>
       </div></section>
-      <details class="panel padded advanced" id="advanced"${advancedOpen ? ' open' : ''}><summary>Расширенные настройки</summary><div class="stack">
-      <section class="stack compact"><h2>Модели</h2><div class="inline-result stack compact">
+      <section class="stack compact"><h2>Модели студии</h2><div class="panel padded stack compact">
         <div class="row"><div><h3>Директор</h3><p class="muted">${safe(configText(current.director) || 'Модель и усилие по умолчанию')}</p></div>${button('Настроить директора', 'data-open="director"', true)}</div>
-        <div class="inline-result stack compact"><div class="row"><h3>Разрешённые модели</h3>${button('Добавить модель', 'data-open="allow-model"', true)}</div>
-          ${current.allowed?.length ? current.allowed.map((entry, index) => `<div class="row allowed-row"><span>${safe([runtimeName(entry.runtime), entry.model, entry.efforts?.join(', ')].filter(Boolean).join(' · '))}</span>
-            <div class="actions">${actionFor('Изменить', 'allow', index)}${actionFor('Убрать', 'remove-allow', index)}</div></div>`).join('')
-            : '<p class="muted">Список пуст. Добавьте модели для ролей с автоматическим выбором.</p>'}
-        </div>
+        <div class="inline-result stack compact"><div class="row allowed-row"><div><h3>Разрешённые модели</h3>
+          <p class="muted">${studioPolicyMode(current) === 'studio' ? 'Свой список студии' : 'Список приложения'}</p></div>
+          ${button('Настроить список', 'data-open="studio-model-policy"', true)}</div>
+          ${policySummary(studioAllowed(current))}</div>
       </div></section>
+      <details class="panel padded advanced" id="advanced"${advancedOpen ? ' open' : ''}><summary>Расширенные настройки</summary><div class="stack">
       <section class="stack compact"><div class="row"><h2>Роли</h2>${button('Добавить агента', 'data-open="agent"')}</div>
         <div class="panel work-list">${current.agents?.length ? current.agents.map(agent => `<div class="list-row static-row"><span><strong>${safe(nameFor(agent))}</strong>
-          <small>${safe([roleNames[agent.role] || agent.role, modeNames[agent.mode], agent.mode === 'fixed' ? configText(agent) : ''].filter(Boolean).join(' · '))}</small>
+          <small>${safe([secondaryTitle(agent), modeNames[agent.mode], agent.mode === 'fixed' ? configText(agent) : ''].filter(Boolean).join(' · '))}</small>
           ${agent.description ? `<small>${safe(agent.description)}</small>` : ''}</span>
           ${actionFor('Настроить', 'edit-agent', agent.id)}</div>`).join('')
           : '<p class="padded muted">Роли появятся после согласования плана. Здесь можно добавить агента вручную.</p>'}</div></section></div></details>` : ''}
@@ -691,8 +707,9 @@ function planBody(plan) {
     ${plan.goal ? `<p>${safe(plan.goal)}</p>` : ''}
     ${entity('Эпик', plan.epic)}${entity('Первая история', plan.story)}
     ${agents.length ? `<section class="stack compact"><h3>Команда</h3><ul class="plan-list">${agents.map(agent =>
-      `<li><strong>${safe(nameFor(agent))}</strong>${agent.name ? `<span class="muted"> · ${safe(roleNames[agent.role] ?? agent.role)}</span>` : ''}
-        <div>${safe(agent.description || roleDetails[agent.role] || '')}</div></li>`).join('')}</ul></section>` : ''}
+      `<li><strong>${safe(nameFor(agent))}</strong>${agent.name && agent.name !== titleFor(agent) ? `<span class="muted"> · ${safe(titleFor(agent))}</span>` : ''}
+        <div>${safe(agent.description || roleDetails[agent.role] || '')}</div>
+        ${planAgentModelSummary(agent, plan.kind === 'initial')}</li>`).join('')}</ul></section>` : ''}
     ${plan.tasks?.length ? `<section class="stack compact"><h3>Задачи</h3><ol class="plan-list">${plan.tasks.map(task => `<li>
       <strong>${safe(task.title)}</strong>
       ${task.agentKey ? `<p class="muted">Исполнитель — ${safe(nameFor(agentByKey(task.agentKey)))}</p>` : ''}
@@ -706,6 +723,13 @@ function planBody(plan) {
     ${plan.feedback ? `<section class="inline-result"><h3>Комментарий владельца</h3>${plain(plan.feedback)}</section>` : ''}`;
 }
 
+function planAgentModelSummary(agent, showMode = true) {
+  const mode = agent.mode ?? 'dynamic';
+  const summary = config => configText({ ...config, effort: config.effort || 'усилие по умолчанию' });
+  return (showMode ? `<p class="muted">${safe(modeNames[mode])}${mode === 'fixed' ? ` · ${safe(summary(agent))}` : ''}</p>` : '')
+    + (agent.recommendation ? `<p class="muted">Предложение директора на первый спринт: ${safe(summary(agent.recommendation))}</p>` : '');
+}
+
 function openPlan(plan, revise = false) {
   const pending = plan.status === 'pending';
   dialogTo(plan.title || (plan.kind === 'initial' ? 'План инициализации' : 'План спринта'),
@@ -715,7 +739,94 @@ function openPlan(plan, revise = false) {
     revise && pending ? 'Отправить на доработку' : undefined, revise && pending ? ({ feedback }) =>
       bridge.request('decidePlan', { planId: plan.id, decision: 'revise', feedback }) : undefined, { adjustable: true });
   if (pending && !revise) $('#dialog-actions').insertAdjacentHTML('beforeend',
+    (plan.kind === 'initial' && plan.agents?.length ? actionFor('Изменить состав', 'edit-plan-team', plan.id) : '') +
     actionFor('Вернуть на доработку', 'revise-plan', plan.id) + actionFor('Подтвердить и запустить', 'approve-plan', plan.id, false));
+}
+
+function teamEffortOptions(choice, selected) {
+  return (choice?.efforts ?? []).map(value => option(value, value || 'По умолчанию', selected)).join('');
+}
+
+function updateTeamModel(row, { chooseEffort = false } = {}) {
+  const mode = row.querySelector('[data-plan-mode]').value;
+  const choices = fixedModelChoices(studioAllowed(studio()));
+  const model = row.querySelector('[data-plan-model]');
+  const effort = row.querySelector('[data-plan-effort]');
+  const choice = choices.find(item => modelKey(item) === model.value);
+  if (chooseEffort) {
+    const suggested = model.value === row.dataset.recommendedModel ? row.dataset.recommendedEffort : undefined;
+    effort.innerHTML = teamEffortOptions(choice, suggested);
+  }
+  row.querySelector('[data-plan-fixed]').hidden = mode !== 'fixed';
+  row.querySelector('[data-plan-dynamic]').hidden = mode !== 'dynamic';
+}
+
+function planTeamEditor(plan) {
+  if (plan.kind !== 'initial' || plan.status !== 'pending' || !plan.agents?.length) return;
+  const choices = fixedModelChoices(studioAllowed(studio()));
+  const body = plan.agents.map((agent, index) => {
+    const key = agent.key ?? agent.id;
+    const mode = agent.mode ?? 'dynamic';
+    const recommendation = agent.recommendation;
+    const requested = mode === 'fixed' ? agent : recommendation;
+    const matching = requested && choices.find(item => modelKey(item) === modelKey(requested));
+    const valid = matching?.efforts.includes(requested?.effort ?? '');
+    const model = valid ? modelKey(matching) : '';
+    return `<fieldset class="inline-result stack compact policy-row" data-plan-agent="${safe(key)}"
+      data-recommended-model="${safe(recommendation ? modelKey(recommendation) : '')}"
+      data-recommended-effort="${safe(recommendation?.effort)}">
+      <legend>${safe(nameFor(agent))}</legend>
+      ${agent.description ? `<p>${safe(agent.description)}</p>` : ''}
+      ${planAgentModelSummary(agent, false)}
+      <div class="policy-controls">
+        ${input('Название роли', `plan-title-${index}`, agent.roleTitle, `data-plan-role-title maxlength="120" placeholder="${safe(roleNames[agent.role] ?? '')}"`)}
+        ${input('Имя (необязательно)', `plan-name-${index}`, agent.name, 'data-plan-name maxlength="120"')}
+      </div>
+      <label class="field"><span>Выбор модели</span><select name="plan-mode-${index}" data-plan-mode>${Object.entries(modeNames)
+        .map(([id, label]) => option(id, label, mode)).join('')}</select></label>
+      <p class="muted" data-plan-dynamic${mode === 'dynamic' ? '' : ' hidden'}>${choices.length ? 'Для первого спринта действует предложение директора, пока оно в разрешённом списке. Для остальных задач директор выбирает модель и усилие отдельно.'
+        : emptyPolicy}</p>
+      <div class="policy-controls" data-plan-fixed${mode === 'fixed' ? '' : ' hidden'}>
+        <label class="field"><span>Модель</span><select name="plan-model-${index}" data-plan-model>
+          ${option('', choices.length ? 'Выберите модель' : 'Список моделей пуст', model)}
+          ${choices.map(item => option(modelKey(item), `${runtimeName(item.runtime)} · ${item.model}`, model)).join('')}</select></label>
+        <label class="field"><span>Усилие</span><select name="plan-effort-${index}" data-plan-effort>${teamEffortOptions(valid ? matching : undefined,
+          requested?.effort ?? '')}</select></label>
+        ${mode === 'fixed' && !valid ? '<p class="muted">Ранее выбранное сочетание больше не разрешено. Выберите другое или измените режим.</p>' : ''}
+      </div>
+    </fieldset>`;
+  }).join('');
+  dialogTo('Состав команды', `<div class="policy-team"><p>Изменения сохраняются в плане. Команда начнёт работу после его утверждения.</p>${body}</div>`,
+    'Сохранить состав', async () => {
+      const currentChoices = fixedModelChoices(studioAllowed(studio()));
+      const agents = [...form.querySelectorAll('[data-plan-agent]')].flatMap((row, index) => {
+        const current = plan.agents[index];
+        const value = selector => row.querySelector(selector).value.trim();
+        const key = current.key ?? current.id;
+        const mode = value('[data-plan-mode]');
+        const edits = {};
+        const set = (field, value, previous = '') => { if (value !== (current[field] ?? previous)) edits[field] = value; };
+        set('mode', mode, 'dynamic');
+        set('roleTitle', value('[data-plan-role-title]'));
+        set('name', value('[data-plan-name]'));
+        if (mode === 'fixed') {
+          const choice = currentChoices.find(item => modelKey(item) === value('[data-plan-model]'));
+          const effort = value('[data-plan-effort]');
+          if (!choice || !choice.efforts.includes(effort)) {
+            row.querySelector('[data-plan-model]').focus();
+            throw new Error('Для фиксированного режима выберите разрешённую модель и усилие.');
+          }
+          set('runtime', choice.runtime);
+          set('model', choice.model);
+          set('effort', effort);
+        }
+        return Object.keys(edits).length ? [{ key, ...edits }] : [];
+      });
+      const updated = agents.length ? await bridge.request('updatePlanAgents', { planId: plan.id, agents }) : planById(String(plan.id));
+      openPlan(updated ?? plan);
+      return false;
+    }, { adjustable: true });
+  $('#dialog-actions [data-close]').outerHTML = actionFor('Назад к плану', 'cancel-plan-team', plan.id);
 }
 
 async function approvePlan(raw) {
@@ -762,36 +873,148 @@ function directorEditor() {
     values => bridge.request('updateStudio', { studioId: current.id, director: modelConfig(values) }));
 }
 
-function allowEditor(raw) {
-  const current = studio();
-  const entries = current.allowed ?? [];
-  const index = raw == null ? entries.length : Number(raw);
-  const entry = entries[index];
-  dialogTo(entry ? 'Разрешённая модель' : 'Добавить разрешённую модель', runtimeFields(entry,
-    input('Разрешённые усилия через запятую', 'efforts', entry?.efforts?.join(', '), 'placeholder="low, medium, high"')),
-  'Сохранить модель', ({ runtime, model, efforts }) => {
-    if (!model) throw new Error('Укажите модель.');
-    const allowed = [...entries];
-    allowed[index] = { runtime, model, efforts: [...new Set(efforts.split(',').map(value => value.trim()).filter(Boolean))] };
-    return bridge.request('updateStudio', { studioId: current.id, allowed });
-  });
+const studioPolicyMode = current => current.allowedMode ?? (current.allowed?.length ? 'studio' : 'app');
+const studioAllowed = current => current.effectiveAllowed ??
+  (studioPolicyMode(current) === 'studio' ? current.allowed : state.modelPolicy?.allowed) ?? [];
+const emptyPolicy = 'Список пуст. При автоматическом выборе роли используют модель и усилие директора.';
+
+function policySummary(entries) {
+  return entries?.length ? `<ul class="policy-list">${entries.map(entry => `<li>${safe([runtimeName(entry.runtime), entry.model,
+    entry.efforts?.join(', ') || 'усилие по умолчанию'].filter(Boolean).join(' · '))}</li>`).join('')}</ul>`
+    : `<p class="muted">${emptyPolicy}</p>`;
+}
+
+function policyRow(entry = { runtime: 'codex', model: '', efforts: [] }) {
+  const id = ++policyRowId;
+  return `<fieldset class="inline-result stack compact policy-row" data-policy-row>
+    <legend>Разрешённая модель</legend>
+    <div class="policy-controls">${select('Подключение', `policy-runtime-${id}`,
+      Object.entries(runtimeNames).map(([key, label]) => option(key, label, entry.runtime)).join(''))}
+      ${input('Модель', `policy-model-${id}`, entry.model, `data-policy-model list="policy-catalog-${id}" autocomplete="off"`)}
+      ${datalist(`policy-catalog-${id}`, providerState[entry.runtime]?.models ?? [])}</div>
+    <div class="stack compact"><strong>Разрешённые усилия</strong>
+      <div class="policy-efforts" data-policy-efforts>${policyEffortOptions(entry.runtime, entry.model, entry.efforts)}</div>
+      <p class="muted">Если ничего не выбрать, используется усилие по умолчанию.</p></div>
+    <div class="actions">${button('Загрузить подсказки моделей', 'data-policy-inspect', true)}
+      ${button('Убрать модель', 'data-policy-remove', true)}</div>
+    <p class="muted" data-policy-provider role="status">${safe(policyProviderLabel(entry.runtime))}</p>
+  </fieldset>`;
+}
+
+function policyEffortOptions(runtime, model, selected = [], preserve = true) {
+  const supported = catalogEfforts(runtime, model, providerState[runtime]);
+  return [...new Set([...supported, ...(preserve ? selected : [])])].map(effort =>
+    `<label class="checkbox-field"><input data-policy-effort type="checkbox" value="${safe(effort)}"${selected.includes(effort) ? ' checked' : ''}> <span>${safe(effort)}</span></label>`).join('');
+}
+
+function policyProviderLabel(runtime) {
+  const info = providerState[runtime];
+  if (inspecting.has(runtime)) return 'Загружаем каталог…';
+  if (info?.models?.length) return 'Выберите модель из подсказок поля или введите идентификатор.';
+  return info ? info.detail || 'Каталог недоступен. Можно ввести идентификатор модели.'
+    : 'Можно загрузить подсказки подключения или ввести идентификатор модели.';
+}
+
+function policyRowValues(row) {
+  return {
+    runtime: row.querySelector('select').value,
+    model: row.querySelector('[data-policy-model]').value.trim(),
+    efforts: [...row.querySelectorAll('[data-policy-effort]:checked')].map(item => item.value),
+  };
+}
+
+function updatePolicyRow(row, { preserve = true, updateCatalog = true } = {}) {
+  const { runtime, model, efforts } = policyRowValues(row);
+  if (updateCatalog) row.querySelector('datalist').innerHTML = (providerState[runtime]?.models ?? [])
+    .map(item => option(item.id, item.name)).join('');
+  row.querySelector('[data-policy-efforts]').innerHTML = policyEffortOptions(runtime, model, efforts, preserve);
+  row.querySelector('[data-policy-provider]').textContent = policyProviderLabel(runtime);
+}
+
+function syncPolicyEditor() {
+  const editor = $('[data-policy-editor]');
+  if (!editor) return;
+  const own = !form.elements.allowedMode || form.elements.allowedMode.value === 'studio';
+  const hasRows = !!editor.querySelector('[data-policy-row]');
+  editor.querySelector('[data-policy-own]').hidden = !own;
+  const inherited = editor.querySelector('[data-policy-inherited]');
+  if (inherited) inherited.hidden = own;
+  editor.querySelector('[data-policy-empty-hint]').hidden = hasRows;
+  const emptyButton = $('[data-policy-empty]');
+  if (emptyButton) {
+    emptyButton.hidden = hasRows;
+    $('#dialog-actions button[type="submit"]:not([data-policy-empty])').hidden = !hasRows;
+  }
+}
+
+function policyEditor(current, first = false) {
+  const entries = current ? current.allowed : state.modelPolicy?.allowed;
+  const mode = current && studioPolicyMode(current);
+  dialogTo(first ? 'Разрешённые модели для студий' : current ? 'Разрешённые модели студии' : 'Разрешённые модели приложения',
+    `<div class="policy-editor" data-policy-editor="${current ? 'studio' : 'app'}">
+      <p>${current ? 'Выберите, какой список директор будет использовать для ролей с автоматическим выбором.'
+        : 'Задайте модели и усилия, из которых директор может выбирать для ролей в студиях.'}</p>
+      ${current ? select('Список разрешённых моделей', 'allowedMode',
+        option('app', 'Использовать список приложения', mode) + option('studio', 'Использовать свой список студии', mode)) +
+        `<div data-policy-inherited>${policySummary(state.modelPolicy?.allowed)}</div>` : ''}
+      <div class="policy-editor" data-policy-own>
+        <p class="muted" data-policy-empty-hint>${emptyPolicy}</p>
+        <div class="policy-editor" data-policy-rows>${(entries ?? []).map(policyRow).join('')}</div>
+        <div>${button('Добавить модель', 'data-policy-add', true)}</div>
+      </div>
+    </div>`, 'Сохранить список', ({ allowedMode }) => {
+      const rows = () => readPolicyRows([...form.querySelectorAll('[data-policy-row]')].map(policyRowValues));
+      if (current) return bridge.request('updateStudio', { studioId: current.id, allowedMode,
+        ...(allowedMode === 'studio' ? { allowed: rows() } : {}) });
+      return bridge.request('updateModelPolicy', { allowed: rows() });
+    }, { adjustable: true });
+  if (first) $('#dialog-actions').insertAdjacentHTML('beforeend',
+    '<button type="submit" class="action" data-policy-empty>Оставить список пустым</button>');
+  syncPolicyEditor();
+}
+
+function maybePromptModelPolicy() {
+  if (!ready || dialog.open || dialogBusy || policyPromptShown || state.modelPolicy?.configured !== false) return;
+  policyPromptShown = true;
+  policyEditor(undefined, true);
 }
 
 function agentEditor(agent) {
   const current = studio();
-  const mode = agent?.mode ?? 'inherit';
+  const mode = agent?.mode ?? 'dynamic';
   const role = agent?.role === 'director' ? 'other' : agent?.role ?? 'other';
+  const restricted = state.modelPolicy?.configured === true || studioPolicyMode(current) === 'studio';
+  const choices = restricted ? fixedModelChoices(studioAllowed(current)) : [];
+  const currentEffort = agent?.effort ?? '';
+  const currentChoice = agent && choices.find(item => item.model === agent.model &&
+    item.runtime === (agent.runtime || current.director.runtime) && item.efforts.includes(currentEffort));
+  const fixedOptions = restricted
+    ? select('Модель', 'agent-model', option('', choices.length ? 'Выберите из разрешённых' : 'Список моделей пуст') +
+      choices.map(item => option(modelKey(item), `${runtimeName(item.runtime)} · ${item.model}`, currentChoice && modelKey(currentChoice))).join('')) +
+      select('Усилие', 'agent-effort', teamEffortOptions(currentChoice, currentEffort)) +
+      (!choices.length ? '<p class="muted">Добавьте модель в список студии или выберите режим «Выбирает директор».</p>' : '')
+    : runtimeFields(agent, effortField(agent));
   const roleChoices = Object.entries(roleNames).filter(([id]) => id !== 'director')
     .map(([id, name]) => option(id, name, role)).join('');
   dialogTo(agent ? 'Настроить агента' : 'Новый агент',
-    input('Имя (необязательно)', 'name', agent?.name, 'maxlength="120"') + select('Роль', 'role', roleChoices) +
+    input('Имя (необязательно)', 'name', agent?.name, 'maxlength="120"') +
+    input('Название роли (необязательно)', 'roleTitle', agent?.roleTitle, 'maxlength="120"') + select('Категория роли', 'role', roleChoices) +
     `<p id="role-guide" class="muted">${safe(roleDetails[role])}</p>` + textarea('Назначение роли', 'description', agent?.description) +
     select('Выбор модели', 'mode', Object.entries(modeNames).map(([id, name]) => option(id, name, mode)).join('')) +
-    `<div class="form-body" id="fixed-options"${mode === 'fixed' ? '' : ' hidden'}>${runtimeFields(agent, effortField(agent))}</div>
-      <p class="muted" id="dynamic-options"${mode === 'dynamic' ? '' : ' hidden'}>Директор выбирает модель и усилие для задачи из разрешённого списка студии.</p>`,
-    'Сохранить агента', ({ name, role, mode, description, ...config }) => {
-      if (mode === 'fixed' && !config.model) throw new Error('Укажите фиксированную модель.');
-      const payload = { studioId: current.id, name, role, mode, description, ...(mode === 'fixed' ? modelConfig(config) : {}) };
+    `<div class="form-body" id="fixed-options"${mode === 'fixed' ? '' : ' hidden'}>${fixedOptions}</div>
+      <p class="muted" id="dynamic-options"${mode === 'dynamic' ? '' : ' hidden'}>Директор выбирает модель и усилие для задачи из разрешённого списка студии. Если список пуст, действуют настройки директора.</p>`,
+    'Сохранить агента', ({ name, roleTitle, role, mode, description, ...config }) => {
+      let fixed = {};
+      if (mode === 'fixed' && restricted) {
+        const choice = fixedModelChoices(studioAllowed(studio())).find(item => modelKey(item) === config['agent-model']);
+        const effort = config['agent-effort'] ?? '';
+        if (!choice?.efforts.includes(effort)) throw new Error('Выберите разрешённую модель и усилие для агента.');
+        fixed = { runtime: choice.runtime, model: choice.model, effort };
+      } else if (mode === 'fixed') {
+        if (!config.model) throw new Error('Укажите фиксированную модель.');
+        fixed = modelConfig(config);
+      }
+      const payload = { studioId: current.id, name, roleTitle, role, mode, description, ...fixed };
       return bridge.request(agent ? 'updateAgent' : 'addAgent', agent ? { ...payload, agentId: agent.id } : payload);
     });
 }
@@ -827,6 +1050,9 @@ async function inspect(runtime) {
   notice();
   render();
   updateWizardProvider();
+  const policyRows = () => [...form.querySelectorAll('[data-policy-row]')]
+    .filter(row => policyRowValues(row).runtime === runtime);
+  policyRows().forEach(row => { row.querySelector('[data-policy-provider]').textContent = policyProviderLabel(runtime); });
   try {
     providerState[runtime] = await bridge.request('inspect', { runtime });
   } catch (error) {
@@ -835,6 +1061,7 @@ async function inspect(runtime) {
     inspecting.delete(runtime);
     render();
     updateWizardProvider();
+    policyRows().forEach(row => updatePolicyRow(row));
   }
 }
 
@@ -864,16 +1091,6 @@ async function pickFolder(target) {
     dialogError(error.message || 'Не удалось выбрать папку.');
   } finally {
     setDialogBusy(false);
-  }
-}
-
-async function removeModel(index) {
-  const current = studio();
-  try {
-    await bridge.request('updateStudio', { studioId: current.id, allowed: current.allowed.filter((_, i) => i !== index) });
-    await refresh();
-  } catch (error) {
-    notice(error.message || 'Не удалось сохранить список моделей.', true);
   }
 }
 
@@ -963,7 +1180,8 @@ const commands = {
   schedule: scheduleEditor,
   task: () => taskEditor(),
   director: directorEditor,
-  'allow-model': () => allowEditor(),
+  'app-model-policy': () => policyEditor(),
+  'studio-model-policy': () => policyEditor(studio()),
   agent: () => agentEditor(),
   import: importPreview,
   'import-bundle': () => importEditor(),
@@ -977,7 +1195,18 @@ document.addEventListener('click', event => {
   else if (!bridge || dialogBusy) return;
   else if (data.reload !== undefined) void refresh();
   else if (data.folder !== undefined) void pickFolder(form.elements[data.folder || 'root']);
-  else if (data.wizardNext !== undefined) moveWizard(1);
+  else if (data.policyAdd !== undefined) {
+    const rows = $('[data-policy-rows]');
+    rows.insertAdjacentHTML('beforeend', policyRow());
+    syncPolicyEditor();
+    rows.lastElementChild.querySelector('[data-policy-model]').focus();
+  } else if (data.policyRemove !== undefined) {
+    target.closest('[data-policy-row]').remove();
+    syncPolicyEditor();
+    $('[data-policy-add]').focus();
+  } else if (data.policyInspect !== undefined) {
+    void inspect(policyRowValues(target.closest('[data-policy-row]')).runtime);
+  } else if (data.wizardNext !== undefined) moveWizard(1);
   else if (data.wizardBack !== undefined) moveWizard(-1);
   else if (data.view) route(data.view);
   else if (data.workPane) {
@@ -991,8 +1220,11 @@ document.addEventListener('click', event => {
   } else if (data.open) commands[data.open]?.();
   else if (data.initialize !== undefined) void workCommand('initializeStudio', { studioId: studio().id });
   else if (data.runAction) void workCommand('setStudioRunning', { studioId: studio().id, action: data.runAction });
-  else if (data.plan !== undefined || data.revisePlan !== undefined) {
-    const plan = planById(data.plan ?? data.revisePlan);
+  else if (data.editPlanTeam !== undefined) {
+    const plan = planById(data.editPlanTeam);
+    if (plan) planTeamEditor(plan);
+  } else if (data.plan !== undefined || data.revisePlan !== undefined || data.cancelPlanTeam !== undefined) {
+    const plan = planById(data.plan ?? data.revisePlan ?? data.cancelPlanTeam);
     if (plan) openPlan(plan, data.revisePlan !== undefined);
   } else if (data.approvePlan !== undefined) void approvePlan(data.approvePlan);
   else if (data.reviseResult !== undefined) {
@@ -1029,8 +1261,6 @@ document.addEventListener('click', event => {
   } else if (data.newTask !== undefined) taskEditor(data.newTask);
   else if (data.inspect) void inspect(data.inspect);
   else if (data.editAgent !== undefined) agentEditor(studio().agents.find(agent => same(agent.id, data.editAgent)));
-  else if (data.allow !== undefined) allowEditor(data.allow);
-  else if (data.removeAllow !== undefined) void removeModel(Number(data.removeAllow));
   else if (data.reviewWorktree !== undefined) {
     const task = tasks().find(entry => same(entry.id, data.reviewWorktree));
     if (task?.legacyWorktreeReview) confirmWorktreeReview(task);
@@ -1063,10 +1293,22 @@ form.addEventListener('submit', async event => {
     dialogError(error.message || 'Не удалось сохранить изменения.');
   } finally {
     setDialogBusy(false);
+    maybePromptModelPolicy();
   }
 });
 
 form.addEventListener('change', ({ target }) => {
+  if (target.name === 'allowedMode') syncPolicyEditor();
+  if (target.name.startsWith('policy-runtime-')) {
+    const row = target.closest('[data-policy-row]');
+    row.querySelector('[data-policy-model]').value = '';
+    row.querySelectorAll('[data-policy-effort]:checked').forEach(option => { option.checked = false; });
+    updatePolicyRow(row, { preserve: false });
+  }
+  const teamRow = target.closest('[data-plan-agent]');
+  if (teamRow && (target.matches('[data-plan-mode]') || target.matches('[data-plan-model]'))) {
+    updateTeamModel(teamRow, { chooseEffort: target.matches('[data-plan-model]') });
+  }
   if (target.name === 'role') $('#role-guide').textContent = roleDetails[target.value] || '';
   if (target.name === 'runtime' && $('#wizard-provider')) {
     updateWizardProvider();
@@ -1077,14 +1319,22 @@ form.addEventListener('change', ({ target }) => {
     $('#fixed-options').hidden = target.value !== 'fixed';
     $('#dynamic-options').hidden = target.value !== 'dynamic';
   }
+  if (target.name === 'agent-model') {
+    const choice = fixedModelChoices(studioAllowed(studio())).find(item => modelKey(item) === target.value);
+    form.elements['agent-effort'].innerHTML = teamEffortOptions(choice);
+  }
   if ((target.name === 'runtime' || target.name === 'model') && $('#model-catalog')) {
     const models = providerState[form.elements.runtime.value]?.models ?? [];
-    const model = models.find(item => item.id === form.elements.model.value);
     $('#model-catalog').innerHTML = models.map(item => option(item.id, item.name)).join('');
     if ($('#effort-catalog')) {
-      $('#effort-catalog').innerHTML = (model?.efforts?.length ? model.efforts : effortPresets).map(value => option(value)).join('');
+      $('#effort-catalog').innerHTML = catalogEfforts(form.elements.runtime.value, form.elements.model.value,
+        providerState[form.elements.runtime.value]).map(value => option(value)).join('');
     }
   }
+});
+
+form.addEventListener('input', ({ target }) => {
+  if (target.matches('[data-policy-model]')) updatePolicyRow(target.closest('[data-policy-row]'), { preserve: false, updateCatalog: false });
 });
 
 content.addEventListener('change', ({ target }) => {
@@ -1103,7 +1353,8 @@ dialog.addEventListener('close', () => {
   taskDialog = undefined;
   if (opener?.isConnected) opener.focus();
   else content.focus();
-  if (notificationTarget) void goToNotification();
+  maybePromptModelPolicy();
+  if (notificationTarget && !dialog.open) void goToNotification();
 });
 
 $('#studio-select').addEventListener('change', ({ target }) => {

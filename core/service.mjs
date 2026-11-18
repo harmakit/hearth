@@ -3,7 +3,7 @@ import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createWorkflow } from './workflow.mjs';
 import { normalizeImport } from './import.mjs';
-import { parseResponse } from './protocol.mjs';
+import { allowedTuples, completeInitialRoster, parseResponse, roleTitle, tupleKey } from './protocol.mjs';
 import { normalizeSchedule, withinSchedule } from './schedule.mjs';
 
 const runtimes = ['codex', 'claude'];
@@ -14,7 +14,11 @@ const restartable = ['queued', 'failed', 'interrupted'];
 const now = () => new Date().toISOString();
 const domains = ['plans', 'epics', 'stories', 'sprints', 'meetings', 'attempts'];
 const stages = { queued: 'ready', scheduled: 'ready', running: 'in_progress', completed: 'done', waiting: 'blocked', failed: 'blocked', interrupted: 'blocked' };
-const visibleStudio = (studio) => ({ approveSprints: true, lifecycle: 'draft', projectLanguage: '', ...studio, schedule: normalizeSchedule(studio.schedule) });
+const visibleStudio = (studio) => ({
+  approveSprints: true, lifecycle: 'draft', projectLanguage: '', ...studio,
+  allowed: studio.allowed ?? [], allowedMode: studio.allowedMode ?? (studio.allowed?.length ? 'studio' : 'app'),
+  schedule: normalizeSchedule(studio.schedule),
+});
 
 function string(value, label, { required = false, fallback = '' } = {}) {
   if (value === undefined) value = fallback;
@@ -50,6 +54,8 @@ function studioSettings(input, current = { brief: '', director: defaultDirector,
   if (!isAbsolute(root)) throw new Error('Укажите абсолютный путь к папке проекта.');
   const approveSprints = input.approveSprints ?? current.approveSprints ?? true;
   if (typeof approveSprints !== 'boolean') throw new Error('Некорректная настройка согласования спринтов.');
+  const allowed = input.allowed === undefined ? current.allowed : allowlist(input.allowed);
+  const allowedMode = option(input.allowedMode, input.allowed?.length ? 'studio' : current.allowedMode ?? 'app', ['app', 'studio'], 'список моделей');
   return {
     name: string(input.name, 'название студии', { required: true, fallback: current.name }),
     brief: string(input.brief, 'бриф', { fallback: current.brief }),
@@ -57,16 +63,18 @@ function studioSettings(input, current = { brief: '', director: defaultDirector,
     language: string(input.language, 'язык', { required: true, fallback: current.language ?? 'Русский' }),
     projectLanguage: string(input.projectLanguage, 'язык материалов проекта', { fallback: current.projectLanguage }),
     director: controls(input.director ?? {}, current.director),
-    allowed: input.allowed === undefined ? current.allowed : allowlist(input.allowed),
+    allowed,
+    allowedMode,
     agents: current.agents,
     approveSprints,
     schedule: normalizeSchedule(input.schedule === undefined ? current.schedule : input.schedule),
   };
 }
 
-function agentSettings(input, current = { role: 'other', mode: 'inherit', runtime: '', model: '', effort: '' }) {
+function agentSettings(input, current = { role: 'other', mode: 'dynamic', runtime: '', model: '', effort: '' }) {
   return {
     name: string(input.name, 'имя агента', { fallback: current.name }),
+    roleTitle: roleTitle(input.roleTitle === undefined ? current.roleTitle : input.roleTitle),
     description: string(input.description, 'обязанности', { fallback: current.description }),
     role: option(input.role, current.role, roles, 'роль'),
     mode: option(input.mode, current.mode, modes, 'политика модели'),
@@ -74,30 +82,25 @@ function agentSettings(input, current = { role: 'other', mode: 'inherit', runtim
   };
 }
 
-async function taskControls(studio, agent, task, { run, signal, purpose }) {
+function fixedControls(studio, agent, policy) {
+  const fixed = { runtime: agent.runtime || studio.director.runtime, model: agent.model ?? '', effort: agent.effort ?? '' };
+  if (policy.configured && !allowedTuples(policy.allowed).has(tupleKey(fixed))) {
+    throw new Error('Модель и усилие агента отсутствуют в разрешённом списке студии.');
+  }
+  return fixed;
+}
+
+async function selectTaskControls(studio, agent, task, policy, { run, signal, purpose }) {
   if (!agent || agent.mode === 'inherit') return studio.director;
-  const options = new Map();
-  const tupleKey = ({ runtime, model, effort }) => JSON.stringify([runtime, model, effort]);
-  for (const { runtime, model, efforts } of studio.allowed) {
-    for (const effort of efforts.length ? efforts : ['']) {
-      const tuple = { runtime, model, effort };
-      options.set(tupleKey(tuple), tuple);
-    }
-  }
-  if (agent?.mode === 'fixed') {
-    const fixed = { runtime: agent.runtime || studio.director.runtime, model: agent.model, effort: agent.effort };
-    if (options.size && !options.has(tupleKey(fixed))) {
-      throw new Error('Модель и усилие агента отсутствуют в разрешённом списке студии.');
-    }
-    return fixed;
-  }
+  if (agent.mode === 'fixed') return fixedControls(studio, agent, policy);
+  const options = allowedTuples(policy.allowed);
   if (!options.size) return studio.director;
   if (options.size === 1) return options.values().next().value;
   const { runtime, model, effort } = studio.director;
   const context = {
     brief: studio.brief,
     purpose,
-    agent: { role: agent.role, description: agent.description, preferredEffort: agent.effort },
+    agent: { role: agent.role, roleTitle: agent.roleTitle, name: agent.name, description: agent.description, preferredEffort: agent.effort },
     task: { title: task.title, prompt: task.prompt, criteria: task.criteria },
     allowed: [...options.values()],
   };
@@ -127,7 +130,9 @@ function runPrompt(studio, agent, task, decisions, workflowContext) {
     projectLanguage: studio.projectLanguage || studio.language,
     brief: studio.brief,
     role: agent?.role ?? 'director',
+    roleTitle: agent?.roleTitle,
     agent: agent?.name ?? '',
+    description: agent?.description,
     title: task.title,
     task: task.prompt,
     priorDraft,
@@ -172,6 +177,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
   db.exec(`
     PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS studios (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS app_settings (id TEXT PRIMARY KEY, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS deleted_studios (id TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY, studio_id TEXT NOT NULL REFERENCES studios(id), data TEXT NOT NULL
@@ -192,6 +198,48 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
 
   function assertOpen() {
     if (closed) throw new Error('Hearth Studio завершает работу.');
+  }
+
+  function readModelPolicy() {
+    const row = db.prepare("SELECT data FROM app_settings WHERE id = 'modelPolicy'").get();
+    return row ? JSON.parse(row.data) : { configured: false, allowed: [] };
+  }
+
+  function modelPolicyFor(studio, appPolicy = readModelPolicy()) {
+    return studio.allowedMode === 'studio' ? { configured: true, allowed: studio.allowed } : appPolicy;
+  }
+
+  function updateModelPolicy({ allowed }) {
+    assertOpen();
+    const policy = { configured: true, allowed: allowlist(allowed) };
+    db.prepare("INSERT INTO app_settings VALUES ('modelPolicy', ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(policy));
+    return changed(policy);
+  }
+
+  function taskControls(studio, agent, task, context) {
+    const current = read('studios', studio.id, 'Студия');
+    agent = agent && getAgent(current, agent.id);
+    return selectTaskControls(current, agent, task, modelPolicyFor(current), context);
+  }
+
+  function recommendedTaskControls(studio, agent, recommendation) {
+    if (!agent || !recommendation) return;
+    const current = read('studios', studio.id, 'Студия');
+    if (getAgent(current, agent.id).mode !== 'dynamic') return;
+    return allowedTuples(modelPolicyFor(current).allowed).get(tupleKey(recommendation));
+  }
+
+  function confirmTaskControls(studio, agent, selection) {
+    const latest = read('studios', studio.id, 'Студия');
+    const latestAgent = agent && getAgent(latest, agent.id);
+    if (!latestAgent || latestAgent.mode === 'inherit') return latest.director;
+    const policy = modelPolicyFor(latest);
+    if (latestAgent.mode === 'fixed') return fixedControls(latest, latestAgent, policy);
+    if (!policy.allowed.length) return latest.director;
+    if (!allowedTuples(policy.allowed).has(tupleKey(selection))) {
+      throw new Error('Директор выбрал сочетание вне разрешённого списка студии.');
+    }
+    return selection;
   }
 
   function read(table, id, label) {
@@ -258,15 +306,20 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
   function snapshot() {
     assertOpen();
     const date = clock();
+    const modelPolicy = readModelPolicy();
+    const studios = list('studios').map(visibleStudio);
+    const agentsByStudio = new Map(studios.map(({ id, agents }) => [id, agents]));
     return {
-      studios: list('studios').map((value) => {
-        const record = visibleStudio(value);
+      modelPolicy,
+      studios: studios.map((record) => {
         const { workflowJob, manualPaused, resumeDraft, importedPaused, ...studio } = record;
-        return { ...studio, manualPaused: Boolean(manualPaused), scheduleWaiting: waitingForSchedule(record, date) };
+        return { ...studio, effectiveAllowed: modelPolicyFor(record, modelPolicy).allowed, manualPaused: Boolean(manualPaused), scheduleWaiting: waitingForSchedule(record, date) };
       }),
       tasks: list('tasks').map(visibleTask),
       inbox: [...list('inbox'), ...list('studio_inbox')].sort((left, right) => String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''))),
-      ...Object.fromEntries(domains.map((table) => [table, list(table)])),
+      ...Object.fromEntries(domains.map((table) => [table, table === 'plans'
+        ? list(table).map((plan) => completeInitialRoster(plan, agentsByStudio.get(plan.studioId) ?? []))
+        : list(table)])),
     };
   }
 
@@ -518,8 +571,9 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     try {
       changed(running);
       if (!isCurrent()) return;
-      const { runtime, model, effort } = await taskControls(studio, agent, running, { run, signal: controller.signal, purpose: 'task' });
+      const selected = await taskControls(studio, agent, running, { run, signal: controller.signal, purpose: 'task' });
       if (!isCurrent()) return;
+      const { runtime, model, effort } = confirmTaskControls(studio, agent, selected);
       const result = report(await run({
         runtime,
         model: model || undefined,
@@ -620,7 +674,9 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
 
   const workflow = createWorkflow({
     read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
-    run, writeArtifact, taskControls, runPrompt, report, isClosed: () => closed, active, availableStudio, onAvailable,
+    run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, runPrompt, report, isClosed: () => closed, active, availableStudio, onAvailable,
+    effectiveAllowed: (studio) => modelPolicyFor(studio).allowed,
+    validateFixed: (studio, agent) => fixedControls(studio, agent, { configured: true, allowed: modelPolicyFor(studio).allowed }),
   });
 
   function setStudioRunning({ studioId, action, running }) {
@@ -670,6 +726,6 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
 
   interruptUnfinishedAttempts({ restore: true });
   refreshSchedules();
-  const { initializeStudio, decidePlan } = workflow;
-  return { snapshot, createStudio, updateStudio, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent, createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, setStudioRunning, importStudio, close };
+  const { initializeStudio, decidePlan, updatePlanAgents } = workflow;
+  return { snapshot, updateModelPolicy, createStudio, updateStudio, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent, createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, updatePlanAgents, setStudioRunning, importStudio, close };
 }

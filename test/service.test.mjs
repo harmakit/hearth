@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +35,85 @@ async function until(read, predicate) {
   }
   assert.fail(`State did not converge: ${JSON.stringify(read())}`);
 }
+
+test('stores app policy and an explicit empty studio override while preserving legacy role modes', async (t) => {
+  const dbPath = database(t);
+  const calls = [];
+  const run = async ({ runtime, model, effort }) => {
+    calls.push({ runtime, model, effort });
+    return { text: 'Отчёт' };
+  };
+  const allowed = [{ runtime: 'claude', model: 'worker', efforts: ['high'] }];
+  const oldAllowed = [{ runtime: 'codex', model: 'old-worker', efforts: [] }];
+  const db = new DatabaseSync(dbPath);
+  db.exec('CREATE TABLE studios (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+  const legacy = {
+    id: 'legacy', name: 'Legacy', root: project, director: { runtime: 'codex', model: '', effort: '' }, allowed: oldAllowed,
+    agents: ['fixed', 'dynamic', 'inherit'].map((mode) => ({ id: mode, mode, role: 'editor' })),
+  };
+  db.prepare('INSERT INTO studios VALUES (?, ?)').run(legacy.id, JSON.stringify(legacy));
+  db.close();
+
+  let service = createStudioService({ dbPath, run });
+  t.after(() => service.close());
+  service.updateModelPolicy({ allowed });
+  const parent = studio(service, 'App');
+  const override = service.createStudio({ name: 'Empty override', root: project, allowedMode: 'studio', allowed: [] });
+  const first = service.addAgent({ studioId: parent.id, roleTitle: 'Редактор рукописи' });
+  const second = service.addAgent({ studioId: override.id });
+  const fixed = service.addAgent({ studioId: parent.id, mode: 'fixed', runtime: 'claude', model: 'worker', effort: 'high' });
+  assert.equal(first.mode, 'dynamic');
+  await service.close();
+
+  service = createStudioService({ dbPath, run });
+  const { modelPolicy, studios: [savedLegacy, savedParent, savedOverride] } = service.snapshot();
+  assert.deepEqual(modelPolicy, { configured: true, allowed });
+  assert.deepEqual(savedLegacy.agents, legacy.agents);
+  assert.equal(savedLegacy.allowedMode, 'studio');
+  assert.deepEqual(savedLegacy.effectiveAllowed, oldAllowed);
+  assert.equal(savedParent.allowedMode, 'app');
+  assert.deepEqual(savedParent.effectiveAllowed, allowed);
+  assert.equal(savedParent.agents[0].roleTitle, 'Редактор рукописи');
+  assert.equal(savedOverride.allowedMode, 'studio');
+  assert.deepEqual(savedOverride.effectiveAllowed, []);
+  for (const [team, agent] of [[parent, first], [override, second]]) {
+    service.startTask({ taskId: task(service, team.id, agent.id).id });
+    await until(service.snapshot, ({ tasks }) => tasks.find(({ studioId }) => studioId === team.id)?.status === 'completed');
+  }
+  assert.deepEqual(calls, [{ runtime: 'claude', model: 'worker', effort: 'high' }, { runtime: 'codex', model: undefined, effort: undefined }]);
+  service.updateModelPolicy({ allowed: [] });
+  await service.close();
+  service = createStudioService({ dbPath, run });
+  assert.deepEqual(service.snapshot().modelPolicy, { configured: true, allowed: [] });
+  const blocked = task(service, parent.id, fixed.id);
+  service.startTask({ taskId: blocked.id });
+  await until(service.snapshot, ({ tasks }) => tasks.find(({ id }) => id === blocked.id)?.status === 'failed');
+  assert.equal(calls.length, 2);
+  assert.equal(service.snapshot().studios[1].agents.find(({ id }) => id === fixed.id).model, 'worker');
+});
+
+test('rechecks policy after asynchronous model selection and before dispatch', async (t) => {
+  const choosing = Promise.withResolvers();
+  const selection = Promise.withResolvers();
+  const calls = [];
+  const service = createStudioService({ dbPath: ':memory:', run: async ({ purpose, model }) => {
+    calls.push([purpose, model]);
+    choosing.resolve();
+    return { text: JSON.stringify(await selection.promise) };
+  } });
+  t.after(() => { selection.resolve({}); return service.close(); });
+  const allowed = [{ runtime: 'codex', model: 'old', efforts: ['low'] }, { runtime: 'claude', model: 'new', efforts: ['high'] }];
+  service.updateModelPolicy({ allowed });
+  const { id: studioId } = studio(service);
+  const { id: agentId } = service.addAgent({ studioId });
+  service.startTask({ taskId: task(service, studioId, agentId).id });
+  await choosing.promise;
+  service.updateModelPolicy({ allowed: [allowed[1]] });
+  selection.resolve({ runtime: 'codex', model: 'old', effort: 'low' });
+  const failure = await until(service.snapshot, ({ tasks }) => tasks[0].status === 'failed');
+  assert.match(failure.tasks[0].error, /разрешённого списка/);
+  assert.deepEqual(calls, [['select-model', undefined]]);
+});
 
 test('persists independent studios, role settings and unstarted work', async (t) => {
   const dbPath = database(t);

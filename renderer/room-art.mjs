@@ -7,13 +7,50 @@ const roomPalette = {
 };
 
 const deskPalette = {
-  plan: ['#a74f39', '#edc683'],
-  books: ['#576585', '#e6a559'],
-  paper: ['#76709b', '#f0d69b'],
-  terminal: ['#3b725f', '#85dbab'],
-  easel: ['#a26140', '#b4c8a6'],
-  notebook: ['#826b50', '#e6b783'],
+  plan: '#edc683',
+  books: '#e6a559',
+  paper: '#f0d69b',
+  terminal: '#85dbab',
+  easel: '#b4c8a6',
+  notebook: '#e6b783',
 };
+
+const skins = [
+  ['#f4c399', '#d29375'], ['#e4a77b', '#bd7657'], ['#ce8c61', '#a6654e'],
+  ['#ab6850', '#894a3d'], ['#905740', '#6d3c34'], ['#f1cabc', '#c98c87'],
+];
+const hairs = ['#3b292b', '#673629', '#884a30', '#d59a53', '#76647b', '#c1a992'];
+const clothes = [
+  ['#467c83', '#95d3c8'], ['#935556', '#e7a295'], ['#617851', '#b3d189'],
+  ['#675881', '#bca8df'], ['#4a6390', '#a3bbeb'], ['#9c6938', '#ecc07a'],
+];
+const hairstyles = [
+  [[1, 0, 8, 2], [0, 2, 10, 3], [8, 5, 2, 2]],
+  [[1, 0, 8, 2], [0, 2, 11, 4], [0, 6, 2, 7], [8, 6, 3, 9]],
+  [[-1, 1, 4, 4], [2, 0, 6, 5], [8, 1, 4, 4], [0, 5, 2, 4], [9, 5, 3, 5]],
+  [[1, 1, 8, 5], [5, -2, 5, 4], [8, 5, 2, 4]],
+  [[2, 0, 6, 2], [0, 2, 10, 2], [0, 4, 1, 3]],
+  [[1, 0, 10, 4], [0, 3, 11, 3], [0, 6, 2, 3], [8, 6, 4, 3], [10, 9, 3, 4]],
+  [[3, -1, 6, 4], [1, 0, 8, 4], [0, 3, 10, 3], [0, 6, 2, 3], [8, 6, 2, 2]],
+];
+
+function actorProfile(key) {
+  let seed = 2166136261;
+  for (const letter of key) seed = Math.imul(seed ^ letter.codePointAt(0), 16777619);
+  // Mix again so that consecutive keys vary across the full palette.
+  seed = Math.imul(seed ^ (seed >>> 16), 0x45d9f3b);
+  seed = Math.imul(seed ^ (seed >>> 16), 0x45d9f3b);
+  seed = (seed ^ (seed >>> 16)) >>> 0;
+  return {
+    seed,
+    skin: skins[seed % skins.length],
+    hair: hairs[(seed >>> 4) % hairs.length],
+    hairstyle: hairstyles[(seed >>> 8) % hairstyles.length],
+    clothing: clothes[(seed >>> 12) % clothes.length],
+    fit: (seed >>> 16) % 3,
+    accessory: (seed >>> 19) % 5,
+  };
+}
 
 function paint(canvas, scene) {
   const ctx = canvas.getContext('2d');
@@ -93,65 +130,189 @@ function paintRoom(canvas) {
   });
 }
 
-function paintDesk(canvas, working = false) {
+function portrait(rect, actor) {
+  const { skin: [skin, shadow], hair, hairstyle, clothing: [coat, trim], fit, accessory } = actor;
+  rect(20 - fit, 19, 11 + fit * 2, 7, coat);
+  rect(18 - fit, 22, 15 + fit * 2, 4, coat);
+  rect(23, 17, 4, 3, shadow);
+  rect(24, 20, 2, 1, trim);
+  if (fit === 1) rect(24, 21, 2, 3, trim);
+  if (fit === 2) rect(27, 22, 4, 2, trim);
+
+  rect(21, 8, 9, 10, shadow);
+  rect(20, 10, 9, 7, skin);
+  rect(21, 9, 7, 8, skin);
+  for (const [x, y, width, height] of hairstyle) rect(20 + x, 6 + y, width, height, hair);
+  rect(21, 12, 1, 1, '#3a2930');
+  rect(25, 12, 1, 1, '#3a2930');
+  rect(22, 15, 2, 1, shadow);
+
+  if (accessory === 1) {
+    rect(20, 11, 8, 1, '#3a2930');
+    rect(20, 13, 3, 1, '#3a2930');
+    rect(24, 13, 3, 1, '#3a2930');
+    rect(27, 12, 2, 1, '#3a2930');
+  } else if (accessory === 2) {
+    rect(28, 14, 2, 2, '#f0c671');
+  } else if (accessory === 3) {
+    rect(21, 16, 6, 2, hair);
+    rect(22, 14, 4, 1, hair);
+  } else if (accessory === 4) {
+    rect(20, 8, 10, 2, trim);
+    rect(27, 7, 2, 1, trim);
+  }
+}
+
+function deskProps(rect, kind, frame, accent) {
+  if (kind === 'terminal') {
+    rect(4, 13, 12, 11, '#26342e');
+    rect(6, 15, 8, 7, '#415d50');
+    rect(7, 16, 5, 1, accent);
+    rect(7, 18, 3 + frame % 3, 1, accent);
+    rect(8 + frame, 20, 1, 1, '#d9ebc2');
+    rect(9, 24, 3, 2, '#4a554e');
+    rect(13, 26, 10, 2, '#403839');
+    rect(14, 26, 8, 1, '#b39b88');
+  } else if (kind === 'easel') {
+    rect(5, 12, 11, 13, '#594034');
+    rect(6, 12, 9, 10, '#edd4b0');
+    rect(7, 17, 4, 3, accent);
+    rect(12, 14, 2, 3 + frame, '#b96e50');
+    rect(8, 24, 6, 2, '#866146');
+  } else if (kind === 'books') {
+    rect(5, 22, 9, 4, '#996348');
+    rect(6, 19, 8, 3, accent);
+    rect(9, 23, 12, 5, '#5d4b64');
+    rect(9, 22, 5, 4, '#eed7b3');
+    rect(15, 22, 5, 4, '#f5e0bd');
+    rect(14, 23, 1, 4, '#b99b7d');
+    if (frame) rect(14, 22 - frame, 5 - frame, frame, '#fff1d5');
+  } else {
+    if (kind === 'plan') rect(6, 20, 8, 2, '#80978a');
+    rect(7, 23, 13, 5, accent);
+    rect(8, 24, 6, 1, '#987b65');
+    rect(8, 26, 3 + frame, 1, '#987b65');
+  }
+}
+
+function thought(rect, actor, action, frame) {
+  const paper = frame === 2 ? '#fff1bb' : '#e6cfab';
+  rect(7, 3, 8, 1, '#5c4736');
+  rect(5, 4, 12, 8, '#5c4736');
+  rect(7, 4, 8, 8, paper);
+  rect(6, 5, 10, 6, paper);
+  rect(15, 12, 2, 1, paper);
+  rect(18, 14, 1, 1, paper);
+  if (action === 'review') {
+    rect(9, 8, 2, 1, '#4e6855');
+    rect(10, 9, 1, 1, '#4e6855');
+    rect(11, 8, 1, 1, '#4e6855');
+    rect(12, 7, 1, 1, '#4e6855');
+    rect(13, 6, 1, 1, '#4e6855');
+  } else if (actor.seed % 2) {
+    rect(10, 5, 2, 1, '#8a5b31');
+    rect(9, 6, 4, 2, frame === 1 ? '#e69e45' : '#b77637');
+    rect(10, 8, 2, 1, '#8a5b31');
+    rect(10, 10, 2, 1, '#8a5b31');
+    if (frame === 2) rect(14, 6, 1, 1, '#a27549');
+  } else {
+    for (let i = 0; i <= frame; i++) rect(8 + i * 3, 8, 1, 1, '#8a5b31');
+  }
+}
+
+const handPositions = {
+  terminal: [[18, 25], [14, 26], [17, 24], [19, 26]],
+  books: [[18, 26], [18, 22], [15, 20], [16, 24]],
+  easel: [[17, 23], [16, 19], [16, 16], [16, 21]],
+  writing: [[18, 25], [14, 24], [16, 25], [17, 26]],
+};
+
+function paintDesk(canvas, actor, action, frame = 0) {
   const kind = canvas.dataset.desk;
-  const [coat, accent] = deskPalette[kind];
+  const accent = deskPalette[kind] ?? deskPalette.notebook;
+  const [coat, trim] = actor.clothing;
+  const [skin, shadow] = actor.skin;
+  const workFrame = action === 'working' ? frame : 0;
   paint(canvas, rect => {
     rect(7, 31, 3, 6, '#4e352a');
     rect(29, 31, 3, 6, '#4e352a');
-    rect(20, 18, 11, 8, coat);
-    rect(18, 20, 15, 5, coat);
-    rect(23, 17, 4, 3, '#b98a6f');
-    rect(20, 8, 10, 10, '#deb08e');
-    rect(21, 6, 8, 2, '#483229');
-    rect(20, 8, 11, 3, '#483229');
-    rect(28, 11, 3, 4, '#483229');
-    rect(21, 12, 1, 1, '#4f352d');
-    rect(24, 12, 1, 1, '#4f352d');
+    portrait(rect, actor);
     rect(4, 24, 31, 8, '#302522');
     rect(4, 24, 30, 5, '#a3714d');
     rect(4, 29, 30, 2, '#c58d5f');
-    rect(27, 22, 4, 5, coat);
-    rect(26, 26, 4, 2, '#deb08e');
-    if (kind === 'terminal') {
-      rect(5, 14, 11, 10, '#2e3833');
-      rect(7, 16, 7, 5, accent);
-      rect(8, 17, 4, 1, '#3b725f');
-      rect(8, 19, working ? 4 : 2, 1, '#3b725f');
-      rect(9, 24, 3, 3, '#4a554e');
-      rect(13, 27, 8, 1, '#4a554e');
-      rect(17, 22, 4, 3, coat);
-      rect(working ? 15 : 17, 25, 4, 2, '#deb08e');
-    } else if (kind === 'easel') {
-      rect(5, 13, 11, 12, '#5a4034');
-      rect(6, 13, 9, 9, '#edd4b0');
-      rect(7, 17, 4, 3, accent);
-      rect(12, 15, 2, working ? 4 : 3, '#b96e50');
-      rect(17, 21, 4, 3, coat);
-      rect(16, working ? 19 : 23, 3, 3, '#deb08e');
-      rect(13, working ? 18 : 22, 5, 1, '#694735');
-    } else if (kind === 'books') {
-      rect(5, 22, 10, 4, '#996348');
-      rect(6, 19, 8, 3, accent);
-      rect(9, 23, 12, 5, '#5d4b64');
-      rect(9, 22, 5, 4, '#eed7b3');
-      rect(15, 22, 5, 4, '#f5e0bd');
-      rect(13, 23, 1, 4, '#b99b7d');
-      if (working) {
-        rect(14, 20, 4, 3, '#f6e8cb');
-        rect(16, 19, 3, 1, '#f6e8cb');
+    deskProps(rect, kind, workFrame, accent);
+
+    const [leftX, leftY] = (handPositions[kind] ?? handPositions.writing)[workFrame];
+    rect(18, 22, 4, 3, coat);
+    rect(27, 22, 4, 4, coat);
+    if (workFrame && leftX < 18) {
+      rect(leftX + 2, Math.min(leftY, 24), 2, Math.abs(leftY - 24) + 2, coat);
+      rect(leftX + 3, 23, 19 - leftX, 2, coat);
+    }
+    rect(leftX, leftY, 3, 2, skin);
+    if (kind === 'terminal' && workFrame) {
+      rect(21, 23, 6, 2, coat);
+      rect(workFrame === 2 ? 20 : 22, workFrame === 2 ? 26 : 25, 3, 2, skin);
+    } else if (kind === 'easel' || !handPositions[kind]) {
+      const toolY = kind === 'easel' ? leftY - 1 : leftY + 1;
+      rect(leftX - 3, toolY, 4, 1, '#543b35');
+    }
+
+    if (action === 'planning' || action === 'review') {
+      thought(rect, actor, action, frame);
+      rect(27, 18 + frame % 2, 3, 5, coat);
+      rect(26, 16 + frame % 2, 3, 2, skin);
+    } else if (action === 'break') {
+      if (actor.seed % 2) {
+        const cupX = [33, 34, 30][frame];
+        const cupY = [23, 18, 15][frame];
+        if (frame) {
+          rect(cupX, cupY + 2, 2, 25 - cupY, coat);
+          rect(cupX - 2, cupY + 1, 3, 2, skin);
+        } else {
+          rect(29, 25, 3, 2, skin);
+        }
+        rect(cupX, cupY, 3, 3, trim);
+        rect(cupX + 3, cupY, 1, 2, trim);
+        if (frame === 1) rect(cupX, cupY - 2, 2, 1, '#eedcc2');
+      } else if (frame) {
+        rect(30, 17 - frame * 2, 3, 7 + frame * 2, coat);
+        rect(31, 15 - frame * 2, 3, 3, skin);
+        rect(29, 15 - frame * 2, 2, 1, shadow);
+      } else {
+        rect(27, 25, 3, 2, skin);
       }
-      rect(18, working ? 20 : 26, 3, 2, '#deb08e');
-    } else {
-      if (kind === 'plan') rect(6, 20, 8, 2, '#80978a');
-      rect(7, 23, 11, 5, accent);
-      rect(8, 24, 6, 1, '#987b65');
-      rect(8, 26, working ? 6 : 3, 1, '#987b65');
-      rect(17, 22, 4, 3, coat);
-      rect(working ? 14 : 17, 24, 4, 2, '#deb08e');
-      rect(working ? 13 : 16, 26, 2, 1, '#4f352d');
+    } else if (kind !== 'terminal' || !workFrame) {
+      rect(27, 25, 3, 2, skin);
     }
   });
+}
+
+function actionFor({ desk, actorState }) {
+  if (actorState === 'working') return desk === 'plan' ? 'planning' : 'working';
+  if (actorState === 'planning' || actorState === 'review') return actorState;
+  return actorState === 'idle' || actorState === 'waiting' ? 'break' : 'still';
+}
+
+const actionFrames = {
+  terminal: [0, 1, 2, 3, 1, 3, 2, 1, 0, 0],
+  books: [0, 0, 0, 1, 2, 3, 0, 0, 0],
+  easel: [0, 1, 2, 3, 2, 1, 0, 0],
+  writing: [0, 1, 2, 3, 1, 2, 3, 0, 0],
+  planning: [0, 0, 1, 1, 2, 2, 1, 0],
+  review: [0, 0, 1, 1, 2, 2, 1, 0],
+};
+
+function actorFrame(actor, kind, action, elapsed) {
+  const speed = (actor.seed >>> 24) % 4;
+  if (action === 'break') {
+    const pause = 7300 + speed * 1300;
+    const step = (elapsed + actor.seed % pause) % pause;
+    return step < 300 || (step >= 750 && step < 1050) ? 1 : (step < 750 ? 2 : 0);
+  }
+  const frames = action === 'working' ? (actionFrames[kind] ?? actionFrames.writing) : actionFrames[action];
+  const duration = (kind === 'terminal' && action === 'working' ? 100 : 230) + speed * 28;
+  return frames[(Math.floor(elapsed / duration) + actor.seed % frames.length) % frames.length];
 }
 
 const stopAnimations = new WeakMap();
@@ -164,7 +325,7 @@ function animateDesks(root, desks) {
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const inViewport = new Set();
   let interval;
-  let phase = 0;
+  let elapsed = 0;
   let stopped = false;
   const visible = canvas => canvas.isConnected &&
     (canvas.checkVisibility?.({ visibilityProperty: true, opacityProperty: true, contentVisibilityAuto: true }) ?? true);
@@ -182,7 +343,7 @@ function animateDesks(root, desks) {
 
   const update = () => {
     if (stopped) return;
-    if (!desks.some(canvas => canvas.isConnected)) {
+    if (!desks.some(({ canvas }) => canvas.isConnected)) {
       stop();
       return;
     }
@@ -190,18 +351,19 @@ function animateDesks(root, desks) {
       if (interval !== undefined) {
         window.clearInterval(interval);
         interval = undefined;
-        phase = 0;
-        for (const canvas of desks) if (canvas.isConnected) paintDesk(canvas);
+        elapsed = 0;
       }
+      for (const desk of desks) drawFrame(desk, 0);
     } else if (interval === undefined) {
       interval = window.setInterval(() => {
-        phase = (phase + 1) % 6;
-        if (phase === 5 || phase === 0) return;
-        for (const canvas of inViewport) {
-          if (!visible(canvas) || (phase >= 3 && canvas.dataset.desk === 'books')) continue;
-          paintDesk(canvas, phase === 1 || phase === 3);
+        elapsed += 100;
+        for (const desk of desks) {
+          const { canvas, actor, action } = desk;
+          if (inViewport.has(canvas) && visible(canvas)) {
+            drawFrame(desk, actorFrame(actor, canvas.dataset.desk, action, elapsed));
+          }
         }
-      }, 680);
+      }, 100);
     }
   };
 
@@ -220,13 +382,23 @@ function animateDesks(root, desks) {
     subtree: true, childList: true, attributes: true,
     attributeFilter: ['hidden', 'class', 'style'],
   });
-  for (const canvas of desks) intersection.observe(canvas);
+  for (const { canvas } of desks) intersection.observe(canvas);
+}
+
+function drawFrame(desk, frame) {
+  if (desk.frame === frame || !desk.canvas.isConnected) return;
+  paintDesk(desk.canvas, desk.actor, desk.action, frame);
+  desk.frame = frame;
 }
 
 export function paintRooms(root) {
   stopAnimations.get(root)?.();
   for (const canvas of root.querySelectorAll('canvas[data-room]')) paintRoom(canvas);
-  const desks = Array.from(root.querySelectorAll('canvas[data-desk]'));
-  for (const canvas of desks) paintDesk(canvas);
-  animateDesks(root, desks.filter(canvas => canvas.closest('.map-pin[data-activity="good"]')));
+  const desks = Array.from(root.querySelectorAll('canvas[data-desk]'), canvas => ({
+    canvas,
+    actor: actorProfile(canvas.dataset.actorKey ?? canvas.dataset.desk),
+    action: actionFor(canvas.dataset),
+  }));
+  for (const desk of desks) drawFrame(desk, 0);
+  animateDesks(root, desks.filter(({ action }) => action !== 'still'));
 }

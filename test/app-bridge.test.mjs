@@ -85,3 +85,14 @@ test("opens only a studio's saved project folder and delegates confirmed deletio
   await assert.rejects(dispatch("openProject", { studioId: "wrong", root }), /студия/i);
   assert.deepEqual(await dispatch("deleteStudio", { studioId: "s1", confirmation: "Тест" }), { studioId: "s1", confirmation: "Тест" });
 });
+
+test("routes model policy and pending-team edits without granting arbitrary service access", async () => {
+  const updateModelPolicy = input => input.allowed;
+  const updatePlanAgents = input => input;
+  const dispatch = router({ updateModelPolicy, updatePlanAgents });
+  const allowed = [{ runtime: "codex", model: "fixture-fast", efforts: ["low"] }];
+  const edit = { planId: "p1", agents: [{ key: "writer", roleTitle: "Автор" }] };
+  assert.deepEqual(await dispatch("updateModelPolicy", { allowed }), allowed);
+  assert.deepEqual(await dispatch("updatePlanAgents", edit), edit);
+  await assert.rejects(dispatch("setModelPolicyUnsafe", { allowed }), /команда/i);
+});

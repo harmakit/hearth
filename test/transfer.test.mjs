@@ -10,7 +10,8 @@ const studio = {
   id: 'studio-native', root: '/old/project', name: 'Old studio',
   brief: 'Open /old/project for context. Also see /Users/alice/private.md and C:\\private\\file.txt.', language: 'English', approveSprints: false,
   lifecycle: 'active', director: { runtime: 'codex', model: 'gpt', apiKey: 'secret' },
-  agents: [{ id: 'agent-native', name: 'Builder', role: 'engineer', mode: 'inherit', sessionId: 'private-session' }],
+  allowedMode: 'studio', allowed: [],
+  agents: [{ id: 'agent-native', name: 'Builder', role: 'engineer', roleTitle: 'Build engineer', mode: 'inherit', sessionId: 'private-session' }],
 };
 const owned = record => ({ studioId: studio.id, ...record });
 const task = owned({
@@ -29,6 +30,7 @@ const snapshot = {
   ],
   plans: [owned({
     id: 'plan-native', kind: 'sprint', status: 'pending', title: 'Next', files: [{ path: 'brief.md', content: 'draft' }],
+    agents: [{ key: 'agent-native', roleTitle: 'Build engineer', mode: 'dynamic', recommendation: { runtime: 'codex', model: 'light', effort: '' } }],
     tasks: [{ key: 'draft', agentKey: 'agent-native', reviewerKey: 'reviewer', requiresAcceptance: true, dependsOn: ['prior'] }],
   })],
   epics: [owned({ id: 'epic-native', title: 'Epic' })],
@@ -49,6 +51,9 @@ test('a template preserves only role setup and drops local information', () => {
   assert.equal(copy.studio.name, 'New studio');
   assert.equal(copy.studio.root, '/new/project');
   assert.equal(copy.studio.lifecycle, 'draft');
+  assert.equal(copy.studio.allowedMode, 'studio');
+  assert.deepEqual(copy.studio.allowed, []);
+  assert.equal(copy.studio.agents[0].roleTitle, 'Build engineer');
   assert.notEqual(copy.studio.id, studio.id);
 });
 
@@ -82,6 +87,7 @@ test('a snapshot remaps the connected record graph and keeps interrupted work pa
   assert.equal(payload.inbox[0].taskId, work.id);
   assert.equal(payload.inbox[1].planId, payload.plans[0].id);
   assert.equal(payload.plans[0].tasks[0].agentKey, work.agentId);
+  assert.deepEqual(payload.plans[0].agents[0], { key: work.agentId, roleTitle: 'Build engineer', mode: 'dynamic', recommendation: { runtime: 'codex', model: 'light', effort: '' } });
   assert.equal(payload.plans[0].tasks[0].reviewerKey, 'reviewer');
   assert.equal(payload.plans[0].tasks[0].requiresAcceptance, true);
   assert.deepEqual(payload.plans[0].tasks[0].dependsOn, ['prior']);
@@ -179,6 +185,7 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
     participants: ['engineer'], positions: [{ role: 'engineer', text: 'Ready to share', ts: '2026-11-18' }], actions: ['T-1'],
   }) + '\n');
   await put('.claude/agents/engineer.md', '---\nname: engineer\ndescription: Builds things\n---\nprivate system prompt');
+  await put('.claude/agents/librarian.md', '---\nname: librarian\ndescription: Maintains knowledge\n---\nprivate librarian prompt');
   await put('.git/worktrees/feature/gitdir', join(workspace, 'external', '.git') + '\n');
   await put('.git/worktrees/review/gitdir', join(workspace, 'external-review', '.git') + '\n');
   await put('.git/worktrees/review/HEAD', 'ref: refs/heads/feature/T-2-revision\n');
@@ -191,6 +198,7 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
   const [work, question, registered, before] = payload.tasks;
   assert.equal(payload.studio.root, root);
   assert.equal(payload.studio.lifecycle, 'paused');
+  assert.equal(payload.studio.agents.find(({ name }) => name === 'librarian')?.role, 'library');
   assert.equal(work.legacyId, 'T-1');
   assert.equal(work.stage, 'blocked');
   assert.equal(work.legacyWorktreeReview, true);

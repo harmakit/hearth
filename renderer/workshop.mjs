@@ -42,6 +42,15 @@ export function agentActivity(task, directorLifecycle) {
   return ['Свободен', ''];
 }
 
+export function actorState(task, directorLifecycle, { paused, scheduled } = {}) {
+  if (task?.status !== 'running' && (paused || scheduled)) return paused ? 'paused' : 'queued';
+  if (directorLifecycle === 'planning' || (task?.status === 'running' && task.stage === 'director')) return 'planning';
+  if (directorLifecycle === 'awaiting-approval' || task?.status === 'waiting') return 'waiting';
+  if (task?.status === 'running') return ['review', 'qa'].includes(task.stage) ? 'review' : 'working';
+  if (task?.status === 'queued' && task.stage !== 'backlog') return 'queued';
+  return 'idle';
+}
+
 const workspaces = {
   director: ['director', 'plan'], library: ['library', 'books'],
   editor: ['library', 'paper'], engineer: ['workshop', 'terminal'],

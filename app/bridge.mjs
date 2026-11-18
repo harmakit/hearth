@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "addAgent", "updateAgent", "createTask",
   "startTask", "cancelTask", "answerInbox",
-  "initializeStudio", "decidePlan", "setStudioRunning", "deleteStudio",
+  "initializeStudio", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 
