@@ -251,13 +251,11 @@ async function start() {
   const cleanup = createWorktreeCleanup({
     git, worktrees, delivery, storageDir: path.join(dataDir, "cleanup-journal"),
     async inspectUsage(worktree) {
-      const stored = service.snapshot();
-      const task = stored.tasks.find(({ id, studioId }) => id === worktree.taskId && studioId === worktree.studioId);
-      const activeLease = stored.attempts.some(({ taskId, status }) => taskId === worktree.taskId && ["running", "reconcile"].includes(status));
+      const { task, activeLease, evidence: savedEvidence } = service.cleanupState(worktree);
       const evidenceIds = task?.gitDelivery?.checks?.flatMap(({ evidenceIds = [] }) => evidenceIds) ?? [];
       const openTask = !task || task.stage !== "done";
       const evidenceSaved = task?.gitDelivery?.status === "merged" && (await Promise.all(evidenceIds.map(async id => {
-        const record = stored.evidence.find(value => value.id === id && value.taskId === task.id);
+        const record = savedEvidence.find(value => value.id === id);
         return Boolean(record && await evidence.openEvidence(record).catch(() => null));
       }))).every(Boolean);
       return { activeLease, openTask, evidenceSaved };

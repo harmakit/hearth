@@ -52,3 +52,4 @@ Codex использует временные сессии. Hearth продол�
 - [Сводка расхождений со старой Hearth](docs/legacy-gap-audit-2026-11-18.md)
 - [Спецификация переноса](docs/superpowers/specs/2026-11-18-hearth-studio-legacy-mechanics-design.md)
 - [План и покрытие 39 пунктов](docs/superpowers/plans/2026-11-18-hearth-studio-legacy-mechanics.md)
+- [Приёмка 0.3.0](docs/superpowers/2026-11-18-hearth-studio-0.3.0-acceptance.md)

@@ -228,6 +228,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
   const pending = new Map();
   const publishedWaiting = new Map();
   const manualParallel = new Map();
+  const cleanupRuns = new Set();
   let closed = false;
   let closing;
 
@@ -507,6 +508,21 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     read('studios', studioId, 'Студия');
     if (!manageCleanup) throw new Error('Уборка рабочих деревьев недоступна.');
     return changed(await manageCleanup.apply({ studioId, candidateIds, operationId }));
+  }
+
+  function cleanupState({ studioId, taskId }) {
+    const task = list('tasks').find(row => row.id === taskId && row.studioId === studioId);
+    const activeLease = list('attempts').some(row => row.taskId === taskId && ['running', 'reconcile'].includes(row.status));
+    return { task, activeLease, evidence: list('evidence').filter(row => row.taskId === taskId && row.studioId === studioId) };
+  }
+
+  function afterGitMerge(studioId, task) {
+    if (!manageCleanup || closed) return;
+    const completion = Promise.resolve().then(() => manageCleanup.apply({
+      studioId, candidateIds: [task.gitDelivery.worktreeId], operationId: `${task.id}:cleanup:${task.gitDelivery.receipt.id}`,
+    })).finally(() => cleanupRuns.delete(completion));
+    cleanupRuns.add(completion);
+    return completion;
   }
 
   async function assessDebtPolicy({ studioId }) {
@@ -1134,17 +1150,18 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     pending.clear();
     closing = Promise.resolve().then(async () => {
       const attempts = [...active.values(), ...manualParallel.values(), ...(workflow.activeWork?.() ?? [])];
+      const completions = [...attempts.map(({ completion }) => completion), ...cleanupRuns];
       try {
         interruptUnfinishedAttempts();
       } finally {
         for (const { controller } of attempts) controller.abort();
         try {
-          if (attempts.length) {
+          if (completions.length) {
             // Allow for the executable probe and the provider's graceful process shutdown.
             let timeout;
             try {
               await Promise.race([
-                Promise.all(attempts.map(({ completion }) => completion)),
+                Promise.allSettled(completions),
                 new Promise((resolve) => { timeout = setTimeout(resolve, 12_000); }),
               ]);
             } finally {
@@ -1260,9 +1277,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     effectiveAllowed: (studio) => modelPolicyFor(studio).allowed, training, hasHeldWorkflow,
     projectPipeline, dispatcher, checkpoints, planning, prerequisites, roster, trackedRun, describeAttachments,
     nonWorkflowActiveCount: studioId => Number(active.has(studioId)) + parallelManual(studioId).length,
-    afterGitMerge: (studioId, task) => manageCleanup?.apply({
-      studioId, candidateIds: [task.gitDelivery.worktreeId], operationId: `${task.id}:cleanup:${task.gitDelivery.receipt.id}`,
-    }),
+    afterGitMerge,
     validateFixed,
   });
 
@@ -1335,7 +1350,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
   return {
     snapshot, updateModelPolicy, createStudio, updateStudio, assessDebtPolicy, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent,
     createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, updatePlanAgents, setStudioRunning, importStudio, configureProject,
-    previewCleanup, applyCleanup, recordEvidence, findEvidence, close,
+    previewCleanup, applyCleanup, cleanupState, recordEvidence, findEvidence, close,
     reviseBacklog: planning.reviseBacklog, closeSprint: planning.closeSprint, createPhase: planning.createPhase, updatePhase: planning.updatePhase,
     proposePhaseTransition: planning.proposePhaseTransition, decidePhaseTransition: planning.decidePhaseTransition,
     updateGrooming: planning.updateGrooming, requestGrooming: planning.requestGrooming, resolveGrooming: planning.resolveGrooming,

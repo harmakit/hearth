@@ -23,9 +23,12 @@ async function until(service, select) {
 
 test('Git work goes through scoped implementation, checks, exact review, owner acceptance and merge', async t => {
   const calls = [];
+  const cleanupStarted = Promise.withResolvers();
+  const cleanupRelease = Promise.withResolvers();
   const revision = { headOid: 'work', targetOid: 'base', candidateOid: 'candidate', digest: 'digest' };
   const service = createStudioService({
     dbPath: ':memory:',
+    manageCleanup: { async apply() { cleanupStarted.resolve(); await cleanupRelease.promise; } },
     prepareTarget: async () => ({ targetRef: 'refs/heads/delivery' }),
     projectPipeline: {
       workScope: async () => ({ scope: { root: '/task', access: 'worktree-write' }, worktreeId: 'tree', release: async () => {} }),
@@ -41,7 +44,7 @@ test('Git work goes through scoped implementation, checks, exact review, owner a
       return { text: JSON.stringify(results[request.purpose]) };
     },
   });
-  t.after(() => service.close());
+  t.after(() => { cleanupRelease.resolve(); return service.close(); });
   const { id: studioId } = service.createStudio({ name: 'Git', root: '/test' });
   await service.configureProject({ studioId, enabled: true, targetRef: 'delivery', profile: { id: 'project', checks: [] } });
   service.initializeStudio({ studioId });
@@ -53,4 +56,12 @@ test('Git work goes through scoped implementation, checks, exact review, owner a
   const task = await until(service, state => state.tasks.find(task => task.deliveryMode === 'git' && task.stage === 'done'));
   assert.equal(task.gitDelivery.status, 'merged');
   assert.deepEqual(calls, ['plan', 'worktree-write', 'read', 'merge', 'director']);
+  await cleanupStarted.promise;
+  let closed = false;
+  const closing = service.close().then(() => { closed = true; });
+  await delay(1);
+  assert.equal(closed, false);
+  assert.equal(service.cleanupState({ studioId, taskId: task.id }).task.stage, 'done');
+  cleanupRelease.resolve();
+  await closing;
 });
