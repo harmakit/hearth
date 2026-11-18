@@ -7,9 +7,16 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { createStudioService } from '../core/service.mjs';
+import { createStudioService as createService } from '../core/service.mjs';
+import { productionSnapshot, trainingReply } from './fixtures/training.mjs';
 
 const project = fileURLToPath(new URL('..', import.meta.url));
+
+function createStudioService({ run, onChange, ...settings }) {
+  const service = createService({ ...settings, run: (request) => trainingReply(request) ?? run(request), onChange: onChange && ((snapshot) => onChange(productionSnapshot(snapshot))) });
+  const snapshot = service.snapshot;
+  return { ...service, snapshot: () => productionSnapshot(snapshot()) };
+}
 
 function database(t) {
   const scratch = join(project, '.tmp');
@@ -68,12 +75,12 @@ test('stores app policy and an explicit empty studio override while preserving l
   service = createStudioService({ dbPath, run });
   const { modelPolicy, studios: [savedLegacy, savedParent, savedOverride] } = service.snapshot();
   assert.deepEqual(modelPolicy, { configured: true, allowed });
-  assert.deepEqual(savedLegacy.agents, legacy.agents);
+  assert.deepEqual(savedLegacy.agents.filter(({ systemRole }) => !systemRole), legacy.agents.map((agent) => ({ ...agent, trainingStatus: 'ready', skillIds: [] })));
   assert.equal(savedLegacy.allowedMode, 'studio');
   assert.deepEqual(savedLegacy.effectiveAllowed, oldAllowed);
   assert.equal(savedParent.allowedMode, 'app');
   assert.deepEqual(savedParent.effectiveAllowed, allowed);
-  assert.equal(savedParent.agents[0].roleTitle, 'Редактор рукописи');
+  assert.equal(savedParent.agents.find(({ id }) => id === first.id).roleTitle, 'Редактор рукописи');
   assert.equal(savedOverride.allowedMode, 'studio');
   assert.deepEqual(savedOverride.effectiveAllowed, []);
   for (const [team, agent] of [[parent, first], [override, second]]) {
@@ -81,6 +88,8 @@ test('stores app policy and an explicit empty studio override while preserving l
     await until(service.snapshot, ({ tasks }) => tasks.find(({ studioId }) => studioId === team.id)?.status === 'completed');
   }
   assert.deepEqual(calls, [{ runtime: 'claude', model: 'worker', effort: 'high' }, { runtime: 'codex', model: undefined, effort: undefined }]);
+  service.startTask({ taskId: fixed.trainingTaskId });
+  await until(service.snapshot, ({ training }) => training.find(({ id }) => id === fixed.trainingTaskId).stage === 'done');
   service.updateModelPolicy({ allowed: [] });
   await service.close();
   service = createStudioService({ dbPath, run });
@@ -135,10 +144,10 @@ test('persists independent studios, role settings and unstarted work', async (t)
   service = createStudioService({ dbPath, run });
   const saved = service.snapshot();
   assert.equal(saved.studios[0].language, 'Русский');
-  assert.equal(saved.studios[0].agents[0].model, 'editor-model');
+  assert.equal(saved.studios[0].agents.find(({ id }) => id === agent.id).model, 'editor-model');
   assert.equal(saved.studios[1].director.runtime, 'claude');
-  assert.deepEqual(saved.studios[1].agents, []);
-  assert.deepEqual(saved.tasks, [work]);
+  assert.equal(saved.studios[1].agents[0].systemRole, 'coach');
+  assert.deepEqual(saved.tasks, [{ ...work, dependencies: [] }]);
   await delay(20);
   assert.equal(runs, 0);
 });

@@ -59,7 +59,7 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, openProject, transfer, protectedRoots = [] }) {
+export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, openProject, findSkills, transfer, protectedRoots = [] }) {
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
@@ -68,6 +68,16 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       return inspect({ runtime: payload.runtime });
     }
     if (command === "previewImport") return previewImport({ root: await directory(payload.root) });
+    if (command === "searchSkillRepositories") {
+      const studio = service.snapshot().studios.find(entry => entry.id === payload.studioId);
+      if (!studio) throw new Error("Студия не найдена.");
+      const { candidates, warnings } = await findSkills({ topics: payload.topics, minStars: studio.skillMinStars ?? 10000 });
+      return {
+        candidates: candidates.map(({ id, repo, commit, path, title, stars, license, url }) =>
+          ({ id, repo, commit, path, title, stars, license, url })),
+        warnings,
+      };
+    }
     if (command === "openProject") {
       const studio = service.snapshot().studios.find(entry => entry.id === payload.studioId);
       if (!studio) throw new Error("Студия не найдена.");

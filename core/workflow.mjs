@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
-import { completeInitialRoster, directorPrompt, field, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, validatePlan } from './protocol.mjs';
+import { completeInitialRoster, directorPrompt, field, newDirectorHire, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, trainingTopics, validatePlan } from './protocol.mjs';
+import { coachFor } from './training.mjs';
 
 const now = () => new Date().toISOString();
 
@@ -18,7 +19,7 @@ function artifactPathFor(task, proposedPath) {
 export function createWorkflow({
   read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
   run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, effectiveAllowed, validateFixed,
-  runPrompt, report, isClosed, active, availableStudio, onAvailable,
+  runPrompt, report, isClosed, active, availableStudio, onAvailable, training, hasHeldWorkflow,
 }) {
   function state(studio, lifecycle, activity, job = null) {
     return update('studios', { ...studio, lifecycle, activity, workflowJob: job });
@@ -48,9 +49,35 @@ export function createWorkflow({
     return state(studio, 'active', activity, job);
   }
 
-  function nextTask(studio, task) {
+  function nextTask(studio, task, continuation = {}) {
     update('tasks', { ...task, stage: 'ready', status: 'queued', activeAgentId: undefined, error: '', updatedAt: now() });
-    return schedule(studio, { purpose: 'task', taskId: task.id }, `Готовится задача «${task.title}»`);
+    return schedule(studio, { ...continuation, purpose: 'task', taskId: task.id }, `Готовится задача «${task.title}»`);
+  }
+
+  function routeTask(studio, task, continuation = {}, visited = new Set()) {
+    if (visited.has(task.id)) throw new Error('Обнаружена циклическая зависимость обучения.');
+    visited.add(task.id);
+    const gated = training.withDependencies(studio, task);
+    if (gated !== task) task = update('tasks', { ...gated, updatedAt: now() });
+    const pending = task.dependencies.map((id) => read('tasks', id, 'Зависимость')).find(({ stage }) => stage !== 'done');
+    if (pending && pending.kind !== 'train') throw new Error('Зависимости задачи ещё не завершены.');
+    if (pending) return routeTask(studio, pending, { ...continuation, resumeTaskId: continuation.resumeTaskId ?? task.id }, visited);
+    return nextTask(studio, task, continuation);
+  }
+
+  function routeSprint(studio, task) {
+    const outstanding = sprintTasks(task).find((candidate) => candidate.kind === 'train' && candidate.stage !== 'done');
+    return outstanding ? routeTask(studio, outstanding, { resumeTaskId: task.id, resumeSprint: true }) : routeTask(studio, task);
+  }
+
+  function startStandaloneTraining(studio, task) {
+    if (hasHeldWorkflow(studio.id)) throw new Error('Сначала ответьте на вопрос Директора или завершите приёмку текущей задачи.');
+    if (studio.workflowJob || !['draft', 'idle', 'active'].includes(studio.lifecycle)) throw new Error('Студия уже выполняет другой этап.');
+    const result = transaction(() => routeTask(studio, task, {
+      returnLifecycle: studio.lifecycle, returnActivity: studio.activity, resumeTaskId: task.id,
+    }));
+    queue(studio.id);
+    return changed(result);
   }
 
   function approve(studio, draft) {
@@ -59,6 +86,7 @@ export function createWorkflow({
     const agents = [...studio.agents];
     const byKey = new Map(agents.map((agent) => [agent.key ?? agent.id, agent]));
     const agentEdits = new Map(Object.entries(plan.agentEdits ?? {}));
+    const hires = [];
     for (const candidate of plan.agents) {
       const existing = byKey.get(candidate.key);
       const ownerFields = agentEdits.get(candidate.key) ?? [];
@@ -76,11 +104,21 @@ export function createWorkflow({
       if (mode === 'fixed') validateFixed(studio, agent);
       agents.push(agent);
       byKey.set(agent.key, agent);
+      hires.push({ agent, topics: candidate.trainingTopics });
     }
     const epic = insert('epics', { id: randomUUID(), studioId, ...plan.epic });
     const story = insert('stories', { id: randomUUID(), studioId, epicId: epic.id, ...plan.story });
     const taskIds = new Map(plan.tasks.map(({ key }) => [key, randomUUID()]));
-    const sprint = insert('sprints', { id: randomUUID(), studioId, planId: id, title: plan.title, goal: plan.goal, status: 'active', taskIds: [...taskIds.values()] });
+    const sprint = { id: randomUUID(), studioId, planId: id, title: plan.title, goal: plan.goal, status: 'active', taskIds: [...taskIds.values()] };
+    const roster = { ...studio, agents };
+    const coach = coachFor(roster);
+    for (const { agent, topics } of hires) {
+      const assignments = plan.tasks.filter(({ agentKey, reviewerKey }) => [agentKey, reviewerKey].includes(agent.key));
+      const objective = assignments.map(({ title, prompt, criteria }) => `${title}\n${prompt}\n${criteria}`).join('\n\n').slice(0, 8_000) || agent.description;
+      const lesson = training.add(roster, agent, { topics, objective, sprintId: sprint.id, epicId: epic.id, storyId: story.id });
+      sprint.taskIds.push(lesson.id);
+    }
+    insert('sprints', sprint);
     const createdAt = now();
     const recommendations = new Map();
     if (plan.kind === 'initial') {
@@ -91,10 +129,13 @@ export function createWorkflow({
     const tasks = plan.tasks.map(({ agentKey, reviewerKey, dependsOn, artifactPath, ...task }) => {
       const taskRecommendation = recommendations.get(agentKey);
       const reviewRecommendation = recommendations.get(reviewerKey);
+      const agentId = byKey.get(agentKey).id;
+      const reviewerId = byKey.get(reviewerKey).id;
+      const dependencies = [...dependsOn.map((key) => taskIds.get(key)), ...training.pendingIds(roster, [agentId, reviewerId, coach.id])];
       return insert('tasks', {
-        ...task, id: taskIds.get(task.key), studioId, agentId: byKey.get(agentKey).id, reviewerId: byKey.get(reviewerKey).id,
-        epicId: epic.id, storyId: story.id, sprintId: sprint.id, dependencies: dependsOn.map((key) => taskIds.get(key)),
-        stage: dependsOn.length ? 'backlog' : 'ready', status: 'queued', summary: '', artifact: '', error: '',
+        ...task, id: taskIds.get(task.key), studioId, agentId, reviewerId,
+        epicId: epic.id, storyId: story.id, sprintId: sprint.id, dependencies,
+        stage: dependencies.length ? 'backlog' : 'ready', status: 'queued', summary: '', artifact: '', error: '',
         artifactTarget: artifactPath, workflowManaged: true, createdAt, updatedAt: createdAt,
         ...(taskRecommendation || reviewRecommendation ? { modelRecommendations: { task: taskRecommendation, review: reviewRecommendation } } : {}),
       });
@@ -104,12 +145,11 @@ export function createWorkflow({
       summary: plan.goal, taskIds: sprint.taskIds, createdAt,
     });
     const result = update('plans', { ...plan, status: 'approved', sprintId: sprint.id, decidedAt: createdAt });
-    const ready = tasks.find(({ stage }) => stage === 'ready');
-    const roster = { ...studio, agents };
+    const entry = tasks.find(({ key }) => plan.tasks.find((candidate) => candidate.key === key).dependsOn.length === 0);
     if (plan.files.length) {
-      schedule(roster, { purpose: 'publish', planId: id, fileIndex: 0, taskId: ready.id }, 'Подготовка стартовых файлов');
+      schedule(roster, { purpose: 'publish', planId: id, fileIndex: 0, taskId: entry.id }, 'Подготовка стартовых файлов');
     } else {
-      nextTask(roster, ready);
+      routeSprint(roster, entry);
     }
     return result;
   }
@@ -238,7 +278,8 @@ export function createWorkflow({
       return publishArtifact(studio, file.path, file.content, `${job.planId}:file:${job.fileIndex}`);
     }
     if (purpose === 'artifact') return publishArtifact(studio, job.path, task.artifact, job.operationId);
-    const agentId = purpose === 'task' ? task.agentId : purpose === 'review' ? task.reviewerId : undefined;
+    const lesson = task?.kind === 'train';
+    const agentId = purpose === 'task' ? task.agentId : purpose === 'review' ? task.reviewerId : purpose === 'training-exercise' ? task.training.targetAgentId : undefined;
     const agent = studio.agents.find(({ id }) => id === agentId);
     const selected = recommendedTaskControls(studio, agent, task?.modelRecommendations?.[purpose])
       ?? await taskControls(studio, agent, task, { run, signal, purpose });
@@ -246,6 +287,7 @@ export function createWorkflow({
     const { runtime, model, effort } = confirmTaskControls(studio, agent, selected);
     let allowed = [];
     let prompt;
+    let sources;
     switch (purpose) {
       case 'plan': {
         const previous = job.previousPlanId ? read('plans', job.previousPlanId, 'План') : undefined;
@@ -254,9 +296,15 @@ export function createWorkflow({
         break;
       }
       case 'task': {
+        if (lesson) {
+          sources = await training.source(studio, task, signal);
+          prompt = training.selectionPrompt(studio, task, sources);
+          break;
+        }
         const decisions = taskInbox(task.id).filter(({ kind, answer }) => kind === 'question' && answer);
         prompt = runPrompt(studio, agent, task, decisions, {
           criteria: task.criteria, artifactPath: task.artifactTarget, previousArtifactPath: task.artifactPath, review: task.review,
+          training: training.context(studio, agent),
           dependencies: task.dependencies.map((id) => {
             const { title, summary, artifactPath } = read('tasks', id, 'Задача');
             return { title, summary, artifactPath };
@@ -265,16 +313,24 @@ export function createWorkflow({
         break;
       }
       case 'review':
-        prompt = reviewPrompt(studio, task, agent);
+        prompt = lesson ? training.reviewPrompt(studio, task) : reviewPrompt(studio, task, agent, training.context(studio, agent));
+        break;
+      case 'training-exercise':
+        prompt = training.exercisePrompt(studio, task);
         break;
       case 'director':
-        prompt = directorPrompt(studio, task, readyAfter(task).map(({ key, title }) => ({ key, title })));
+        prompt = directorPrompt(studio, task, readyAfter(task).map(({ key, title, agentId, targetedTrainingId }) => {
+          const performer = studio.agents.find(({ id }) => id === agentId);
+          return { key, title, trainingAvailable: Boolean(performer && !performer.systemRole && performer.trainingStatus !== 'pending' && !targetedTrainingId) };
+        }));
         break;
     }
     const result = await run({ runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal });
     const data = parseResponse(result);
     if (purpose === 'plan') return validatePlan(data, read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
+    if (purpose === 'training-exercise') return field(data.summary, 'результат упражнения');
     if (purpose === 'task') {
+      if (lesson) return training.selection(task, data, sources);
       const parsed = report(result);
       if (!parsed.question && !['summary', 'artifact'].some((key) => typeof data[key] === 'string' && data[key].trim())) throw new Error('Исполнитель не вернул отчёт.');
       const path = artifactPathFor(task, data.artifactPath);
@@ -297,21 +353,68 @@ export function createWorkflow({
   }
 
   function readyAfter(task) {
-    return sprintTasks(task).filter((candidate) => candidate.id !== task.id && (
-      candidate.stage === 'ready' || (candidate.stage === 'backlog' && candidate.dependencies.every(
+    return sprintTasks(task).filter((candidate) => candidate.kind !== 'train' && candidate.id !== task.id && (
+      ['ready', 'backlog'].includes(candidate.stage) && candidate.dependencies.every(
         (id) => id === task.id || read('tasks', id, 'Задача').stage === 'done',
-      ))
+      )
     ));
   }
 
-  function toReview(studio, task, patch = {}) {
+  function toReview(studio, task, patch = {}, continuation = {}) {
     update('tasks', { ...task, ...patch, stage: 'review', status: 'completed', activeAgentId: undefined, error: '', updatedAt: now() });
-    schedule(studio, { purpose: 'review', taskId: task.id }, 'Результат передан на ревью');
+    schedule(studio, { ...continuation, purpose: 'review', taskId: task.id }, 'Результат передан на ревью');
   }
 
   function toDirector(studio, task, patch = {}) {
     update('tasks', { ...task, ...patch, status: 'completed', stage: 'review', activeAgentId: undefined, updatedAt: now() });
     schedule(studio, { purpose: 'director', taskId: task.id }, 'Директор выбирает следующий шаг');
+  }
+
+  function finishTraining(studio, job, task, review) {
+    const result = training.approve(studio, task);
+    update('tasks', { ...task, training: result, review, stage: 'done', status: 'completed', activeAgentId: undefined, updatedAt: now() });
+    for (const dependent of list('tasks')) {
+      if (dependent.studioId === studio.id && dependent.stage === 'backlog' && dependent.dependencies?.includes(task.id)
+        && dependent.dependencies.every((id) => read('tasks', id, 'Зависимость').stage === 'done')) {
+        update('tasks', { ...dependent, stage: 'ready', updatedAt: now() });
+      }
+    }
+    const next = job.resumeTaskId && read('tasks', job.resumeTaskId, 'Задача');
+    if (next && next.id !== task.id) {
+      if (job.resumeSprint) return routeSprint(studio, next);
+      return routeTask(studio, next, job.returnLifecycle ? { returnLifecycle: job.returnLifecycle, returnActivity: job.returnActivity } : {});
+    }
+    const paused = studio.lifecycle === 'paused' || studio.manualPaused;
+    const resultStudio = paused && job.returnLifecycle === 'draft' ? { ...studio, resumeDraft: true } : studio;
+    return state(resultStudio, paused ? 'paused' : job.returnLifecycle ?? 'idle', paused ? 'Студия на паузе' : job.returnActivity ?? 'Обучение завершено');
+  }
+
+  function retrain(studio, next, decision) {
+    if (!next?.agentId || next.targetedTrainingId || next.status !== 'queued') throw new Error('Директор выбрал недоступную для обучения задачу.');
+    const objective = field(decision.objective, 'цель обучения');
+    const topics = trainingTopics(decision.topics);
+    let agent = studio.agents.find(({ id }) => id === next.agentId);
+    if (!agent || agent.systemRole || agent.trainingStatus === 'pending') throw new Error('Директор выбрал недоступную для обучения роль.');
+    if (decision.action === 'hire') {
+      const hire = newDirectorHire(decision.agent);
+      if (studio.agents.some(({ id, key }) => hire.key === (key ?? id))) throw new Error('Ключ новой роли уже используется.');
+      agent = { id: randomUUID(), ...hire };
+      studio.agents.push(agent);
+    }
+    const { sprintId, epicId, storyId } = next;
+    const lesson = training.add(studio, agent, { topics, objective, sprintId, epicId, storyId });
+    const updated = update('tasks', {
+      ...next, agentId: agent.id, dependencies: [...next.dependencies, lesson.id], stage: 'backlog', targetedTrainingId: lesson.id,
+      ...(decision.action === 'hire' ? { modelRecommendations: { ...next.modelRecommendations, task: undefined } } : {}), updatedAt: now(),
+    });
+    for (const queued of list('tasks')) {
+      if (queued.id === next.id || queued.studioId !== studio.id || !['queued', 'scheduled'].includes(queued.status)) continue;
+      const gated = training.withDependencies(studio, queued);
+      if (gated !== queued) update('tasks', { ...gated, updatedAt: now() });
+    }
+    const sprint = read('sprints', sprintId, 'Спринт');
+    update('sprints', { ...sprint, taskIds: [...sprint.taskIds, lesson.id] });
+    routeTask(studio, updated);
   }
 
   function finishStep(studio, job, task, result, attemptId) {
@@ -333,11 +436,16 @@ export function createWorkflow({
         if (job.fileIndex + 1 < plan.files.length) {
           schedule(studio, { ...job, fileIndex: job.fileIndex + 1 }, 'Подготовка стартовых файлов');
         } else {
-          nextTask(studio, task);
+          routeSprint(studio, task);
         }
         return;
       }
       case 'task': {
+        if (task.kind === 'train') {
+          if (task.training.bootstrap) return toReview(studio, task, result, job);
+          update('tasks', { ...task, ...result, status: 'queued', activeAgentId: undefined, updatedAt: now() });
+          return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
+        }
         const patch = { summary: result.summary, artifact: result.artifact };
         if (result.question) {
           update('tasks', { ...task, ...patch, status: 'waiting', stage: 'blocked', activeAgentId: undefined, updatedAt: now() });
@@ -359,18 +467,21 @@ export function createWorkflow({
           artifactPath: result, previousArtifactPath: task.artifactPath,
           artifactVersions: [...(task.artifactVersions ?? []), result],
         });
+      case 'training-exercise':
+        return toReview(studio, task, { training: { ...task.training, exercise: result } }, job);
       case 'review': {
         if (!result.pass) {
           const failedReviews = (task.failedReviews ?? 0) + 1;
           const updated = update('tasks', { ...task, failedReviews, revision: (task.revision ?? 0) + 1, review: result.summary });
           if (failedReviews >= 3) {
             update('tasks', { ...updated, stage: 'blocked', error: result.summary, status: 'failed', updatedAt: now() });
-            state(studio, 'error', 'Задача трижды возвращена на доработку', { purpose: 'task', taskId: task.id });
+            state(studio, 'error', 'Задача трижды возвращена на доработку', { ...job, purpose: 'task', taskId: task.id });
             return addInbox(task, 'error', { title: `Задача заблокирована · ${task.title}`, body: result.summary });
           }
-          nextTask(studio, updated);
+          nextTask(studio, updated, job);
           return;
         }
+        if (task.kind === 'train') return finishTraining(studio, job, task, result.summary);
         if (task.requiresAcceptance) {
           update('tasks', { ...task, review: result.summary, status: 'waiting', stage: 'qa', updatedAt: now() });
           state(studio, studio.lifecycle === 'paused' ? 'paused' : 'active', 'Результат ждёт приёмки');
@@ -386,10 +497,14 @@ export function createWorkflow({
         for (const candidate of ready) {
           if (candidate.stage === 'backlog') update('tasks', { ...candidate, stage: 'ready', updatedAt: now() });
         }
-        if (result.action === 'next') {
+        if (['next', 'train', 'hire'].includes(result.action)) {
           const next = result.taskKey === undefined ? ready[0] : ready.find(({ key }) => key === result.taskKey);
           if (!next) throw new Error('Директор выбрал недоступную задачу.');
-          nextTask(studio, next);
+          if (result.action !== 'next') {
+            if (!result.taskKey) throw new Error('Директор не указал ключ задачи для обучения.');
+            return retrain(studio, next, result);
+          }
+          routeTask(studio, next);
           return;
         }
         if (remaining.length || !['nextSprint', 'finish'].includes(result.action)) throw new Error('Директор не выбрал корректный следующий шаг.');
@@ -441,9 +556,9 @@ export function createWorkflow({
     try {
       transaction(() => {
         insert('attempts', { id: attemptId, studioId, taskId: job.taskId ?? null, purpose: job.purpose, status: 'running', startedAt: now() });
-        if (['task', 'review', 'director'].includes(job.purpose)) {
-          const stage = job.purpose === 'task' ? 'in_progress' : 'review';
-          const activeAgentId = job.purpose === 'task' ? task.agentId : job.purpose === 'review' ? task.reviewerId : null;
+        if (['task', 'review', 'director', 'training-exercise'].includes(job.purpose)) {
+          const stage = ['task', 'training-exercise'].includes(job.purpose) ? 'in_progress' : 'review';
+          const activeAgentId = job.purpose === 'task' ? task.agentId : job.purpose === 'training-exercise' ? task.training.targetAgentId : job.purpose === 'review' ? task.reviewerId : null;
           task = update('tasks', { ...task, stage, status: 'running', activeAgentId, error: '', updatedAt: now() });
         }
       });
@@ -483,5 +598,5 @@ export function createWorkflow({
     }
   }
 
-  return { initializeStudio, decidePlan, updatePlanAgents, setStudioRunning, resumeInbox, queue };
+  return { initializeStudio, decidePlan, updatePlanAgents, setStudioRunning, resumeInbox, startStandaloneTraining, queue };
 }

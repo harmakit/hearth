@@ -3,6 +3,7 @@ import { paintRooms } from './room-art.mjs';
 import { publishedPaths, renderWork } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey, readPolicyRows } from './model-policy.mjs';
+import { coachTitle, parseSkillTopics, pendingDependencies, renderSkillLibrary, renderSkillPreview, renderTrainingDetails, roleReadiness, skillMinStars, skillStarLabel } from './coach-view.mjs';
 
 const bridge = window.hearth;
 const $ = selector => document.querySelector(selector);
@@ -12,8 +13,9 @@ const form = $('#dialog-form');
 const configureDialogSize = installDialogSize(dialog, () => stored('dialog-size'), value => stored('dialog-size', value));
 const runtimeNames = { codex: 'Codex', claude: 'Claude Code' };
 const modeNames = { inherit: 'Как у директора', fixed: 'Фиксированные модель и усилие', dynamic: 'Выбирает директор' };
-const views = { overview: 'Обзор', work: 'Работа', inbox: 'Входящие', workshop: 'Мастерская', settings: 'Настройки' };
+const views = { overview: 'Обзор', work: 'Работа', inbox: 'Входящие', workshop: 'Мастерская', skills: 'Библиотека', settings: 'Настройки' };
 const icons = {
+  skills: '<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="8" y="4" width="5" height="16" rx="1"/><path d="m16 5 4-1 3 15-4 1zM5 8h1m4 0h1"/>',
   overview: '<rect x="3" y="3" width="7" height="8" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/>',
   work: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m6-16v16M5.5 8h1m5 0h1m5 0h1"/>',
   inbox: '<path d="M5 4h14l3 9v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-6zM2 13h6l2 3h4l2-3h6"/>',
@@ -52,6 +54,7 @@ const expandedEpics = new Set();
 let advancedOpen = false;
 let policyPromptShown = false;
 let policyRowId = 0;
+let skillSearch = { topics: '', preview: {} };
 
 function stored(key, value) {
   try {
@@ -75,9 +78,9 @@ const heading = (title, detail = '', actions = '') => `<header class="page-headi
 const empty = (title, detail, action = '') => `<div class="panel empty"><h2>${safe(title)}</h2><p class="muted">${safe(detail)}</p>${action}</div>`;
 const badge = (label, tone = '') => `<span class="status ${tone}"><span aria-hidden="true"></span>${safe(label)}</span>`;
 const status = task => badge(...(statuses[task.status] ?? [task.status, '']));
-const titleFor = agent => agent?.roleTitle || roleNames[agent?.role] || agent?.role || 'Директор';
-const nameFor = agent => agent?.name || titleFor(agent);
-const secondaryTitle = agent => agent?.name && agent.name !== titleFor(agent) ? titleFor(agent) : '';
+const titleFor = agent => agent?.systemRole === 'coach' ? coachTitle : agent?.roleTitle || roleNames[agent?.role] || agent?.role || 'Директор';
+const nameFor = agent => agent?.systemRole === 'coach' ? coachTitle : agent?.name || titleFor(agent);
+const secondaryTitle = agent => nameFor(agent) !== titleFor(agent) ? titleFor(agent) : '';
 const taskAgent = task => studio()?.agents?.find(agent => agent.id === task.agentId);
 const runtimeName = runtime => runtimeNames[runtime] ?? runtime;
 const configText = value => [runtimeName(value?.runtime), value?.model, value?.effort].filter(Boolean).join(' · ');
@@ -101,6 +104,7 @@ function selectStudio(id) {
   workTab = undefined;
   expandedEpics.clear();
   advancedOpen = false;
+  skillSearch = { topics: '', preview: {} };
   stored('studio', studioId);
 }
 
@@ -109,6 +113,7 @@ async function refresh() {
   try {
     const snapshot = await bridge.request('snapshot');
     if (version !== snapshotVersion) return;
+    const previousTraining = taskDialog && renderTrainingDetails(taskDialog, studio(), tasks());
     state = snapshot;
     if (!studio()) selectStudio(snapshot.studios[0]?.id);
     ready = true;
@@ -116,7 +121,8 @@ async function refresh() {
     maybePromptModelPolicy();
     if (dialog.open && !dialogBusy && taskDialog) {
       const latest = snapshot.tasks.find(task => task.id === taskDialog.id);
-      if (latest && JSON.stringify(latest) !== JSON.stringify(taskDialog)) openTask(latest);
+      if (latest && (JSON.stringify(latest) !== JSON.stringify(taskDialog) ||
+          previousTraining !== renderTrainingDetails(latest, studio(), tasks()))) openTask(latest);
     }
   } catch (error) {
     if (version === snapshotVersion) {
@@ -133,13 +139,15 @@ function render() {
   const focusRoot = [content, $('#navigation')].find(container => container.contains(focused) && focused !== container);
   const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab'].includes(key));
   const autonomyFocused = focused?.getAttribute('name') === 'approveSprints';
+  const skillFieldSelection = focused?.matches('[data-skill-search] [name="topics"]')
+    ? [focused.selectionStart, focused.selectionEnd] : null;
   picker.disabled = !state.studios.length;
   picker.innerHTML = state.studios.map(item => option(String(item.id), item.name, studioId)).join('') || '<option>Нет студий</option>';
   const openCount = entries().filter(item => item.status === 'open').length;
   $('#navigation').innerHTML = Object.entries(views).map(([key, label]) => `<button type="button" data-view="${key}"${view === key ? ' aria-current="page"' : ''}>${glyph(key)}<span>${label}</span>${key === 'inbox' && openCount ? `<span class="nav-count">${openCount}</span>` : ''}</button>`).join('');
   $('#breadcrumb').innerHTML = `<span>${safe(current?.name || 'Hearth Studio')}</span><span aria-hidden="true">›</span><strong>${views[view]}</strong>`;
   content.innerHTML = current || view === 'settings'
-    ? ({ overview, work, inbox, workshop, settings })[view]()
+    ? ({ overview, work, inbox, workshop, skills, settings })[view]()
     : heading(views[view]) + empty('Создайте студию', 'Опишите проект, выберите рабочую папку и подключение директора.', button('Создать студию', 'data-open="studio"'));
   if (view === 'workshop' && current) paintRooms(content);
   if (focusTarget) {
@@ -147,6 +155,11 @@ function render() {
     Array.from(focusRoot.querySelectorAll('button')).find(node => node.dataset[key] === value)?.focus();
   }
   if (autonomyFocused) content.querySelector('[name="approveSprints"]')?.focus();
+  if (skillFieldSelection) {
+    const topics = content.querySelector('[data-skill-search] [name="topics"]');
+    topics?.focus();
+    topics?.setSelectionRange(...skillFieldSelection);
+  }
 }
 
 function work() {
@@ -155,6 +168,41 @@ function work() {
     studio: studio(), tasks: tasks(), epics: rows('epics'), stories: rows('stories'),
     sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab, expandedEpics,
   });
+}
+
+function skills() {
+  const current = studio();
+  return heading('Библиотека', current.name) + renderSkillLibrary({
+    studio: current, skills: (state.skills ?? []).filter(skill => skill.studioId === current.id), ...skillSearch,
+  });
+}
+
+function updateSkillPreview(search, preview) {
+  if (skillSearch !== search) return;
+  search.preview = preview;
+  const results = content.querySelector('[data-skill-preview]');
+  const submit = content.querySelector('[data-skill-search] button[type="submit"]');
+  if (results && submit) {
+    results.innerHTML = renderSkillPreview(preview);
+    submit.setAttribute('aria-disabled', String(preview.status === 'pending'));
+  }
+}
+
+async function searchSkills() {
+  const search = skillSearch;
+  if (search.preview.status === 'pending') return;
+  const topics = parseSkillTopics(search.topics);
+  if (!topics.length) {
+    updateSkillPreview(search, { status: 'error', error: 'Введите хотя бы одну тему.' });
+    return;
+  }
+  updateSkillPreview(search, { status: 'pending' });
+  try {
+    const { candidates, warnings } = await bridge.request('searchSkillRepositories', { studioId: studio().id, topics });
+    updateSkillPreview(search, { status: 'done', candidates, warnings });
+  } catch (error) {
+    updateSkillPreview(search, { status: 'error', error: error.message || 'Поиск на GitHub недоступен. Попробуйте ещё раз.' });
+  }
 }
 
 function route(next) {
@@ -313,9 +361,10 @@ function workshop() {
       scheduled: current.scheduleWaiting && (director || currentJob?.status === 'queued'),
     });
     const openJob = pin && currentJob && ['running', 'waiting', 'queued'].includes(currentJob.status) && currentJob.stage !== 'backlog';
-    return `<button type="button" class="${pin ? 'map-pin' : 'list-row role-row'}" data-agent="${safe(key)}" data-activity="${tone}" aria-pressed="${chosen}"${openJob ? ` data-desk-task="${safe(currentJob.id)}" aria-haspopup="dialog"` : ''}>
+    return `<button type="button" class="${pin ? 'map-pin' : 'list-row role-row'}" data-agent="${safe(key)}" data-activity="${tone}" aria-pressed="${chosen}"${person.systemRole === 'coach' ? ' data-system-role="coach"' : ''}${openJob ? ` data-desk-task="${safe(currentJob.id)}" aria-haspopup="dialog"` : ''}>
       <canvas width="40" height="40" data-desk="${props || 'notebook'}" data-actor-key="${safe(`${current.id}:${person.id ?? 'director'}`)}" data-actor-state="${actor}" aria-hidden="true"></canvas>
-      <span><strong>${safe(nameFor(person))}</strong><small>${pin ? safe(activity) : safe([secondaryTitle(person), activity].filter(Boolean).join(' · '))}</small></span>
+      <span><strong>${safe(nameFor(person))}</strong><small>${pin ? safe(activity) : safe([secondaryTitle(person), activity].filter(Boolean).join(' · '))}</small>
+        ${pin ? '' : roleReadiness(person, currentTasks, { showTask: false })}</span>
     </button>`;
   };
   return heading('Мастерская', `Комнат: ${rooms.length} · Участников: ${roster.length}`, button('Настроить состав', 'data-view="settings"', true)) +
@@ -326,11 +375,12 @@ function workshop() {
         </div></section>`).join('')}
     </div><div class="split workshop-detail"><article class="panel padded stack compact">
       <div class="row"><h2>${safe(nameFor(agent))}</h2>${badge(...activityFor(agent))}</div>
-      <p class="muted">${safe([room.name, agent.name && agent.roleTitle].filter(Boolean).join(' · '))}</p>
+      <p class="muted">${safe([room.name, secondaryTitle(agent)].filter(Boolean).join(' · '))}</p>
+      ${agent.id != null ? `<div class="role-readiness">${roleReadiness(agent, currentTasks)}</div>` : ''}
       ${agent.description ? `<p>${safe(agent.description)}</p>` : ''}
       ${job ? `<div class="inline-result"><strong>${safe(job.title)}</strong>${job.summary ? plain(job.summary, 'muted clamp') : ''}</div>`
         : '<p>У агента пока нет задачи.</p>'}
-      <div class="actions">${job ? actionFor('Открыть задачу', 'task', job.id, false) : ''}${actionFor('Поставить задачу', 'new-task', agent.id ?? '', !!job)}</div>
+      <div class="actions">${job ? actionFor('Открыть задачу', 'task', job.id, false) : ''}${agent.systemRole === 'coach' ? '' : actionFor('Поставить задачу', 'new-task', agent.id ?? '', !!job)}</div>
     </article><section class="stack compact"><h2>Роли</h2><div class="panel work-list">${rooms.flatMap(zone => zone.desks.map(({ agent: person, props }) => renderAgent(person, false, props))).join('')}</div></section></div>`;
 }
 
@@ -384,11 +434,15 @@ function settings() {
           ${button('Настроить список', 'data-open="studio-model-policy"', true)}</div>
           ${policySummary(studioAllowed(current))}</div>
       </div></section>
+      <section class="stack compact"><h2>Библиотека</h2><div class="panel padded row">
+        <div><h3>Порог поиска на GitHub</h3><p class="muted">Минимум звёзд · ${skillStarLabel(current)}</p></div>
+        ${button('Настроить порог', 'data-open="skill-settings"', true)}</div></section>
       <details class="panel padded advanced" id="advanced"${advancedOpen ? ' open' : ''}><summary>Расширенные настройки</summary><div class="stack">
       <section class="stack compact"><div class="row"><h2>Роли</h2>${button('Добавить агента', 'data-open="agent"')}</div>
-        <div class="panel work-list">${current.agents?.length ? current.agents.map(agent => `<div class="list-row static-row"><span><strong>${safe(nameFor(agent))}</strong>
+        <div class="panel work-list">${current.agents?.length ? current.agents.map(agent => `<div class="list-row static-row"${agent.systemRole === 'coach' ? ' data-system-role="coach"' : ''}><span><strong>${safe(nameFor(agent))}</strong>
           <small>${safe([secondaryTitle(agent), modeNames[agent.mode], agent.mode === 'fixed' ? configText(agent) : ''].filter(Boolean).join(' · '))}</small>
-          ${agent.description ? `<small>${safe(agent.description)}</small>` : ''}</span>
+          ${agent.description ? `<small>${safe(agent.description)}</small>` : ''}
+          ${roleReadiness(agent, tasks(), { showTask: false })}</span>
           ${actionFor('Настроить', 'edit-agent', agent.id)}</div>`).join('')
           : '<p class="padded muted">Роли появятся после согласования плана. Здесь можно добавить агента вручную.</p>'}</div></section></div></details>` : ''}
       <section class="stack compact"><h2>Импорт и экспорт</h2><div class="panel padded stack compact">
@@ -582,7 +636,7 @@ function moveWizard(direction) {
 
 function taskEditor(agentId = '') {
   const current = studio();
-  const agents = current.agents ?? [];
+  const agents = (current.agents ?? []).filter(agent => agent.systemRole !== 'coach');
   const choices = [option('', 'Директор', agentId), ...agents.map(agent => option(String(agent.id), nameFor(agent), agentId))].join('');
   dialogTo('Новая задача', input('Название', 'title', '', 'required maxlength="160"') +
     textarea('Что нужно сделать', 'prompt', '', 'required') + select('Исполнитель', 'agentId', choices),
@@ -590,7 +644,12 @@ function taskEditor(agentId = '') {
       const agent = agents.find(item => same(item.id, raw));
       const task = await bridge.request('createTask', { studioId: current.id, ...values, ...(agent ? { agentId: agent.id } : {}) });
       try {
-        await bridge.request('startTask', { taskId: task.id });
+        const queued = await bridge.request('startTask', { taskId: task.id });
+        if (pendingDependencies(queued, new Map(tasks().map(item => [item.id, item]))).length) {
+          await refresh();
+          openTask(queued);
+          return false;
+        }
       } catch (error) {
         await refresh();
         openTask(tasks().find(entry => entry.id === task.id) ?? task);
@@ -604,7 +663,15 @@ function openTask(task) {
   const latest = tasks().find(entry => entry.id === task.id) ?? task;
   const entry = entries().find(item => item.taskId === latest.id && item.status === 'open' && ['question', 'acceptance'].includes(item.kind));
   const canCancel = !latest.workflowManaged && !latest.legacyWorktreeReview && ['running', 'waiting', 'queued'].includes(latest.status);
-  const canRun = !latest.workflowManaged && ['failed', 'interrupted', 'queued'].includes(latest.status);
+  const allTasks = tasks();
+  const dependencies = pendingDependencies(latest, new Map(allTasks.map(item => [item.id, item])));
+  const current = studio();
+  const canStartTraining = latest.kind === 'train' && !latest.sprintId && latest.status === 'queued' &&
+    !current.manualPaused && !allTasks.some(task => task.status === 'running') && ['draft', 'idle', 'active'].includes(current.lifecycle);
+  const canRun = dependencies.every(task => task.kind === 'train') &&
+    (canStartTraining || !latest.workflowManaged && ['failed', 'interrupted', 'queued'].includes(latest.status));
+  const startLabel = latest.kind === 'train' ? 'Запустить обучение' : dependencies.length ? 'Запустить после обучения'
+    : latest.status === 'queued' ? 'Запустить' : 'Запустить снова';
   const needsWorktreeReview = latest.legacyWorktreeReview === true;
   const artifact = typeof latest.artifact === 'object' && latest.artifact
     ? JSON.stringify(latest.artifact, null, 2) : latest.artifact;
@@ -613,10 +680,11 @@ function openTask(task) {
   const previousScroll = $('#dialog-body').scrollTop;
   const epic = taskEpic(latest);
   const attempts = (state.attempts ?? []).filter(attempt => attempt.taskId === latest.id).slice(-10).reverse();
-  const purposes = { task: 'Исполнение', review: 'Ревью', director: 'Решение директора', publish: 'Запись файла' };
+  const purposes = { task: 'Исполнение', review: 'Ревью', director: 'Решение директора', publish: 'Запись файла', 'training-exercise': 'Упражнение' };
   const previousFocus = dialog.contains(document.activeElement) ? Object.entries(document.activeElement.dataset)[0]?.[0] : '';
   dialogTo(latest.title, `<div class="row">${needsWorktreeReview ? badge('Ждёт сверки рабочего дерева', 'warn') : status(latest)}<span class="muted">${safe(nameFor(taskAgent(latest)))}</span></div>` +
     (epic ? `<div class="actions">${actionFor('К эпику', 'epic-link', epic.id)}<span class="muted">${safe(epic.title)}</span></div>` : '') +
+    renderTrainingDetails(latest, studio(), allTasks) +
     block('Постановка задачи', latest.prompt) + block('Критерии', listText(latest.criteria)) + block('Ошибка', latest.error) +
     (latest.summary && latest.summary !== artifact ? block('Краткий отчёт', latest.summary) : '') +
     block('Ревью', latest.review) + block('Решение директора', latest.directorDecision) +
@@ -629,7 +697,7 @@ function openTask(task) {
       ${latest.artifactPath ? actionFor('Открыть файл', 'artifact', latest.id, false) : ''}
       ${entry ? actionFor(entry.kind === 'acceptance' ? 'Открыть приёмку' : 'Ответить на вопрос', 'inbox', entry.id, false) : ''}
       ${canRun ? needsWorktreeReview ? actionFor('Сверить рабочее дерево', 'review-worktree', latest.id, false)
-        : actionFor(latest.status === 'queued' ? 'Запустить' : 'Запустить снова', 'start-task', latest.id, false) : ''}
+        : actionFor(startLabel, 'start-task', latest.id, false) : ''}
       ${canCancel ? actionFor('Отменить задачу', 'cancel-task', latest.id) : ''}
     </div>`, undefined, undefined, { adjustable: true });
   taskDialog = latest;
@@ -707,7 +775,7 @@ function planBody(plan) {
     ${plan.goal ? `<p>${safe(plan.goal)}</p>` : ''}
     ${entity('Эпик', plan.epic)}${entity('Первая история', plan.story)}
     ${agents.length ? `<section class="stack compact"><h3>Команда</h3><ul class="plan-list">${agents.map(agent =>
-      `<li><strong>${safe(nameFor(agent))}</strong>${agent.name && agent.name !== titleFor(agent) ? `<span class="muted"> · ${safe(titleFor(agent))}</span>` : ''}
+      `<li><strong>${safe(nameFor(agent))}</strong>${secondaryTitle(agent) ? `<span class="muted"> · ${safe(secondaryTitle(agent))}</span>` : ''}
         <div>${safe(agent.description || roleDetails[agent.role] || '')}</div>
         ${planAgentModelSummary(agent, plan.kind === 'initial')}</li>`).join('')}</ul></section>` : ''}
     ${plan.tasks?.length ? `<section class="stack compact"><h3>Задачи</h3><ol class="plan-list">${plan.tasks.map(task => `<li>
@@ -778,10 +846,10 @@ function planTeamEditor(plan) {
       <legend>${safe(nameFor(agent))}</legend>
       ${agent.description ? `<p>${safe(agent.description)}</p>` : ''}
       ${planAgentModelSummary(agent, false)}
-      <div class="policy-controls">
+      ${agent.systemRole === 'coach' ? '' : `<div class="policy-controls">
         ${input('Название роли', `plan-title-${index}`, agent.roleTitle, `data-plan-role-title maxlength="120" placeholder="${safe(roleNames[agent.role] ?? '')}"`)}
         ${input('Имя (необязательно)', `plan-name-${index}`, agent.name, 'data-plan-name maxlength="120"')}
-      </div>
+      </div>`}
       <label class="field"><span>Выбор модели</span><select name="plan-mode-${index}" data-plan-mode>${Object.entries(modeNames)
         .map(([id, label]) => option(id, label, mode)).join('')}</select></label>
       <p class="muted" data-plan-dynamic${mode === 'dynamic' ? '' : ' hidden'}>${choices.length ? 'Для первого спринта действует предложение директора, пока оно в разрешённом списке. Для остальных задач директор выбирает модель и усилие отдельно.'
@@ -807,8 +875,10 @@ function planTeamEditor(plan) {
         const edits = {};
         const set = (field, value, previous = '') => { if (value !== (current[field] ?? previous)) edits[field] = value; };
         set('mode', mode, 'dynamic');
-        set('roleTitle', value('[data-plan-role-title]'));
-        set('name', value('[data-plan-name]'));
+        if (current.systemRole !== 'coach') {
+          set('roleTitle', value('[data-plan-role-title]'));
+          set('name', value('[data-plan-name]'));
+        }
         if (mode === 'fixed') {
           const choice = currentChoices.find(item => modelKey(item) === value('[data-plan-model]'));
           const effort = value('[data-plan-effort]');
@@ -871,6 +941,17 @@ function directorEditor() {
   const current = studio();
   dialogTo('Модель директора', runtimeFields(current.director, effortField(current.director)), 'Сохранить директора',
     values => bridge.request('updateStudio', { studioId: current.id, director: modelConfig(values) }));
+}
+
+function skillSettingsEditor() {
+  const current = studio();
+  dialogTo('Порог поиска навыков', input('Минимум звёзд на GitHub', 'skillMinStars', skillMinStars(current),
+    'type="number" min="0" step="1" required'), 'Сохранить', async values => {
+    const threshold = Number(values.skillMinStars);
+    if (!Number.isSafeInteger(threshold) || threshold < 0) throw new Error('Введите целое число звёзд от 0.');
+    await bridge.request('updateStudio', { studioId: current.id, skillMinStars: threshold });
+    if (studio()?.id === current.id) skillSearch = { topics: skillSearch.topics, preview: {} };
+  });
 }
 
 const studioPolicyMode = current => current.allowedMode ?? (current.allowed?.length ? 'studio' : 'app');
@@ -981,6 +1062,7 @@ function maybePromptModelPolicy() {
 
 function agentEditor(agent) {
   const current = studio();
+  const isCoach = agent?.systemRole === 'coach';
   const mode = agent?.mode ?? 'dynamic';
   const role = agent?.role === 'director' ? 'other' : agent?.role ?? 'other';
   const restricted = state.modelPolicy?.configured === true || studioPolicyMode(current) === 'studio';
@@ -996,14 +1078,15 @@ function agentEditor(agent) {
     : runtimeFields(agent, effortField(agent));
   const roleChoices = Object.entries(roleNames).filter(([id]) => id !== 'director')
     .map(([id, name]) => option(id, name, role)).join('');
-  dialogTo(agent ? 'Настроить агента' : 'Новый агент',
-    input('Имя (необязательно)', 'name', agent?.name, 'maxlength="120"') +
+  const roleFields = isCoach ? '' : input('Имя (необязательно)', 'name', agent?.name, 'maxlength="120"') +
     input('Название роли (необязательно)', 'roleTitle', agent?.roleTitle, 'maxlength="120"') + select('Категория роли', 'role', roleChoices) +
-    `<p id="role-guide" class="muted">${safe(roleDetails[role])}</p>` + textarea('Назначение роли', 'description', agent?.description) +
+    `<p id="role-guide" class="muted">${safe(roleDetails[role])}</p>` + textarea('Назначение роли', 'description', agent?.description);
+  dialogTo(isCoach ? coachTitle : agent ? 'Настроить агента' : 'Новый агент', roleFields +
+    (agent ? '' : input('Темы обучения на GitHub (необязательно)', 'trainingTopics', '', 'placeholder="Через запятую"')) +
     select('Выбор модели', 'mode', Object.entries(modeNames).map(([id, name]) => option(id, name, mode)).join('')) +
     `<div class="form-body" id="fixed-options"${mode === 'fixed' ? '' : ' hidden'}>${fixedOptions}</div>
       <p class="muted" id="dynamic-options"${mode === 'dynamic' ? '' : ' hidden'}>Директор выбирает модель и усилие для задачи из разрешённого списка студии. Если список пуст, действуют настройки директора.</p>`,
-    'Сохранить агента', ({ name, roleTitle, role, mode, description, ...config }) => {
+    'Сохранить агента', ({ name, roleTitle, role, mode, description, trainingTopics, ...config }) => {
       let fixed = {};
       if (mode === 'fixed' && restricted) {
         const choice = fixedModelChoices(studioAllowed(studio())).find(item => modelKey(item) === config['agent-model']);
@@ -1014,8 +1097,9 @@ function agentEditor(agent) {
         if (!config.model) throw new Error('Укажите фиксированную модель.');
         fixed = modelConfig(config);
       }
-      const payload = { studioId: current.id, name, roleTitle, role, mode, description, ...fixed };
-      return bridge.request(agent ? 'updateAgent' : 'addAgent', agent ? { ...payload, agentId: agent.id } : payload);
+      const payload = { studioId: current.id, ...(!isCoach && { name, roleTitle, role, description }), mode, ...fixed };
+      return bridge.request(agent ? 'updateAgent' : 'addAgent', agent ? { ...payload, agentId: agent.id }
+        : { ...payload, trainingTopics: parseSkillTopics(trainingTopics) });
     });
 }
 
@@ -1182,6 +1266,7 @@ const commands = {
   director: directorEditor,
   'app-model-policy': () => policyEditor(),
   'studio-model-policy': () => policyEditor(studio()),
+  'skill-settings': skillSettingsEditor,
   agent: () => agentEditor(),
   import: importPreview,
   'import-bundle': () => importEditor(),
@@ -1339,6 +1424,14 @@ form.addEventListener('input', ({ target }) => {
 
 content.addEventListener('change', ({ target }) => {
   if (target.name === 'approveSprints') void workCommand('updateStudio', { studioId: studio().id, approveSprints: target.checked });
+});
+content.addEventListener('input', ({ target }) => {
+  if (target.matches('[data-skill-search] [name="topics"]')) skillSearch.topics = target.value;
+});
+content.addEventListener('submit', event => {
+  if (!event.target.matches('[data-skill-search]')) return;
+  event.preventDefault();
+  void searchSkills();
 });
 content.addEventListener('toggle', ({ target }) => {
   if (target.id === 'advanced' && target.isConnected) advancedOpen = target.open;

@@ -1,0 +1,45 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { renderWork } from '../renderer/work-view.mjs';
+import { renderSkillLibrary, renderTrainingDetails, roleReadiness } from '../renderer/coach-view.mjs';
+
+const trainee = { id: 'editor', name: 'Редактор <мира>', trainingStatus: 'pending', skillIds: ['skill'] };
+const coach = { id: 'coach', name: 'Прежний библиотекарь', role: 'library', systemRole: 'coach', trainingStatus: 'ready' };
+const train = { id: 'train-editor', kind: 'train', stage: 'review', status: 'completed', agentId: coach.id,
+  title: 'Знакомство с проектом', training: { targetAgentId: trainee.id, objective: 'Освоить карту', topics: ['карты'],
+    warnings: ['Ограничение GitHub'], guide: 'Проверить масштаб', exercise: 'Масштаб проверен' } };
+const production = { id: 'work', title: 'Составить карту', agentId: trainee.id, dependencies: [train.id], stage: 'backlog' };
+
+test('board shows coach, trainee and a linked training prerequisite until approval', () => {
+  const render = training => renderWork({ studio: { agents: [coach, trainee] }, tasks: [production, training] });
+  const pending = render(train);
+  assert.match(pending, /data-task-kind="train"[^]*?Коуч агентов[^]*?Обучение[^]*?Редактор &lt;мира&gt;/);
+  assert.match(pending, /Составить карту[^]*?Ждёт обучения[^]*?data-task="train-editor"/);
+  assert.doesNotMatch(render({ ...train, stage: 'done' }), /Ждёт обучения/);
+});
+
+test('training details show evidence and dependencies are linked with a clear reason', () => {
+  const studio = { agents: [coach, trainee] };
+  const all = [production, train];
+  assert.match(renderTrainingDetails(train, studio, all), /Обучение[^]*?Редактор &lt;мира&gt;[^]*?Освоить карту[^]*?карты[^]*?Ограничение GitHub/);
+  assert.match(renderTrainingDetails(train, studio, all), /Руководство[^]*?Проверить масштаб[^]*?Упражнение[^]*?Масштаб проверен/);
+  assert.match(renderTrainingDetails(production, studio, all), /Запуск ждёт завершения обучения[^]*?data-task="train-editor"/);
+  assert.match(roleReadiness(trainee, all), /data-training-status="pending"[^]*?Ждёт ревью обучения[^]*?data-task="train-editor"/);
+  assert.match(roleReadiness(coach, all), /data-training-status="ready"[^]*?Готов к работе/);
+});
+
+test('library separates approved versions and GitHub metadata and reports the search outcome', () => {
+  const skill = { id: 'skill', title: 'Карты', repo: 'world/maps', commit: 'abcdef1234567890',
+    path: 'tools/maps/SKILL.md', license: 'MIT', content: 'НЕ ВЫВОДИТЬ' };
+  const html = renderSkillLibrary({ studio: { agents: [trainee] }, skills: [skill], preview: {
+    status: 'done', candidates: [{ ...skill, repo: 'world/unapproved' }], warnings: ['Часть репозиториев недоступна'],
+  } });
+  assert.match(html, /10\s000/);
+  assert.match(html, /data-skill-id="skill"[^]*?world\/maps[^]*?tools\/maps\/SKILL\.md[^]*?abcdef1234567890[^]*?MIT[^]*?Редактор &lt;мира&gt;/);
+  assert.match(html, /data-skill-preview[^]*?Найдено кандидатов: 1[^]*?Часть репозиториев недоступна[^]*?world\/unapproved/);
+  assert.equal((html.match(/data-skill-id=/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /НЕ ВЫВОДИТЬ/);
+  assert.match(renderSkillLibrary({ studio: { skillMinStars: 42 }, preview: { status: 'done', candidates: [] } }), /42[^]*?Подходящих навыков не найдено/);
+  assert.match(renderSkillLibrary({ preview: { status: 'done', candidates: [], warnings: ['Ошибка API'] } }), /Поиск выполнен частично[^]*?Ошибка API/);
+  assert.match(renderSkillLibrary({ preview: { status: 'error', error: 'Ошибка API' } }), /role="alert"[^]*?Ошибка API/);
+});

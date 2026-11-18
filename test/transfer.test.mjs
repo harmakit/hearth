@@ -148,7 +148,7 @@ test('a copy commits to the real studio service and keeps historical approvals i
   assert.notEqual(first.id, second.id);
   const result = service.snapshot();
   assert.equal(result.studios.length, 2);
-  assert.equal(result.tasks.length, 4);
+  assert.equal(result.tasks.filter(({ kind }) => kind !== 'train').length, 4);
   const [plan] = result.plans.filter(item => item.studioId === first.id);
   const [approval] = result.inbox.filter(item => item.planId === plan.id);
   assert.equal(plan.status, 'returned');

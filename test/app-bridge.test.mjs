@@ -96,3 +96,20 @@ test("routes model policy and pending-team edits without granting arbitrary serv
   assert.deepEqual(await dispatch("updatePlanAgents", edit), edit);
   await assert.rejects(dispatch("setModelPolicyUnsafe", { allowed }), /команда/i);
 });
+
+test("owner skill previews use the studio threshold and return metadata only", async () => {
+  const calls = [];
+  const dispatch = router({ snapshot: () => ({ studios: [{ id: "s1", skillMinStars: 10000 }] }) }, {
+    findSkills(input) {
+      calls.push(input);
+      return { candidates: [{ id: "skill", repo: "example/agent-skills", title: "Skill", stars: 12345,
+        content: "# Source Markdown", authorization: "excluded" }], warnings: [] };
+    },
+  });
+  const result = await dispatch("searchSkillRepositories", { studioId: "s1", topics: ["react"], minStars: 0 });
+  assert.deepEqual(calls, [{ topics: ["react"], minStars: 10000 }]);
+  assert.equal(result.candidates[0].repo, "example/agent-skills");
+  assert.equal(Object.hasOwn(result.candidates[0], "content"), false);
+  assert.equal(Object.hasOwn(result.candidates[0], "authorization"), false);
+  await assert.rejects(dispatch("searchSkillRepositories", { studioId: "s2", topics: ["react"] }), /студия/i);
+});

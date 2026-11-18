@@ -4,7 +4,7 @@ import { prepareLegacySnapshot } from './legacy.mjs';
 
 const format = 'hearth-studio';
 const version = 1;
-const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings'];
+const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills'];
 const maxRecords = 20_000;
 const maxArtifactBytes = 1024 * 1024;
 const maxArtifactsBytes = 8 * maxArtifactBytes;
@@ -15,7 +15,7 @@ const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'fai
 
 const fields = {
   studio: ['name', 'brief', 'language', 'allowedMode'],
-  agent: ['key', 'name', 'description', 'role', 'roleTitle', 'mode', 'runtime', 'model', 'effort'],
+  agent: ['key', 'name', 'description', 'role', 'roleTitle', 'mode', 'runtime', 'model', 'effort', 'systemRole'],
   director: ['runtime', 'model', 'effort'],
   tasks: ['key', 'title', 'prompt', 'summary', 'artifact', 'error', 'review', 'directorDecision', 'createdAt', 'updatedAt', 'legacyId', 'legacyStatus', 'legacyBranch', 'kind', 'type'],
   inbox: ['title', 'body', 'status', 'kind', 'answer', 'createdAt', 'updatedAt', 'legacyId'],
@@ -24,11 +24,12 @@ const fields = {
   stories: ['title', 'goal', 'description', 'status', 'createdAt', 'updatedAt', 'legacyId'],
   sprints: ['title', 'goal', 'description', 'summary', 'status', 'createdAt', 'updatedAt', 'legacyId'],
   meetings: ['title', 'summary', 'body', 'description', 'status', 'kind', 'decision', 'createdAt', 'updatedAt', 'legacyId'],
+  skills: ['repo', 'commit', 'path', 'title', 'license', 'url', 'content'],
 };
 
 const links = {
   agentId: 'agents', reviewerId: 'agents', taskId: 'tasks', parentTaskId: 'tasks', reviewTaskId: 'tasks',
-  planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings',
+  planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings', targetedTrainingId: 'tasks',
   dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents',
 };
 const listLinks = new Set(['dependencies', 'taskIds', 'storyIds', 'agentIds']);
@@ -124,7 +125,7 @@ function planFields(record, text, agentIds, selectedPaths) {
     output[key] = list(record[key], key).map(entry => {
       const item = object(entry, key);
       const copy = copyFields(item, draftFields[key], text);
-      for (const detail of ['criteria', 'dependencies', 'dependsOn']) {
+      for (const detail of ['criteria', 'dependencies', 'dependsOn', 'trainingTopics']) {
         const value = textList(item[detail], detail, text);
         if (value !== undefined) copy[detail] = value;
       }
@@ -187,11 +188,15 @@ function copyPayload(source, { mode, toBundle, root, name }) {
       ...copyFields(object(entry, 'модель'), fields.director, text),
       efforts: list(entry.efforts, 'уровни усилий').filter(effort => typeof effort === 'string').map(text),
     })),
-    agents: agents.map(agent => ({
-      ...copyFields(agent, fields.agent, text),
-      id: ids.agents.get(agent.id),
-    })),
+    agents: agents.map(agent => {
+      const trainingTaskId = mode === 'snapshot' && agent.trainingTaskId && link('tasks', agent.trainingTaskId);
+      return {
+        ...copyFields(agent, fields.agent, text), id: ids.agents.get(agent.id),
+        ...(trainingTaskId ? { trainingTaskId, skillIds: list(agent.skillIds, 'навыки').map(id => link('skills', id)).filter(Boolean) } : {}),
+      };
+    }),
     approveSprints: input.approveSprints !== false,
+    ...(Number.isSafeInteger(input.skillMinStars) && input.skillMinStars >= 0 ? { skillMinStars: input.skillMinStars } : {}),
     lifecycle: mode === 'template' ? 'draft' : 'paused',
   };
   if (!studio.name?.trim()) throw new Error('Укажите название студии.');
@@ -204,7 +209,8 @@ function copyPayload(source, { mode, toBundle, root, name }) {
   const payload = { studio, artifacts };
   for (const [kind, records] of Object.entries(rows)) {
     payload[kind] = records.map(record => {
-      const copy = { ...copyFields(record, fields[kind], text), id: ids[kind].get(record.id), studioId };
+      const copy = { ...copyFields(record, fields[kind], kind === 'skills' ? value => value : text), id: ids[kind].get(record.id), studioId };
+      if (kind === 'skills') copy.stars = record.stars;
       for (const [key, target] of Object.entries(links)) {
         const value = record[key];
         if (value === undefined) continue;
@@ -221,6 +227,17 @@ function copyPayload(source, { mode, toBundle, root, name }) {
       }
       if (kind === 'plans') Object.assign(copy, planFields(record, text, ids.agents, selectedPaths));
       if (kind === 'tasks') {
+        if (record.kind === 'train' && record.training) {
+          const training = object(record.training, 'обучение');
+          copy.training = {
+            ...copyFields(training, ['objective', 'guide', 'exercise', 'searchOutcome'], text),
+            targetAgentId: link('agents', training.targetAgentId),
+            topics: list(training.topics, 'темы обучения', 12).map(text),
+            warnings: list(training.warnings, 'результат поиска').map(text),
+            skillIds: list(training.skillIds, 'навыки').map(id => link('skills', id)).filter(Boolean),
+            ...(training.bootstrap === true ? { bootstrap: true } : {}),
+          };
+        }
         const interrupted = ['running', 'scheduled'].includes(record.status);
         copy.status = statuses.includes(record.status) && !interrupted ? record.status : 'queued';
         copy.stage = interrupted && record.stage === 'in_progress' ? 'ready'
@@ -259,7 +276,8 @@ export function makeStudioBundle(snapshot, { studioId, mode, artifacts } = {}) {
 export function prepareBundleImport(bundle, { name, root } = {}) {
   if (bundle?.format !== format || bundle.version !== version) throw new Error('Версия или формат пакета студии не поддерживается.');
   if (!modes.includes(bundle.mode)) throw new Error('Неверный формат режима экспорта.');
-  return copyPayload(bundle, { mode: bundle.mode, root, name });
+  const payload = copyPayload(bundle, { mode: bundle.mode, root, name });
+  return bundle.mode === 'template' ? { ...payload, trainRoster: true } : payload;
 }
 
 export async function prepareLegacyImport({ source, root, name, artifactPaths } = {}) {

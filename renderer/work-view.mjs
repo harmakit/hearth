@@ -1,4 +1,5 @@
 import { roleNames } from './workshop.mjs';
+import { coachTitle, renderBoardTraining } from './coach-view.mjs';
 
 const tabs = {
   board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи', artifacts: 'Артефакты',
@@ -71,7 +72,7 @@ function linkedTasks(tasks, byTask) {
   }).join('')}</ul>`;
 }
 
-function board(tasks, studio) {
+function board(tasks, studio, byTask) {
   if (!tasks.length) return empty('На доске пока пусто', 'Задачи появятся здесь после согласования плана или создания вручную.');
   const byStage = Map.groupBy(tasks, stageOf);
   const agents = new Map((studio.agents ?? []).map(agent => [agent.id, agent]));
@@ -82,12 +83,13 @@ function board(tasks, studio) {
         <header><h2 id="work-stage-${stage}">${label}</h2><span>${lane.length}</span></header>
         <ul>${lane.map(task => {
           const agent = agents.get(task.agentId);
-          const owner = agent ? (agent.name || lookup(roleNames, agent.role)) :
+          const owner = agent ? (agent.systemRole === 'coach' ? coachTitle : agent.name || lookup(roleNames, agent.role)) :
             (task.agentId ? '' : (studio.director?.name || 'Директор'));
           const attempt = lookup(attempts, task.status) ?? task.status;
-          return `<li class="work-task">
+          return `<li class="work-task"${task.kind === 'train' ? ' data-task-kind="train"' : ''}>
             ${taskLink(task, false)}
             ${owner ? `<p class="work-owner">${safe(owner)}</p>` : ''}
+            ${renderBoardTraining(task, agents, byTask)}
             ${attempt ? `<p class="work-attempt" data-attempt="${safe(task.status)}"><span>Попытка</span> ${safe(attempt)}</p>` : ''}
           </li>`;
         }).join('')}</ul>
@@ -249,7 +251,7 @@ export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], 
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
   const views = {
-    board: () => board(tasks, studio),
+    board: () => board(tasks, studio, byTask),
     epics: () => epicView(epics, stories, tasks, byTask, expandedEpics),
     sprints: () => sprintView(sprints, plans, tasks, byTask),
     meetings: () => meetingsView(meetings, byTask, sprints),

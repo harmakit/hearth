@@ -91,7 +91,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-.work-view .work-lane ul,
+.work-view .work-lane > ul,
 .work-view .work-links,
 .work-view .work-dependencies ul {
   display: grid;
@@ -374,4 +374,68 @@
   .work-view .work-lane:has(> ul:empty) {
     min-height: 0;
   }
+}
+.training-readiness {
+  color: var(--green);
+  font-size: 13px;
+}
+
+.training-readiness[data-training-status="pending"] {
+  color: var(--yellow);
+}
+
+.role-readiness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+
+.training-trainee,
+.training-dependencies {
+  font-size: 13px;
+}
+
+.training-dependencies {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--yellow-soft);
+  color: var(--yellow);
+}
+
+.training-link {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.training-dependencies ul,
+.skill-warnings {
+  margin: 4px 0 0;
+  padding-inline-start: 1.25em;
+}
+
+.skill-preview,
+.skill-candidates {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.skill-candidates > li {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.skill-source {
+  font-size: 13px;
+}
+
+[data-skill-search] button[aria-disabled="true"] {
+  cursor: progress;
+  opacity: .65;
 }

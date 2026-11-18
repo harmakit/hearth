@@ -162,6 +162,7 @@ async function start() {
     { previewImport },
     { createArtifactStore },
     { createTransferController },
+    { createGitHubSkillFinder },
   ] = await Promise.all([
     import("./bridge.mjs"),
     import("../core/service.mjs"),
@@ -169,6 +170,7 @@ async function start() {
     import("../migration/preview.mjs"),
     import("./artifacts.mjs"),
     import("./transfer.mjs"),
+    import("./github-skills.mjs"),
   ]);
   protocol.handle("hearth", async ({ url }) => {
     try {
@@ -201,10 +203,12 @@ async function start() {
   }
   const validateRoot = root => validateProjectRoot(root, protectedRoots);
   const artifacts = createArtifactStore({ receipts: path.join(dataDir, "artifact-receipts"), validateRoot });
+  const { findSkills } = createGitHubSkillFinder();
   service = createStudioService({
     dbPath: path.join(dataDir, "studio.sqlite3"),
     run: async request => run({ ...request, projectRoot: await validateRoot(request.projectRoot) }),
     writeArtifact: artifacts.write,
+    findSkills,
     onChange: broadcast,
     notify,
   });
@@ -222,7 +226,7 @@ async function start() {
   scheduleTimer.unref();
   powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
-    service, selectFolder: pickFolder, inspect, previewImport, transfer, protectedRoots,
+    service, selectFolder: pickFolder, inspect, previewImport, findSkills, transfer, protectedRoots,
     async openProject(root) {
       const error = await shell.openPath(root);
       if (error) throw new Error("Не удалось открыть папку проекта: " + error);

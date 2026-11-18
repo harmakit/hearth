@@ -1,11 +1,11 @@
-import { field, object, relativeArtifactPath } from './protocol.mjs';
+import { field, object, relativeArtifactPath, trainingTopics } from './protocol.mjs';
 
-const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings'];
+const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills'];
 const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'failed', 'interrupted'];
 const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'blocked'];
 const relations = {
   agentId: 'agents', reviewerId: 'agents', taskId: 'tasks', parentTaskId: 'tasks', reviewTaskId: 'tasks',
-  planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings',
+  planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings', targetedTrainingId: 'tasks',
 };
 const many = { dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents' };
 
@@ -26,9 +26,15 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
   const studioId = id(input.id);
   const agents = array(input.agents, 'agents').map((row) => {
     object(row, 'роль');
-    return { id: id(row.id), ...agentSettings(row), ...(row.key ? { key: field(row.key, 'ключ роли', 256) } : {}) };
+    return {
+      id: id(row.id), ...agentSettings(row), ...(row.key ? { key: field(row.key, 'ключ роли', 256) } : {}),
+      ...(row.systemRole === 'coach' ? { systemRole: 'coach', role: 'library' } : {}),
+      ...(row.trainingTaskId === undefined ? {} : { trainingTaskId: id(row.trainingTaskId), skillIds: array(row.skillIds, 'навыки агента') }),
+    };
   });
+  if (agents.filter(({ systemRole }) => systemRole === 'coach').length > 1) throw new Error('При импорте обнаружены два коуча агентов.');
   const normalized = {
+    trainRoster: payload.trainRoster === true && input.lifecycle === 'draft',
     studio: {
       ...studioSettings(input), id: studioId, agents,
       lifecycle: input.lifecycle === 'draft' ? 'draft' : 'paused',
@@ -63,6 +69,30 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
         row.updatedAt ??= date;
         if (row.artifactPath) row.artifactPath = relativeArtifactPath(row.artifactPath);
         if (row.artifactTarget) row.artifactTarget = relativeArtifactPath(row.artifactTarget);
+        if (row.kind === 'train') {
+          const training = object(row.training, 'обучение');
+          row.workflowManaged = true;
+          row.training = {
+            ...training, targetAgentId: id(training.targetAgentId), objective: field(training.objective, 'цель обучения'),
+            topics: trainingTopics(training.topics), selected: undefined,
+          };
+          if (row.stage !== 'done') {
+            row.stage = row.dependencies.length ? 'backlog' : 'ready';
+            row.status = 'queued';
+            row.training.skillIds = undefined;
+          } else {
+            if (row.status !== 'completed') throw new Error('В импорте отсутствует подтверждение завершения обучения.');
+            row.review = field(row.review, 'решение Директора');
+            row.training.guide = field(training.guide, 'проверенное руководство', 16_000);
+            if (!training.bootstrap) row.training.exercise = field(training.exercise, 'проверенное упражнение');
+          }
+        }
+      }
+      if (table === 'skills') {
+        const path = relativeArtifactPath(row.path).split('/').map(encodeURIComponent).join('/');
+        if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(row.repo) || !/^[a-f0-9]{40}$/i.test(row.commit)
+          || !Number.isSafeInteger(row.stars) || row.stars < 0 || typeof row.content !== 'string' || row.content.length > 256_000
+          || row.url !== `https://github.com/${row.repo}/blob/${row.commit}/${path}`) throw new Error('Некорректная закреплённая версия навыка.');
       }
       if (table === 'inbox') {
         row.createdAt ??= date;
@@ -92,7 +122,35 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
       for (const [key, target] of Object.entries(many)) {
         if (array(row[key], key).some((value) => !ids[target].has(value))) throw new Error(`Некорректная связь «${key}» при импорте.`);
       }
+      if (name === 'tasks' && row.kind === 'train' && (!ids.agents.has(row.training.targetAgentId)
+        || array(row.training.skillIds, 'навыки обучения').some((skillId) => !ids.skills.has(skillId)))) throw new Error('Некорректная связь обучения при импорте.');
     }
+  }
+  const taskById = new Map(normalized.tasks.map((task) => [task.id, task]));
+  const coach = agents.find(({ systemRole }) => systemRole === 'coach');
+  const linkedSkills = new Set();
+  for (const task of normalized.tasks) {
+    if (task.kind !== 'train') continue;
+    const bootstrap = task.training.bootstrap === true;
+    if (!coach || task.agentId !== coach.id || task.reviewerId != null || bootstrap !== (task.training.targetAgentId === coach.id)
+      || (bootstrap ? task.dependencies.length || coach.trainingTaskId !== task.id : task.dependencies.some((dependency) => dependency !== coach.trainingTaskId))) {
+      throw new Error('Некорректный маршрут обучения при импорте.');
+    }
+    if (task.stage === 'done') for (const id of task.training.skillIds ?? []) linkedSkills.add(id);
+  }
+  if (normalized.skills.some(({ id }) => !linkedSkills.has(id))) throw new Error('В импорте отсутствует подтверждение закреплённой версии навыка.');
+  for (const agent of agents) {
+    if (!agent.trainingTaskId) continue;
+    const task = taskById.get(agent.trainingTaskId);
+    if (task?.kind !== 'train' || task.training.targetAgentId !== agent.id || agent.skillIds.some((skillId) => !ids.skills.has(skillId))) {
+      throw new Error('Некорректная связь агента с обучением при импорте.');
+    }
+    agent.trainingStatus = task.stage === 'done' ? 'ready' : 'pending';
+    const approvals = normalized.tasks.filter((candidate) => candidate.kind === 'train' && candidate.stage === 'done' && candidate.training.targetAgentId === agent.id);
+    const approvedIds = new Set(approvals.flatMap(({ training }) => training.skillIds ?? []));
+    if (agent.skillIds.some((skillId) => !approvedIds.has(skillId))) throw new Error('В импорте отсутствует подтверждение выбранного навыка.');
+    const lastApproved = approvals.at(-1);
+    if (lastApproved) agent.trainingGuide = lastApproved.training.guide;
   }
   return normalized;
 }

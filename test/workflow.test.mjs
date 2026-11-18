@@ -5,7 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createStudioService } from '../core/service.mjs';
+import { createStudioService as createService } from '../core/service.mjs';
+import { productionSnapshot, trainingReply } from './fixtures/training.mjs';
+
+function createStudioService({ run, ...settings }) {
+  const service = createService({ ...settings, run: (request) => trainingReply(request) ?? run(request) });
+  return { ...service, snapshot: () => productionSnapshot(service.snapshot()) };
+}
 
 const draft = {
   title: 'Sprint', goal: 'Write a brief',
@@ -135,7 +141,7 @@ test('initial team editing includes referenced agents omitted by the planner or 
   service.addAgent({ studioId, role: 'artist', name: 'Анна' });
   service.initializeStudio({ studioId });
   const { plans: [plan] } = await until(service.snapshot, ({ plans }) => plans.length === 1);
-  const { id: workerId, ...workerSettings } = worker;
+  const { id: workerId, trainingStatus, trainingTaskId, skillIds, ...workerSettings } = worker;
   assert.deepEqual(plan.agents.map(({ key }) => key), [workerId, reviewer.id]);
   assert.deepEqual(plan.agents[0], { key: workerId, ...workerSettings });
   service.setStudioRunning({ studioId, action: 'pause' });
@@ -148,7 +154,7 @@ test('initial team editing includes referenced agents omitted by the planner or 
   assert.deepEqual(service.snapshot().plans[0].agents, plan.agents);
   service.updatePlanAgents({ planId: plan.id, agents: [{ key: workerId, roleTitle: 'Главный редактор' }] });
   service.decidePlan({ planId: plan.id, decision: 'approve' });
-  const [savedWorker, savedReviewer] = service.snapshot().studios[0].agents;
+  const [savedWorker, savedReviewer] = service.snapshot().studios[0].agents.filter(({ systemRole }) => !systemRole);
   assert.deepEqual(savedWorker, { ...worker, roleTitle: 'Главный редактор' });
   const { roleTitle: unusedTitle, ...reviewerSettings } = reviewer;
   assert.deepEqual(savedReviewer, reviewerSettings);
@@ -252,9 +258,10 @@ test('scheduled workflows retain a queued continuation after hours, manual pause
   assert.deepEqual(calls, ['plan', 'task', 'review', 'director']);
   const other = service.createStudio({ name: 'Other', root: '/project' });
   service.deleteStudio({ studioId, confirmation: 'Writer' });
-  const { studios, modelPolicy, ...records } = service.snapshot();
+  const { studios, modelPolicy, training, ...records } = service.snapshot();
   assert.deepEqual(modelPolicy, { configured: false, allowed: [] });
   assert.deepEqual(studios.map(({ id }) => id), [other.id]);
+  assert.deepEqual(training.map(({ studioId }) => studioId), [other.id]);
   for (const table of Object.keys(records)) assert.deepEqual(records[table], [], table);
 });
 
@@ -267,7 +274,7 @@ test('invalid dependency graphs fail planning before creating studio records', a
   service.initializeStudio({ studioId });
   const snapshot = await until(service.snapshot, ({ studios }) => studios[0].lifecycle === 'error');
   assert.equal(snapshot.tasks.length, 0);
-  assert.equal(snapshot.studios[0].agents.length, 0);
+  assert.deepEqual(snapshot.studios[0].agents.map(({ systemRole }) => systemRole), ['coach']);
   assert.equal(snapshot.inbox[0].kind, 'error');
 });
 
@@ -305,7 +312,7 @@ test('a revised initialization survives restart and later plans can run without 
   const snapshot = await until(service.snapshot, ({ studios }) => studios[0].lifecycle === 'idle');
   assert.deepEqual(snapshot.plans.map(({ status }) => status), ['returned', 'approved', 'approved']);
   assert.deepEqual(snapshot.inbox.map(({ status }) => status), ['resolved', 'resolved']);
-  assert.equal(snapshot.studios[0].agents.length, 2);
+  assert.equal(snapshot.studios[0].agents.length, 3);
   assert.equal(snapshot.sprints.filter(({ status }) => status === 'completed').length, 2);
 });
 
