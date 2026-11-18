@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+    <title>Hearth Studio</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script type="module" src="./app.mjs"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="rail" aria-label="Навигация студии">
+        <div class="wordmark"><span class="brand-mark" aria-hidden="true"></span><span>Hearth <span>Studio</span></span></div>
+        <div class="studio-controls">
+          <label class="picker"><span>Студия</span><select id="studio-select" disabled><option>Загрузка…</option></select></label>
+          <button class="rail-button" type="button" data-open="studio"><span aria-hidden="true">＋</span> Новая студия</button>
+        </div>
+        <nav id="navigation" aria-label="Разделы"></nav>
+        <div class="local"><span aria-hidden="true"></span> Локальное приложение</div>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div id="breadcrumb" class="breadcrumb">Hearth Studio</div>
+          <label class="theme-picker"><span>Тема</span><select id="theme-select"><option value="system">Системная</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label>
+        </header>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <main id="content" tabindex="-1"><p class="muted">Загружаем студии…</p></main>
+      </div>
+    </div>
+    <dialog id="dialog" aria-labelledby="dialog-title">
+      <form id="dialog-form">
+        <header class="row dialog-heading"><h2 id="dialog-title"></h2><button type="button" class="icon-button" data-close aria-label="Закрыть">×</button></header>
+        <div id="dialog-body" class="form-body"></div>
+        <p id="dialog-error" class="error" role="alert" hidden></p>
+        <footer id="dialog-actions" class="actions"></footer>
+      </form>
+    </dialog>
+  </body>
+</html>

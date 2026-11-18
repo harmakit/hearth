@@ -1,0 +1,21 @@
+{
+  "name": "hearth-studio",
+  "productName": "Hearth Studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local desktop workspace for independent agent studios",
+  "type": "module",
+  "main": "app/main.cjs",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "package:mac": "node scripts/package-mac.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.11.4"
+  }
+}
