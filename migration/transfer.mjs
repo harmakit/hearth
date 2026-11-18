@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, posix, win32 } from 'node:path';
 import { prepareLegacySnapshot } from './legacy.mjs';
+import { copyKnowledgeRecord, copyTrainingMaterials } from '../core/import.mjs';
+import { normalizeDebtPolicy } from '../core/debt.mjs';
+import { field } from '../core/protocol.mjs';
 
 const format = 'hearth-studio';
 const version = 1;
-const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills'];
+const learningCollections = ['knowledge', 'customSkills'];
+const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills', ...learningCollections];
 const maxRecords = 20_000;
 const maxArtifactBytes = 1024 * 1024;
 const maxArtifactsBytes = 8 * maxArtifactBytes;
@@ -30,6 +34,7 @@ const fields = {
 const links = {
   agentId: 'agents', reviewerId: 'agents', taskId: 'tasks', parentTaskId: 'tasks', reviewTaskId: 'tasks',
   planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings', targetedTrainingId: 'tasks',
+  trainingTaskId: 'tasks', debtTaskId: 'tasks',
   dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents',
 };
 const listLinks = new Set(['dependencies', 'taskIds', 'storyIds', 'agentIds']);
@@ -108,7 +113,7 @@ function artifactRecords(value) {
   });
 }
 
-function planFields(record, text, agentIds, selectedPaths) {
+function planFields(record, text, agentIds, selectedPaths, link) {
   const output = {};
   for (const key of ['epic', 'story']) {
     if (record[key] === undefined) continue;
@@ -133,6 +138,8 @@ function planFields(record, text, agentIds, selectedPaths) {
         for (const field of ['agentKey', 'reviewerKey']) if (agentIds.has(item[field])) copy[field] = agentIds.get(item[field]);
         if (item.artifactPath !== undefined) copy.artifactPath = portablePath(item.artifactPath);
         if (typeof item.requiresAcceptance === 'boolean') copy.requiresAcceptance = item.requiresAcceptance;
+        if (item.kind === 'debt') copy.kind = 'debt';
+        if (item.debtTaskId !== undefined) copy.debtTaskId = link('tasks', item.debtTaskId);
       } else {
         if (agentIds.has(item.key)) copy.key = agentIds.get(item.key);
         if (item.recommendation !== undefined) {
@@ -161,6 +168,20 @@ function copyPayload(source, { mode, toBundle, root, name }) {
   const text = value => filterText(value, typeof input.root === 'string' && input.root.length > 1 ? input.root : '');
   const studioId = toBundle ? 'studio' : randomUUID();
   const rows = Object.fromEntries(collections.map(key => [key, mode === 'snapshot' ? list(source[key], key) : []]));
+  if (toBundle) {
+    const trainings = new Map(rows.tasks.filter(isApprovedTraining).map(task => [task.id, task.training]));
+    for (const kind of learningCollections) rows[kind] = rows[kind].filter(record => {
+      const training = trainings.get(record.trainingTaskId);
+      return training?.targetAgentId === record.agentId && (kind === 'knowledge'
+        ? training.knowledgeId === record.id : training.customSkillIds?.includes(record.id));
+    });
+  } else {
+    for (const kind of learningCollections) {
+      if (rows[kind].some(record => object(record, kind).studioId !== input.id)) {
+        throw new Error('Пакет содержит запись обучения другой студии.');
+      }
+    }
+  }
   const artifacts = mode === 'snapshot' ? artifactRecords(source.artifacts) : [];
   const selectedPaths = new Set(artifacts.map(({ path }) => path));
   const agents = list(input.agents, 'агенты');
@@ -199,6 +220,16 @@ function copyPayload(source, { mode, toBundle, root, name }) {
     ...(Number.isSafeInteger(input.skillMinStars) && input.skillMinStars >= 0 ? { skillMinStars: input.skillMinStars } : {}),
     lifecycle: mode === 'template' ? 'draft' : 'paused',
   };
+  if (input.debtPolicy !== undefined) {
+    studio.debtPolicy = normalizeDebtPolicy(input.debtPolicy);
+  }
+  if (mode === 'snapshot' && input.debtAssessment !== undefined) {
+    const { reason, assessedAt } = object(input.debtAssessment, 'оценка долга');
+    studio.debtAssessment = {
+      reason: text(field(reason, 'причина оценки долга', 2_000)).slice(0, 2_000),
+      assessedAt: text(field(assessedAt, 'дата оценки долга', 64)).slice(0, 64),
+    };
+  }
   if (!studio.name?.trim()) throw new Error('Укажите название студии.');
   if (!toBundle) {
     studio.root = destinationRoot(root);
@@ -209,7 +240,11 @@ function copyPayload(source, { mode, toBundle, root, name }) {
   const payload = { studio, artifacts };
   for (const [kind, records] of Object.entries(rows)) {
     payload[kind] = records.map(record => {
-      const copy = { ...copyFields(record, fields[kind], kind === 'skills' ? value => value : text), id: ids[kind].get(record.id), studioId };
+      const identity = { id: ids[kind].get(record.id), studioId };
+      if (learningCollections.includes(kind)) {
+        return { ...identity, agentId: link('agents', record.agentId), trainingTaskId: link('tasks', record.trainingTaskId), ...copyKnowledgeRecord(kind, record, text) };
+      }
+      const copy = { ...copyFields(record, fields[kind], kind === 'skills' ? value => value : text), ...identity };
       if (kind === 'skills') copy.stars = record.stars;
       for (const [key, target] of Object.entries(links)) {
         const value = record[key];
@@ -225,18 +260,26 @@ function copyPayload(source, { mode, toBundle, root, name }) {
         copy.messages = list(record.messages, 'реплики встречи').map(message =>
           copyFields(object(message, 'реплика встречи'), ['role', 'text', 'createdAt'], text));
       }
-      if (kind === 'plans') Object.assign(copy, planFields(record, text, ids.agents, selectedPaths));
+      if (kind === 'plans') Object.assign(copy, planFields(record, text, ids.agents, selectedPaths, link));
+      if (['plans', 'sprints'].includes(kind) && record.debtSprint === true) copy.debtSprint = true;
       if (kind === 'tasks') {
         if (record.kind === 'train' && record.training) {
           const training = object(record.training, 'обучение');
           copy.training = {
             ...copyFields(training, ['objective', 'guide', 'exercise', 'searchOutcome'], text),
+            ...copyTrainingMaterials(training, isApprovedTraining(record), text),
             targetAgentId: link('agents', training.targetAgentId),
             topics: list(training.topics, 'темы обучения', 12).map(text),
             warnings: list(training.warnings, 'результат поиска').map(text),
             skillIds: list(training.skillIds, 'навыки').map(id => link('skills', id)).filter(Boolean),
             ...(training.bootstrap === true ? { bootstrap: true } : {}),
           };
+          if (isApprovedTraining(record)) {
+            if (training.knowledgeId !== undefined) copy.training.knowledgeId = link('knowledge', training.knowledgeId);
+            if (training.customSkillIds !== undefined) {
+              copy.training.customSkillIds = list(training.customSkillIds, 'авторские навыки').map(id => link('customSkills', id)).filter(Boolean);
+            }
+          }
         }
         const interrupted = ['running', 'scheduled'].includes(record.status);
         copy.status = statuses.includes(record.status) && !interrupted ? record.status : 'queued';
@@ -258,6 +301,10 @@ function copyPayload(source, { mode, toBundle, root, name }) {
     });
   }
   return payload;
+}
+
+function isApprovedTraining(task) {
+  return task.kind === 'train' && task.stage === 'done' && task.status === 'completed' && typeof task.review === 'string' && !!task.review.trim() && !!task.training;
 }
 
 export function makeStudioBundle(snapshot, { studioId, mode, artifacts } = {}) {

@@ -28,6 +28,18 @@ test('training details show evidence and dependencies are linked with a clear re
   assert.match(roleReadiness(coach, all), /data-training-status="ready"[^]*?Готов к работе/);
 });
 
+test('task details show the proposed knowledge and selected materials before approval', () => {
+  const task = { ...train, training: { ...train.training, knowledge: '<b>Заметка</b>', selectedMaterialIds: ['used'],
+    materialWarnings: ['Поиск выполнен частично'],
+    materials: [{ id: 'used', title: 'Карта', revision: 'rev' }, { id: 'unused', title: 'Лишний кандидат' }],
+    customSkills: [{ key: 'map', title: 'Картография', content: '<script>Текст навыка</script>' }],
+  } };
+  const render = task => renderTrainingDetails(task, { agents: [trainee, coach] }, [task]);
+  assert.match(render(task), /Поиск выполнен частично[^]*?На утверждении[^]*?&lt;b&gt;Заметка&lt;\/b&gt;[^]*?Карта[^]*?rev[^]*?Картография[^]*?&lt;script&gt;/);
+  assert.doesNotMatch(render(task), /Лишний кандидат|<script>/);
+  assert.doesNotMatch(render({ ...task, stage: 'done' }), /На утверждении/);
+});
+
 test('library separates approved versions and GitHub metadata and reports the search outcome', () => {
   const skill = { id: 'skill', title: 'Карты', repo: 'world/maps', commit: 'abcdef1234567890',
     path: 'tools/maps/SKILL.md', license: 'MIT', content: 'НЕ ВЫВОДИТЬ' };
@@ -42,4 +54,22 @@ test('library separates approved versions and GitHub metadata and reports the se
   assert.match(renderSkillLibrary({ studio: { skillMinStars: 42 }, preview: { status: 'done', candidates: [] } }), /42[^]*?Подходящих навыков не найдено/);
   assert.match(renderSkillLibrary({ preview: { status: 'done', candidates: [], warnings: ['Ошибка API'] } }), /Поиск выполнен частично[^]*?Ошибка API/);
   assert.match(renderSkillLibrary({ preview: { status: 'error', error: 'Ошибка API' } }), /role="alert"[^]*?Ошибка API/);
+});
+
+test('library groups approved notes and original skill versions by role with source metadata and provenance', () => {
+  const html = renderSkillLibrary({
+    studio: { id: 's', agents: [trainee, coach] }, tasks: [train],
+    knowledge: [{ id: 'note', agentId: trainee.id, trainingTaskId: train.id, notes: '<b>Проверить масштаб</b>',
+      sources: [{ title: 'Карты', source: 'Open Maps', url: 'https://example.com/maps', revision: 'rev-1',
+        license: 'CC BY', excerpt: '<img src=x>' }] }],
+    customSkills: [
+      { id: 'v1', agentId: trainee.id, key: 'map', title: 'Картография', version: 1, content: 'Первая версия' },
+      { id: 'v2', agentId: trainee.id, key: 'map', title: 'Картография', version: 2, content: 'Вторая версия' },
+      { id: 'hidden', agentId: 'other', key: 'map', title: 'Чужая студия', version: 1, content: 'Не виден' },
+    ],
+  });
+  assert.match(html, /Редактор &lt;мира&gt;[^]*?data-task="train-editor"[^]*?<details[^]*?&lt;b&gt;Проверить масштаб&lt;\/b&gt;/);
+  assert.match(html, /Open Maps[^]*?https:\/\/example\.com\/maps[^]*?rev-1[^]*?CC BY[^]*?&lt;img src=x&gt;/);
+  assert.match(html, /Картография[^]*?Версия 2[^]*?Вторая версия[^]*?Версия 1[^]*?Первая версия/);
+  assert.doesNotMatch(html, /<img|Прежний библиотекарь|Не виден/);
 });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import { completeInitialRoster, directorPrompt, field, newDirectorHire, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, trainingTopics, validatePlan } from './protocol.mjs';
 import { coachFor } from './training.mjs';
+import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 
 const now = () => new Date().toISOString();
 
@@ -83,6 +84,15 @@ export function createWorkflow({
   function approve(studio, draft) {
     const plan = completeInitialRoster(draft, studio.agents);
     const { id, studioId } = plan;
+    const linkedDebt = new Map();
+    for (const { debtTaskId } of plan.tasks) {
+      if (!debtTaskId) continue;
+      const task = read('tasks', debtTaskId, 'Задача техдолга');
+      if (!eligibleDebt(task, studioId) || linkedDebt.has(debtTaskId)) {
+        throw new Error('Задача техдолга больше недоступна. Верните план на доработку.');
+      }
+      linkedDebt.set(debtTaskId, task);
+    }
     const agents = [...studio.agents];
     const byKey = new Map(agents.map((agent) => [agent.key ?? agent.id, agent]));
     const agentEdits = new Map(Object.entries(plan.agentEdits ?? {}));
@@ -108,8 +118,10 @@ export function createWorkflow({
     }
     const epic = insert('epics', { id: randomUUID(), studioId, ...plan.epic });
     const story = insert('stories', { id: randomUUID(), studioId, epicId: epic.id, ...plan.story });
-    const taskIds = new Map(plan.tasks.map(({ key }) => [key, randomUUID()]));
-    const sprint = { id: randomUUID(), studioId, planId: id, title: plan.title, goal: plan.goal, status: 'active', taskIds: [...taskIds.values()] };
+    const taskIds = new Map(plan.tasks.map(({ key, debtTaskId }) => [key, debtTaskId || randomUUID()]));
+    const sprint = { id: randomUUID(), studioId, planId: id, title: plan.title, goal: plan.goal, status: 'active', taskIds: [...taskIds.values()],
+      ...(plan.debtSprint ? { debtSprint: true } : {}),
+    };
     const roster = { ...studio, agents };
     const coach = coachFor(roster);
     for (const { agent, topics } of hires) {
@@ -126,19 +138,22 @@ export function createWorkflow({
         if (recommendation && byKey.get(key).mode === 'dynamic') recommendations.set(key, recommendation);
       }
     }
-    const tasks = plan.tasks.map(({ agentKey, reviewerKey, dependsOn, artifactPath, ...task }) => {
+    const tasks = plan.tasks.map(({ agentKey, reviewerKey, dependsOn, artifactPath, debtTaskId, ...task }) => {
       const taskRecommendation = recommendations.get(agentKey);
       const reviewRecommendation = recommendations.get(reviewerKey);
       const agentId = byKey.get(agentKey).id;
       const reviewerId = byKey.get(reviewerKey).id;
       const dependencies = [...dependsOn.map((key) => taskIds.get(key)), ...training.pendingIds(roster, [agentId, reviewerId, coach.id])];
-      return insert('tasks', {
+      const existingDebt = linkedDebt.get(debtTaskId);
+      const record = {
         ...task, id: taskIds.get(task.key), studioId, agentId, reviewerId,
         epicId: epic.id, storyId: story.id, sprintId: sprint.id, dependencies,
         stage: dependencies.length ? 'backlog' : 'ready', status: 'queued', summary: '', artifact: '', error: '',
         artifactTarget: artifactPath, workflowManaged: true, createdAt, updatedAt: createdAt,
         ...(taskRecommendation || reviewRecommendation ? { modelRecommendations: { task: taskRecommendation, review: reviewRecommendation } } : {}),
-      });
+      };
+      if (!existingDebt) return insert('tasks', record);
+      return update('tasks', { ...record, title: existingDebt.title, prompt: existingDebt.prompt, createdAt: existingDebt.createdAt });
     });
     insert('meetings', {
       id: randomUUID(), studioId, sprintId: sprint.id, kind: 'planning', title: 'Планирование спринта',
@@ -288,11 +303,16 @@ export function createWorkflow({
     let allowed = [];
     let prompt;
     let sources;
+    let debt;
     switch (purpose) {
       case 'plan': {
         const previous = job.previousPlanId ? read('plans', job.previousPlanId, 'План') : undefined;
         allowed = effectiveAllowed(read('studios', studio.id, 'Студия'));
-        prompt = planPrompt(studio, job, previous, allowed);
+        if (job.kind === 'sprint') {
+          const initialPlanIds = new Set(list('plans').filter(({ kind }) => kind === 'initial').map(({ id }) => id));
+          debt = debtPlanContext(studio, list('tasks'), list('sprints'), initialPlanIds);
+        }
+        prompt = planPrompt(studio, job, previous, allowed, debt);
         break;
       }
       case 'task': {
@@ -327,7 +347,11 @@ export function createWorkflow({
     }
     const result = await run({ runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal });
     const data = parseResponse(result);
-    if (purpose === 'plan') return validatePlan(data, read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
+    if (purpose === 'plan') {
+      const plan = validatePlan(data, read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
+      validateDebtPlan(plan.tasks, debt);
+      return { ...plan, ...(debt?.active ? { debtSprint: true } : {}) };
+    }
     if (purpose === 'training-exercise') return field(data.summary, 'результат упражнения');
     if (purpose === 'task') {
       if (lesson) return training.selection(task, data, sources);

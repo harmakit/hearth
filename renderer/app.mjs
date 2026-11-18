@@ -4,6 +4,7 @@ import { publishedPaths, renderWork } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey, readPolicyRows } from './model-policy.mjs';
 import { coachTitle, parseSkillTopics, pendingDependencies, renderSkillLibrary, renderSkillPreview, renderTrainingDetails, roleReadiness, skillMinStars, skillStarLabel } from './coach-view.mjs';
+import { debtPolicyFields, debtPolicyFor, debtPolicyHint, renderDebtSettings } from './debt-view.mjs';
 
 const bridge = window.hearth;
 const $ = selector => document.querySelector(selector);
@@ -55,6 +56,7 @@ let advancedOpen = false;
 let policyPromptShown = false;
 let policyRowId = 0;
 let skillSearch = { topics: '', preview: {} };
+const debtAssessments = new Map();
 
 function stored(key, value) {
   try {
@@ -137,10 +139,12 @@ function render() {
   const picker = $('#studio-select');
   const focused = document.activeElement;
   const focusRoot = [content, $('#navigation')].find(container => container.contains(focused) && focused !== container);
-  const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab'].includes(key));
+  const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab', 'assessDebt'].includes(key));
   const autonomyFocused = focused?.getAttribute('name') === 'approveSprints';
   const skillFieldSelection = focused?.matches('[data-skill-search] [name="topics"]')
     ? [focused.selectionStart, focused.selectionEnd] : null;
+  const libraryDetails = view === 'skills'
+    ? new Set(Array.from(content.querySelectorAll('[data-library-detail][open]'), node => node.dataset.libraryDetail)) : null;
   picker.disabled = !state.studios.length;
   picker.innerHTML = state.studios.map(item => option(String(item.id), item.name, studioId)).join('') || '<option>Нет студий</option>';
   const openCount = entries().filter(item => item.status === 'open').length;
@@ -150,6 +154,9 @@ function render() {
     ? ({ overview, work, inbox, workshop, skills, settings })[view]()
     : heading(views[view]) + empty('Создайте студию', 'Опишите проект, выберите рабочую папку и подключение директора.', button('Создать студию', 'data-open="studio"'));
   if (view === 'workshop' && current) paintRooms(content);
+  if (libraryDetails?.size) for (const node of content.querySelectorAll('[data-library-detail]')) {
+    node.open = libraryDetails.has(node.dataset.libraryDetail);
+  }
   if (focusTarget) {
     const [key, value] = focusTarget;
     Array.from(focusRoot.querySelectorAll('button')).find(node => node.dataset[key] === value)?.focus();
@@ -172,8 +179,9 @@ function work() {
 
 function skills() {
   const current = studio();
+  const rows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
   return heading('Библиотека', current.name) + renderSkillLibrary({
-    studio: current, skills: (state.skills ?? []).filter(skill => skill.studioId === current.id), ...skillSearch,
+    studio: current, tasks: tasks(), skills: rows('skills'), knowledge: rows('knowledge'), customSkills: rows('customSkills'), ...skillSearch,
   });
 }
 
@@ -283,7 +291,7 @@ function overview() {
 }
 
 function taskRow(task) {
-  return `<button type="button" class="list-row" data-task="${safe(task.id)}"><span><strong>${safe(task.title)}</strong><small>${safe(nameFor(taskAgent(task)))}</small></span>${status(task)}</button>`;
+  return `<button type="button" class="list-row" data-task="${safe(task.id)}"><span><strong>${safe(task.title)}</strong><small>${safe(nameFor(taskAgent(task)))}${task.kind === 'debt' ? ' · Техдолг' : ''}</small></span>${status(task)}</button>`;
 }
 
 function inbox() {
@@ -427,6 +435,7 @@ function settings() {
         <div class="row allowed-row"><div><h3>Расписание</h3><p class="muted">${safe(scheduleLabel(current.schedule))}</p></div>
           ${button('Настроить расписание', 'data-open="schedule"', true)}</div>
       </div></section>
+      ${renderDebtSettings(current, debtAssessments.get(current.id))}
       <section class="stack compact"><h2>Модели студии</h2><div class="panel padded stack compact">
         <div class="row"><div><h3>Директор</h3><p class="muted">${safe(configText(current.director) || 'Модель и усилие по умолчанию')}</p></div>${button('Настроить директора', 'data-open="director"', true)}</div>
         <div class="inline-result stack compact"><div class="row allowed-row"><div><h3>Разрешённые модели</h3>
@@ -639,10 +648,13 @@ function taskEditor(agentId = '') {
   const agents = (current.agents ?? []).filter(agent => agent.systemRole !== 'coach');
   const choices = [option('', 'Директор', agentId), ...agents.map(agent => option(String(agent.id), nameFor(agent), agentId))].join('');
   dialogTo('Новая задача', input('Название', 'title', '', 'required maxlength="160"') +
-    textarea('Что нужно сделать', 'prompt', '', 'required') + select('Исполнитель', 'agentId', choices),
-    'Создать и запустить', async ({ agentId: raw, ...values }) => {
+    textarea('Что нужно сделать', 'prompt', '', 'required') + select('Исполнитель', 'agentId', choices) +
+    '<label class="checkbox-field"><input type="checkbox" name="debt"> <span>Задача по техдолгу</span></label>',
+    'Создать и запустить', async ({ agentId: raw, debt, ...values }) => {
       const agent = agents.find(item => same(item.id, raw));
-      const task = await bridge.request('createTask', { studioId: current.id, ...values, ...(agent ? { agentId: agent.id } : {}) });
+      const task = await bridge.request('createTask', {
+        studioId: current.id, ...values, ...(agent ? { agentId: agent.id } : {}), ...(debt ? { kind: 'debt' } : {}),
+      });
       try {
         const queued = await bridge.request('startTask', { taskId: task.id });
         if (pendingDependencies(queued, new Map(tasks().map(item => [item.id, item]))).length) {
@@ -682,7 +694,8 @@ function openTask(task) {
   const attempts = (state.attempts ?? []).filter(attempt => attempt.taskId === latest.id).slice(-10).reverse();
   const purposes = { task: 'Исполнение', review: 'Ревью', director: 'Решение директора', publish: 'Запись файла', 'training-exercise': 'Упражнение' };
   const previousFocus = dialog.contains(document.activeElement) ? Object.entries(document.activeElement.dataset)[0]?.[0] : '';
-  dialogTo(latest.title, `<div class="row">${needsWorktreeReview ? badge('Ждёт сверки рабочего дерева', 'warn') : status(latest)}<span class="muted">${safe(nameFor(taskAgent(latest)))}</span></div>` +
+  dialogTo(latest.title, `<div class="row"><div class="actions">${needsWorktreeReview ? badge('Ждёт сверки рабочего дерева', 'warn') : status(latest)}
+    ${latest.kind === 'debt' ? badge('Техдолг') : ''}</div><span class="muted">${safe(nameFor(taskAgent(latest)))}</span></div>` +
     (epic ? `<div class="actions">${actionFor('К эпику', 'epic-link', epic.id)}<span class="muted">${safe(epic.title)}</span></div>` : '') +
     renderTrainingDetails(latest, studio(), allTasks) +
     block('Постановка задачи', latest.prompt) + block('Критерии', listText(latest.criteria)) + block('Ошибка', latest.error) +
@@ -768,10 +781,10 @@ function planBody(plan) {
   const titles = new Map((plan.tasks ?? []).map(task => [task.key ?? task.id, task.title]));
   const entity = (label, value) => value ? `<section class="inline-result"><h3>${label}</h3><p>${safe(value.title ?? value)}</p>
     ${value.description ? plain(value.description) : ''}${value.acceptance ? plain(listText(value.acceptance)) : ''}</section>` : '';
-  return `<div>${badge(...({
+  return `<div class="actions">${badge(...({
     draft: ['Готовится', ''], pending: ['Ждёт согласования', 'warn'],
     approved: ['Подтверждён', 'good'], returned: ['Возвращён', 'warn'],
-  }[plan.status] ?? [plan.status, '']))}</div>
+  }[plan.status] ?? [plan.status, '']))}${plan.debtSprint ? badge('Спринт техдолга') : ''}</div>
     ${plan.goal ? `<p>${safe(plan.goal)}</p>` : ''}
     ${entity('Эпик', plan.epic)}${entity('Первая история', plan.story)}
     ${agents.length ? `<section class="stack compact"><h3>Команда</h3><ul class="plan-list">${agents.map(agent =>
@@ -779,7 +792,7 @@ function planBody(plan) {
         <div>${safe(agent.description || roleDetails[agent.role] || '')}</div>
         ${planAgentModelSummary(agent, plan.kind === 'initial')}</li>`).join('')}</ul></section>` : ''}
     ${plan.tasks?.length ? `<section class="stack compact"><h3>Задачи</h3><ol class="plan-list">${plan.tasks.map(task => `<li>
-      <strong>${safe(task.title)}</strong>
+      <strong>${safe(task.title)}</strong>${task.kind === 'debt' ? ' ' + badge('Техдолг') : ''}
       ${task.agentKey ? `<p class="muted">Исполнитель — ${safe(nameFor(agentByKey(task.agentKey)))}</p>` : ''}
       ${task.reviewerKey ? `<p class="muted">Проверяет — ${safe(nameFor(agentByKey(task.reviewerKey)))}</p>` : ''}
       ${task.criteria ? `<div>${plain(listText(task.criteria))}</div>` : ''}
@@ -952,6 +965,42 @@ function skillSettingsEditor() {
     await bridge.request('updateStudio', { studioId: current.id, skillMinStars: threshold });
     if (studio()?.id === current.id) skillSearch = { topics: skillSearch.topics, preview: {} };
   });
+}
+
+function debtPolicyEditor() {
+  const current = studio();
+  const policy = debtPolicyFor(current);
+  const fields = debtPolicyFields.map(({ name, label, min, max }) =>
+    input(label, name, policy[name], `type="number" min="${min}" max="${max}" step="1" required`)).join('');
+  dialogTo('Спринты техдолга',
+    `<label class="checkbox-field"><input type="checkbox" name="enabled"${policy.enabled ? ' checked' : ''}> <span>Планировать спринты техдолга</span></label>
+      <p class="muted">${debtPolicyHint}</p>${fields}`,
+    'Сохранить', values => {
+      const debtPolicy = { enabled: Boolean(values.enabled) };
+      for (const { name, label, min, max } of debtPolicyFields) {
+        const value = Number(values[name]);
+        if (!Number.isInteger(value) || value < min || value > max) {
+          throw new Error(`«${label}» требует целого числа от ${min} до ${max}.`);
+        }
+        debtPolicy[name] = value;
+      }
+      return bridge.request('updateStudio', { studioId: current.id, debtPolicy });
+    });
+}
+
+async function assessDebt() {
+  const id = studio()?.id;
+  if (id == null || debtAssessments.get(id)?.pending) return;
+  debtAssessments.set(id, { pending: true });
+  render();
+  try {
+    await bridge.request('assessDebtPolicy', { studioId: id });
+    debtAssessments.delete(id);
+    await refresh();
+  } catch (error) {
+    debtAssessments.set(id, { error: error.message || 'Не удалось оценить техдолг.' });
+    if (view === 'settings' && studio()?.id === id) render();
+  }
 }
 
 const studioPolicyMode = current => current.allowedMode ?? (current.allowed?.length ? 'studio' : 'app');
@@ -1267,6 +1316,7 @@ const commands = {
   'app-model-policy': () => policyEditor(),
   'studio-model-policy': () => policyEditor(studio()),
   'skill-settings': skillSettingsEditor,
+  'debt-policy': debtPolicyEditor,
   agent: () => agentEditor(),
   import: importPreview,
   'import-bundle': () => importEditor(),
@@ -1303,6 +1353,7 @@ document.addEventListener('click', event => {
     workTab = data.workTab;
     render();
   } else if (data.open) commands[data.open]?.();
+  else if (data.assessDebt !== undefined) void assessDebt();
   else if (data.initialize !== undefined) void workCommand('initializeStudio', { studioId: studio().id });
   else if (data.runAction) void workCommand('setStudioRunning', { studioId: studio().id, action: data.runAction });
   else if (data.editPlanTeam !== undefined) {

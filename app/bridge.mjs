@@ -2,7 +2,7 @@ import { access, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const serviceCommands = new Set([
-  "snapshot", "createStudio", "updateStudio", "addAgent", "updateAgent", "createTask",
+  "snapshot", "createStudio", "updateStudio", "assessDebtPolicy", "addAgent", "updateAgent", "createTask",
   "startTask", "cancelTask", "answerInbox",
   "initializeStudio", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
 ]);

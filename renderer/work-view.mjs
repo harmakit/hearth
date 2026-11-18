@@ -50,6 +50,7 @@ function bulletBlock(title, value) {
 function taskLink(task, showStage = true) {
   return `<button type="button" class="work-task-link" data-task="${safe(task.id)}">
     <strong>${safe(nameOf(task, 'Задача без названия'))}</strong>
+    ${task.kind === 'debt' ? '<span class="debt-label">Техдолг</span>' : ''}
     ${showStage ? `<span>${stages[stageOf(task)]}</span>` : ''}
   </button>`;
 }
@@ -86,7 +87,7 @@ function board(tasks, studio, byTask) {
           const owner = agent ? (agent.systemRole === 'coach' ? coachTitle : agent.name || lookup(roleNames, agent.role)) :
             (task.agentId ? '' : (studio.director?.name || 'Директор'));
           const attempt = lookup(attempts, task.status) ?? task.status;
-          return `<li class="work-task"${task.kind === 'train' ? ' data-task-kind="train"' : ''}>
+          return `<li class="work-task"${['train', 'debt'].includes(task.kind) ? ` data-task-kind="${task.kind}"` : ''}>
             ${taskLink(task, false)}
             ${owner ? `<p class="work-owner">${safe(owner)}</p>` : ''}
             ${renderBoardTraining(task, agents, byTask)}
@@ -164,6 +165,7 @@ function sprintView(sprints, plans, tasks, byTask) {
     return `<article class="work-record">
       <header><h2>${safe(nameOf(sprint, plan?.title || 'Спринт без названия'))}</h2>
         <div class="work-record-statuses">
+          ${sprint.debtSprint || plan?.debtSprint ? '<span class="debt-label">Спринт техдолга</span>' : ''}
           ${lifecycle ? `<span class="work-muted">${lifecycle}</span>` : ''}
           ${status ? `<span class="work-approval" data-plan-status="${safe(plan?.status ?? sprint.approvalStatus)}">${status}</span>` : ''}
         </div>
@@ -183,7 +185,10 @@ function sprintView(sprints, plans, tasks, byTask) {
   return `<div class="work-records">
     ${upcoming.map(plan => `<article class="work-record">
       <header><h2>${safe(nameOf(plan, 'План спринта'))}</h2>
-        <span class="work-approval" data-plan-status="${safe(plan.status)}">${safe(lookup(planStatuses, plan.status) ?? plan.status)}</span>
+        <div class="work-record-statuses">
+          ${plan.debtSprint ? '<span class="debt-label">Спринт техдолга</span>' : ''}
+          <span class="work-approval" data-plan-status="${safe(plan.status)}">${safe(lookup(planStatuses, plan.status) ?? plan.status)}</span>
+        </div>
       </header>
       ${textBlock('Цель', plan.goal)}
       ${planButton(plan)}

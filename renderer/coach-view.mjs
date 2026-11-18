@@ -47,13 +47,24 @@ export function renderTrainingDetails(task, studio, tasks) {
   const dependencies = pendingDependencies(task, new Map(tasks.map(item => [item.id, item])));
   const training = task.training;
   const topics = training?.topics?.length ? `<p>Темы · ${safe(training.topics.join(', '))}</p>` : '';
-  const warnings = training?.warnings?.length ? `<ul class="skill-warnings">${training.warnings.map(warning => `<li>${safe(warning)}</li>`).join('')}</ul>` : '';
+  const warningList = [...(training?.warnings ?? []), ...(training?.materialWarnings ?? [])];
+  const warnings = warningList.length ? `<ul class="skill-warnings">${warningList.map(warning => `<li>${safe(warning)}</li>`).join('')}</ul>` : '';
   const projectGuide = training?.searchOutcome === 'no-match' ? '<p>Подходящих навыков на GitHub не найдено. Коуч подготовил руководство под задачу.</p>' : '';
   const guide = training?.guide ? `<details class="advanced"><summary>Руководство</summary><p class="long-text">${safe(training.guide)}</p></details>` : '';
   const exercise = training?.exercise ? `<details class="advanced"><summary>Упражнение</summary><p class="long-text">${safe(training.exercise)}</p></details>` : '';
+  const visibleMaterials = (training?.materials ?? []).filter(material => training.selectedMaterialIds?.includes(material.id));
+  const proposedSkills = task.stage === 'done' ? [] : (training?.customSkills ?? []);
+  const dossier = training?.knowledge || visibleMaterials.length || proposedSkills.length ? `<details class="advanced">
+    <summary>Пакет знаний${task.stage === 'done' ? '' : task.stage === 'review' ? ' · На утверждении' : ' · Черновик'}</summary>
+    <div class="stack compact">
+      ${training.knowledge ? `<p class="long-text">${safe(training.knowledge)}</p>` : ''}
+      ${visibleMaterials.length ? `<ul class="skill-candidates">${visibleMaterials.map(knowledgeSource).join('')}</ul>` : ''}
+      ${proposedSkills.map(skill => `<div class="inline-result"><strong>${safe(skill.title || skill.key)}</strong>
+        <p class="long-text">${safe(skill.content)}</p></div>`).join('')}
+    </div></details>` : '';
   return (task.kind === 'train' ? `<section class="inline-result" data-task-kind="train"><h3>Обучение</h3>
     <p>Обучается · ${safe(trainingTrainee(task, new Map((studio?.agents ?? []).map(agent => [agent.id, agent]))))}</p>
-    ${training?.objective ? `<p>${safe(training.objective)}</p>` : ''}${topics}${warnings}${projectGuide}${guide}${exercise}</section>` : '') +
+    ${training?.objective ? `<p>${safe(training.objective)}</p>` : ''}${topics}${warnings}${projectGuide}${guide}${exercise}${dossier}</section>` : '') +
     renderDependencies(dependencies, false);
 }
 
@@ -65,6 +76,57 @@ function skillSource(skill) {
     <dt>Лицензия</dt><dd>${safe(skill.license || 'Не указана')}</dd>
     ${Number.isFinite(skill.stars) ? `<dt>Звёзды</dt><dd>${number.format(skill.stars)}</dd>` : ''}
   </dl>`;
+}
+
+function knowledgeSource({ title, source, url, revision, license, excerpt }) {
+  return `<li class="stack compact"><strong>${safe(title || source)}</strong>
+    <dl class="skill-source studio-meta">
+      ${source ? `<dt>Источник</dt><dd>${safe(source)}</dd>` : ''}
+      ${url ? `<dt>Адрес</dt><dd><code>${safe(url)}</code></dd>` : ''}
+      ${revision ? `<dt>Ревизия</dt><dd><code>${safe(revision)}</code></dd>` : ''}
+      <dt>Лицензия</dt><dd>${safe(license || 'Не указана')}</dd>
+    </dl>
+    ${excerpt ? `<details class="advanced"><summary>Выдержка</summary><p class="long-text">${safe(excerpt)}</p></details>` : ''}
+  </li>`;
+}
+
+function roleKnowledge({ studio, tasks, knowledge, customSkills }) {
+  const trainingTasks = new Map(tasks.filter(task => task.kind === 'train').map(task => [task.id, task]));
+  const knowledgeByAgent = Map.groupBy(knowledge, entry => entry.agentId);
+  const skillsByAgent = Map.groupBy(customSkills, entry => entry.agentId);
+  const provenance = ({ trainingTaskId, createdAt }) => {
+    const task = trainingTasks.get(trainingTaskId);
+    const date = new Date(createdAt);
+    const time = Number.isFinite(date.getTime()) ? `<time datetime="${date.toISOString()}">${date.toLocaleDateString('ru-RU')}</time>` : '';
+    return task || time ? `<p class="knowledge-provenance muted">${task ? taskLink(task) : ''}${time}</p>` : '';
+  };
+  const agents = (studio?.agents ?? []).filter(agent => knowledgeByAgent.has(agent.id) || skillsByAgent.has(agent.id));
+  return `<section class="stack compact"><h2>База знаний по ролям</h2>
+    ${agents.length ? agents.map(agent => {
+      const notes = knowledgeByAgent.get(agent.id) ?? [];
+      const skills = Map.groupBy(skillsByAgent.get(agent.id) ?? [], skill => skill.key);
+      return `<article class="panel padded stack" data-knowledge-role="${safe(agent.id)}">
+        <h3>${safe(agentName(agent))}${agent.roleTitle && agent.roleTitle !== agentName(agent)
+          ? ` <small class="muted">· ${safe(agent.roleTitle)}</small>` : ''}</h3>
+        ${notes.length ? `<section class="stack compact"><h4>Утверждённые заметки</h4>
+          ${notes.toReversed().map(note => `<div class="inline-result stack compact">${provenance(note)}
+            <details class="advanced" data-library-detail="note-${safe(note.id)}"><summary>Читать заметку</summary><p class="long-text">${safe(note.notes)}</p>
+              ${note.sources?.length ? `<ul class="skill-candidates">${note.sources.map(knowledgeSource).join('')}</ul>` : ''}
+            </details></div>`).join('')}
+        </section>` : ''}
+        ${skills.size ? `<section class="stack compact"><h4>Собственные навыки</h4>
+          ${[...skills.values()].map(versions => {
+            const ordered = versions.toSorted((first, second) => second.version - first.version);
+            return `<div class="inline-result stack compact"><strong>${safe(ordered[0].title || ordered[0].key)}</strong>
+              ${ordered.map((skill, index) => `<details class="advanced" data-library-detail="skill-${safe(skill.id)}">
+                <summary>Версия ${safe(skill.version)}${index === 0 ? ' · текущая' : ''}</summary>
+                ${provenance(skill)}<p class="long-text">${safe(skill.content)}</p>
+              </details>`).join('')}</div>`;
+          }).join('')}
+        </section>` : ''}
+      </article>`;
+    }).join('') : '<p class="panel padded muted">Заметки и собственные навыки появятся после утверждения обучения директором.</p>'}
+  </section>`;
 }
 
 export function renderSkillPreview(preview) {
@@ -80,9 +142,10 @@ export function renderSkillPreview(preview) {
     ${candidates.length ? `<ul class="skill-candidates">${candidates.map(candidate => `<li><strong>${safe(candidate.title || candidate.path)}</strong>${skillSource(candidate)}</li>`).join('')}</ul>` : ''}`;
 }
 
-export function renderSkillLibrary({ studio, skills = [], topics = '', preview = {} } = {}) {
+export function renderSkillLibrary({ studio, skills = [], tasks = [], knowledge = [], customSkills = [], topics = '', preview = {} } = {}) {
   const busy = preview.status === 'pending';
   return `<div class="stack skill-library">
+    ${roleKnowledge({ studio, tasks, knowledge, customSkills })}
     <section class="stack compact"><h2>Утверждённые навыки</h2>
       ${skills.length ? skills.map(skill => `<article class="panel padded stack compact" data-skill-id="${safe(skill.id)}">
         <h3>${safe(skill.title || skill.path)}</h3>${skillSource(skill)}

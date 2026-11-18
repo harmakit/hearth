@@ -1,23 +1,82 @@
 import { field, object, relativeArtifactPath, trainingTopics } from './protocol.mjs';
+import { materialMetadata, customSkillDraft, knowledgeNoteLimit } from './knowledge.mjs';
 
-const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills'];
+const learningCollections = ['knowledge', 'customSkills'];
+const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills', ...learningCollections];
 const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'failed', 'interrupted'];
 const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'blocked'];
 const relations = {
   agentId: 'agents', reviewerId: 'agents', taskId: 'tasks', parentTaskId: 'tasks', reviewTaskId: 'tasks',
   planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings', targetedTrainingId: 'tasks',
+  trainingTaskId: 'tasks', debtTaskId: 'tasks',
 };
 const many = { dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents' };
 
-function array(value, label) {
+function array(value, label, max = 20_000) {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 20_000) throw new Error(`Некорректный список «${label}».`);
+  if (!Array.isArray(value) || value.length > max) throw new Error(`Некорректный список «${label}».`);
   return value;
 }
 
 function id(value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 256 || /[\x00-\x1f]/.test(value)) throw new Error('Некорректный идентификатор при импорте.');
   return value;
+}
+
+const preserveText = value => value;
+
+function copyMaterial(value, text, draft) {
+  const metadata = materialMetadata(value);
+  for (const [key, max] of [['title', 240], ['source', 120], ['revision', 240], ['license', 240]]) {
+    metadata[key] = text(metadata[key]).slice(0, max);
+  }
+  if (draft && value.excerpt !== undefined) {
+    if (typeof value.excerpt !== 'string' || value.excerpt.length > 2_500) throw new Error('Некорректная выдержка из материала.');
+    metadata.excerpt = text(value.excerpt).slice(0, 2_500);
+  }
+  return metadata;
+}
+
+function copyCustomSkill(value, text) {
+  const skill = customSkillDraft(value);
+  return { ...skill, title: text(skill.title).slice(0, 120), content: text(skill.content).slice(0, 4000) };
+}
+
+export function copyKnowledgeRecord(kind, item, text = preserveText) {
+  const createdAt = text(field(item.createdAt, 'дата подтверждения', 64)).slice(0, 64);
+  if (kind === 'knowledge') {
+    return {
+      notes: text(field(item.notes, 'знания агента', knowledgeNoteLimit)).slice(0, knowledgeNoteLimit),
+      sources: array(item.sources, 'источники знаний', 3).map(source => copyMaterial(source, text, false)),
+      createdAt,
+    };
+  }
+  if (!Number.isSafeInteger(item.version) || item.version < 1) throw new Error('Некорректная версия авторского навыка.');
+  return { ...copyCustomSkill(item, text), version: item.version, createdAt };
+}
+
+export function copyTrainingMaterials(training, approved, text = preserveText) {
+  const fields = {};
+  if (training.materialWarnings !== undefined) {
+    fields.materialWarnings = array(training.materialWarnings, 'предупреждения поиска материалов', 8)
+      .map(warning => text(field(warning, 'предупреждение поиска материалов', 500)).slice(0, 500));
+  }
+  if (training.materialSearchOutcome !== undefined) {
+    fields.materialSearchOutcome = text(field(training.materialSearchOutcome, 'статус поиска материалов', 80)).slice(0, 80);
+  }
+  if (training.selectedMaterialIds !== undefined) {
+    fields.selectedMaterialIds = array(training.selectedMaterialIds, 'выбранные материалы', 3).map(value => field(value, 'идентификатор материала', 512));
+  }
+  if (training.materials !== undefined) {
+    fields.materials = array(training.materials, 'материалы', 3).map(value => copyMaterial(value, text, !approved));
+  }
+  if (!approved) {
+    if (training.knowledge !== undefined) fields.knowledge = text(field(training.knowledge, 'знания агента', knowledgeNoteLimit)).slice(0, knowledgeNoteLimit);
+    if (training.customSkills !== undefined) {
+      fields.customSkills = array(training.customSkills, 'предложения навыков', 3).map(value => copyCustomSkill(value, text));
+    }
+  }
+  return fields;
 }
 
 export function normalizeImport(payload, studioSettings, agentSettings) {
@@ -37,6 +96,10 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     trainRoster: payload.trainRoster === true && input.lifecycle === 'draft',
     studio: {
       ...studioSettings(input), id: studioId, agents,
+      ...(input.debtAssessment !== undefined && input.lifecycle !== 'draft' ? { debtAssessment: {
+        reason: field(object(input.debtAssessment, 'оценка долга').reason, 'причина оценки долга', 2_000),
+        assessedAt: field(input.debtAssessment.assessedAt, 'дата оценки долга', 64),
+      } } : {}),
       lifecycle: input.lifecycle === 'draft' ? 'draft' : 'paused',
       ...(input.lifecycle === 'draft' ? {} : { importedPaused: true }),
     },
@@ -46,6 +109,9 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     normalized[table] = array(payload[table], table).map((value) => {
       const item = object(value, table);
       if (item.studioId !== undefined && item.studioId !== studioId) throw new Error('Импорт содержит запись другой студии.');
+      if (learningCollections.includes(table)) {
+        return { id: id(item.id), studioId, agentId: id(item.agentId), trainingTaskId: id(item.trainingTaskId), ...copyKnowledgeRecord(table, item) };
+      }
       const row = { ...item, id: id(item.id), studioId };
       if (table === 'tasks') {
         delete row.workflowManaged;
@@ -71,9 +137,13 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
         if (row.artifactTarget) row.artifactTarget = relativeArtifactPath(row.artifactTarget);
         if (row.kind === 'train') {
           const training = object(row.training, 'обучение');
+          const { knowledgeId, customSkillIds, ...storedTraining } = training;
+          delete storedTraining.knowledge;
+          delete storedTraining.customSkills;
           row.workflowManaged = true;
           row.training = {
-            ...training, targetAgentId: id(training.targetAgentId), objective: field(training.objective, 'цель обучения'),
+            ...storedTraining, ...copyTrainingMaterials(training, row.stage === 'done'),
+            targetAgentId: id(training.targetAgentId), objective: field(training.objective, 'цель обучения'),
             topics: trainingTopics(training.topics), selected: undefined,
           };
           if (row.stage !== 'done') {
@@ -85,6 +155,8 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
             row.review = field(row.review, 'решение Директора');
             row.training.guide = field(training.guide, 'проверенное руководство', 16_000);
             if (!training.bootstrap) row.training.exercise = field(training.exercise, 'проверенное упражнение');
+            if (knowledgeId !== undefined) row.training.knowledgeId = id(knowledgeId);
+            if (customSkillIds !== undefined) row.training.customSkillIds = array(customSkillIds, 'авторские навыки', 3).map(id);
           }
         }
       }
@@ -127,8 +199,25 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     }
   }
   const taskById = new Map(normalized.tasks.map((task) => [task.id, task]));
+  for (const plan of normalized.plans) {
+    for (const entry of [plan, ...array(plan.tasks, 'задачи плана')]) {
+      if (entry.debtTaskId != null && taskById.get(entry.debtTaskId)?.kind !== 'debt') {
+        throw new Error('Некорректная связь с задачей техдолга при импорте.');
+      }
+    }
+  }
+  const knowledgeById = new Map(normalized.knowledge.map(row => [row.id, row]));
+  const customSkillsById = new Map(normalized.customSkills.map(row => [row.id, row]));
   const coach = agents.find(({ systemRole }) => systemRole === 'coach');
   const linkedSkills = new Set();
+  const linkedKnowledge = new Set();
+  const linkedCustomSkills = new Set();
+  function linkMaterial(record, task, linked) {
+    if (!record || record.agentId !== task.training.targetAgentId || record.trainingTaskId !== task.id || linked.has(record.id)) {
+      throw new Error('Некорректная связь утверждённых материалов обучения при импорте.');
+    }
+    linked.add(record.id);
+  }
   for (const task of normalized.tasks) {
     if (task.kind !== 'train') continue;
     const bootstrap = task.training.bootstrap === true;
@@ -136,9 +225,16 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
       || (bootstrap ? task.dependencies.length || coach.trainingTaskId !== task.id : task.dependencies.some((dependency) => dependency !== coach.trainingTaskId))) {
       throw new Error('Некорректный маршрут обучения при импорте.');
     }
-    if (task.stage === 'done') for (const id of task.training.skillIds ?? []) linkedSkills.add(id);
+    if (task.stage === 'done') {
+      for (const id of task.training.skillIds ?? []) linkedSkills.add(id);
+      if (task.training.knowledgeId !== undefined) linkMaterial(knowledgeById.get(task.training.knowledgeId), task, linkedKnowledge);
+      for (const id of task.training.customSkillIds ?? []) linkMaterial(customSkillsById.get(id), task, linkedCustomSkills);
+    }
   }
   if (normalized.skills.some(({ id }) => !linkedSkills.has(id))) throw new Error('В импорте отсутствует подтверждение закреплённой версии навыка.');
+  if (linkedKnowledge.size !== normalized.knowledge.length || linkedCustomSkills.size !== normalized.customSkills.length) {
+    throw new Error('В импорте отсутствует подтверждение знаний или авторского навыка.');
+  }
   for (const agent of agents) {
     if (!agent.trainingTaskId) continue;
     const task = taskById.get(agent.trainingTaskId);

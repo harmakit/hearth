@@ -163,6 +163,7 @@ async function start() {
     { createArtifactStore },
     { createTransferController },
     { createGitHubSkillFinder },
+    { createMaterialFinder },
   ] = await Promise.all([
     import("./bridge.mjs"),
     import("../core/service.mjs"),
@@ -171,6 +172,7 @@ async function start() {
     import("./artifacts.mjs"),
     import("./transfer.mjs"),
     import("./github-skills.mjs"),
+    import("./materials.mjs"),
   ]);
   protocol.handle("hearth", async ({ url }) => {
     try {
@@ -209,6 +211,7 @@ async function start() {
     run: async request => run({ ...request, projectRoot: await validateRoot(request.projectRoot) }),
     writeArtifact: artifacts.write,
     findSkills,
+    findMaterials: createMaterialFinder(),
     onChange: broadcast,
     notify,
   });

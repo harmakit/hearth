@@ -156,6 +156,86 @@ test('a copy commits to the real studio service and keeps historical approvals i
   assert.equal(runs, 0);
 });
 
+test('approved role knowledge and debt planning survive a studio snapshot round trip', t => {
+  const service = createStudioService({ dbPath: ':memory:', run: async () => {} });
+  t.after(() => service.close());
+  const policy = { enabled: true, every: 4, minShare: 50, minOpenTasks: 2 };
+  const assessment = { reason: 'Many debt tasks', assessedAt: '2026-11-18T00:00:00.000Z' };
+  const coach = { id: 'coach', name: 'Coach', role: 'library', mode: 'inherit', systemRole: 'coach', trainingTaskId: 'bootstrap' };
+  const trainee = { ...studio.agents[0], trainingTaskId: 'lesson' };
+  const approved = { stage: 'done', status: 'completed', review: 'Approved', kind: 'train', agentId: coach.id };
+  const source = { id: 'manual', title: 'Manual', source: 'Library', url: 'https://example.org/manual', revision: 'v1', license: 'CC BY', excerpt: 'See /Users/alice/private.md' };
+  const lesson = owned({ ...approved, id: 'lesson', title: 'Lesson', dependencies: ['bootstrap'], training: {
+    targetAgentId: trainee.id, objective: 'Practise', guide: 'Guide', exercise: 'Exercise',
+    knowledgeId: 'note', customSkillIds: ['outline-v1'], selectedMaterialIds: ['manual'], materials: [source],
+  } });
+  const note = owned({ id: 'note', agentId: trainee.id, trainingTaskId: lesson.id, notes: 'See /old/project/private.md', sources: [source], createdAt: assessment.assessedAt });
+  const skill = owned({ id: 'outline-v1', agentId: trainee.id, trainingTaskId: lesson.id, key: 'outline', title: 'Outline', version: 1, content: 'Read /Users/alice/private.md', createdAt: assessment.assessedAt });
+  const workspace = {
+    ...snapshot,
+    studios: [{ ...studio, debtPolicy: policy, debtAssessment: assessment, agents: [trainee, coach] }],
+    tasks: [{ ...task, kind: 'debt' }, snapshot.tasks[1], lesson, owned({ ...approved, id: 'draft-lesson', title: 'Draft lesson',
+      status: 'queued', stage: 'review', review: '', dependencies: ['bootstrap'], training: {
+        targetAgentId: trainee.id, objective: 'Practise again', knowledge: 'Draft note',
+        selectedMaterialIds: ['manual'], materials: [{ ...source, excerpt: '' }],
+        customSkills: [{ key: 'outline', title: 'Revised outline', content: 'Draft content' }],
+      },
+    }), owned({ ...approved, id: 'bootstrap', title: 'Bootstrap', training: {
+      targetAgentId: coach.id, objective: 'Coach', guide: 'Guide', bootstrap: true,
+    } })],
+    plans: [{ ...snapshot.plans[0], debtSprint: true, tasks: [{ ...snapshot.plans[0].tasks[0], kind: 'debt', debtTaskId: task.id }] }],
+    sprints: [{ ...snapshot.sprints[0], debtSprint: true }],
+    knowledge: [note, { ...note, id: 'orphan' }, { ...note, id: 'foreign', studioId: 'another' }],
+    customSkills: [skill, { ...skill, id: 'orphan' }],
+  };
+  const bundle = makeStudioBundle(workspace, { studioId: studio.id, mode: 'snapshot' });
+  assert.equal(bundle.knowledge.length, 1);
+  assert.equal(bundle.customSkills.length, 1);
+  assert.doesNotMatch(JSON.stringify(bundle), /\/old\/project|\/Users\/alice|orphan/);
+  const prepared = prepareBundleImport(bundle, { root: '/imported/studio' });
+  const copy = service.importStudio(prepared);
+  const saved = service.snapshot();
+  const importedLesson = saved.tasks.find(({ title }) => title === 'Lesson');
+  const importedDebtTask = saved.tasks.find(({ title }) => title === 'Work');
+  assert.deepEqual(copy.debtPolicy, policy);
+  assert.deepEqual(copy.debtAssessment, assessment);
+  assert.equal(importedDebtTask.kind, 'debt');
+  assert.equal(saved.plans[0].tasks[0].debtTaskId, importedDebtTask.id);
+  assert.equal(saved.plans[0].tasks[0].kind, 'debt');
+  assert.equal(saved.plans[0].debtSprint, true);
+  assert.equal(saved.sprints[0].debtSprint, true);
+  assert.equal(saved.knowledge[0].studioId, copy.id);
+  assert.equal(saved.knowledge[0].agentId, copy.agents[0].id);
+  assert.equal(saved.knowledge[0].trainingTaskId, importedLesson.id);
+  assert.equal(saved.knowledge[0].id, importedLesson.training.knowledgeId);
+  assert.deepEqual(importedLesson.training.customSkillIds, [saved.customSkills[0].id]);
+  assert.equal(saved.knowledge[0].sources[0].url, source.url);
+  assert.equal(saved.customSkills[0].version, 1);
+  const draft = saved.tasks.find(({ title }) => title === 'Draft lesson');
+  assert.equal(draft.training.knowledge, 'Draft note');
+  assert.equal(draft.training.materials[0].excerpt, '');
+  assert.equal(draft.training.customSkills[0].content, 'Draft content');
+  assert.equal(draft.training.knowledgeId, undefined);
+
+  const badUrl = structuredClone(bundle);
+  badUrl.knowledge[0].sources[0].url = 'file:///private/manual';
+  assert.throws(() => prepareBundleImport(badUrl, { root: '/imported/invalid' }), /ссылка/);
+  const forged = prepareBundleImport(bundle, { root: '/imported/invalid' });
+  forged.knowledge[0].agentId = forged.studio.agents.find(({ systemRole }) => systemRole === 'coach').id;
+  assert.throws(() => service.importStudio(forged), /связь утверждённых материалов/);
+  const unapproved = prepareBundleImport(bundle, { root: '/imported/invalid' });
+  Object.assign(unapproved.tasks.find(({ title }) => title === 'Lesson'), { status: 'queued', stage: 'review' });
+  assert.throws(() => service.importStudio(unapproved), /отсутствует подтверждение знаний/);
+  assert.equal(service.snapshot().studios.length, 1);
+
+  const template = makeStudioBundle(workspace, { studioId: studio.id, mode: 'template' });
+  assert.deepEqual(template.knowledge, []);
+  assert.deepEqual(template.customSkills, []);
+  assert.deepEqual(template.studio.debtPolicy, policy);
+  assert.equal(template.studio.debtAssessment, undefined);
+  assert.equal(prepareBundleImport(template, { root: '/imported/template' }).trainRoster, true);
+});
+
 test('legacy import preserves structure, scopes explicit artifacts and leaves the source alone', async t => {
   const tmp = fileURLToPath(new URL('../.tmp/', import.meta.url));
   await mkdir(tmp, { recursive: true });

@@ -124,6 +124,82 @@ test('the initial sprint uses allowed dynamic recommendations and reroutes stale
   assert.deepEqual(calls, [['plan', undefined], ['task', 'proposed'], ['select-model', undefined], ['review', 'replacement'], ['director', undefined]]);
 });
 
+test('the Director can assess and save debt settings using current studio data', async (t) => {
+  const calls = [];
+  let release;
+  let answer = { enabled: true, every: 2, minShare: 70, minOpenTasks: 1, reason: 'Есть незакрытая задача.' };
+  const service = createStudioService({
+    dbPath: ':memory:', now: () => new Date('2026-11-18T10:00:00Z'),
+    run: async request => {
+      calls.push(request);
+      if (release) await release.promise;
+      return { text: JSON.stringify(answer) };
+    },
+  });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({
+    name: 'Writer', root: '/project', director: { runtime: 'claude', model: 'director', effort: 'high' },
+  });
+  const debt = service.createTask({ studioId, kind: 'debt', title: 'Unify chapter headings', prompt: 'Create a consistent format.' });
+  const result = await service.assessDebtPolicy({ studioId });
+  assert.deepEqual(service.snapshot().studios[0].debtPolicy, { enabled: true, every: 2, minShare: 70, minOpenTasks: 1 });
+  assert.deepEqual(result.debtAssessment, { reason: answer.reason, assessedAt: '2026-11-18T10:00:00.000Z' });
+  const { prompt, signal, ...call } = calls[0];
+  assert.deepEqual(call, { runtime: 'claude', model: 'director', effort: 'high', projectRoot: '/project', purpose: 'assess-debt' });
+  assert.equal(signal.aborted, false);
+  assert.ok(prompt.includes(debt.title));
+  answer = { ...answer, every: 100 };
+  await assert.rejects(service.assessDebtPolicy({ studioId }), /период/i);
+  assert.equal(service.snapshot().studios[0].debtPolicy.every, 2);
+  release = Promise.withResolvers();
+  answer = { ...answer, every: 2 };
+  const assessment = service.assessDebtPolicy({ studioId });
+  service.updateStudio({ studioId, debtPolicy: { enabled: false, every: 5, minShare: 60, minOpenTasks: 2 } });
+  release.resolve();
+  await assert.rejects(assessment, /изменились/i);
+  assert.equal(service.snapshot().studios[0].debtPolicy.every, 5);
+  assert.equal(service.snapshot().studios[0].debtAssessment, undefined);
+});
+
+test('debt mode starts after onboarding and schedules an existing open debt item once', async (t) => {
+  let debt;
+  let plans = 0;
+  let decisions = 0;
+  let context;
+  const service = createStudioService({ dbPath: ':memory:', run: async ({ purpose, prompt }) => {
+    if (purpose === 'plan') {
+      plans++;
+      context = JSON.parse(prompt.split('\n\n').at(-1));
+      const task = { ...draft.tasks[0], artifactPath: undefined };
+      return { text: JSON.stringify({ ...draft, tasks: [plans === 1 ? task : { ...task, kind: 'debt', debtTaskId: debt.id }] }) };
+    }
+    if (purpose === 'director') return { text: JSON.stringify({ action: decisions++ === 0 ? 'nextSprint' : 'finish' }) };
+    const results = {
+      task: { summary: 'Done' }, review: { pass: true, summary: 'Accepted' },
+    };
+    return { text: JSON.stringify(results[purpose]) };
+  } });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({
+    name: 'Writer', root: '/project', debtPolicy: { enabled: true, every: 1, minShare: 100, minOpenTasks: 1 },
+  });
+  debt = service.createTask({ studioId, kind: 'debt', title: 'Reorganize drafts', prompt: 'Group by chapter.' });
+  service.initializeStudio({ studioId });
+  const first = (await until(service.snapshot, ({ plans }) => plans.length === 1)).plans[0];
+  assert.equal(first.debtSprint, undefined);
+  assert.equal(context.debt?.active ?? false, false);
+  service.decidePlan({ studioId, planId: first.id, decision: 'approve' });
+  const second = (await until(service.snapshot, ({ plans }) => plans.length === 2)).plans[1];
+  assert.equal(second.debtSprint, true);
+  assert.equal(context.debt.active, true);
+  assert.equal(context.debt.items[0].id, debt.id);
+  service.decidePlan({ studioId, planId: second.id, decision: 'approve' });
+  const done = await until(service.snapshot, ({ sprints }) => sprints.every(({ status }) => status === 'completed'));
+  assert.equal(done.sprints[1].debtSprint, true);
+  assert.equal(done.tasks.find(({ id }) => id === debt.id).stage, 'done');
+  assert.equal(done.tasks.filter(({ kind }) => kind === 'debt').length, 1);
+});
+
 test('initial team editing includes referenced agents omitted by the planner or older saves', async (t) => {
   const dbPath = database(t);
   let workerKey;
