@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { appendFileSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const [runtime, mode, tracePath, ...args] = process.argv.slice(2);
 const sessionId = '12345678-1234-1234-1234-123456789abc';
 const turnId = 'fixture-turn';
-const profile = 'hearth-studio-read-only';
+const readingProfile = 'hearth-studio-read-only';
+const profile = JSON.parse(args.find(arg => arg.startsWith('default_permissions='))?.split('=').at(-1) ?? 'null');
+const writing = ['write', 'wrong-write-profile', 'no-write-sandbox', 'scoped-background'].includes(mode);
+const scopedRead = mode === 'scoped-read';
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 
 if (args[0] === '--version') {
@@ -21,6 +25,14 @@ if (args[0] === '--version') {
     console.log('http-mcp  https://example.invalid/mcp  -  enabled  Unknown');
   } else if (mode === 'unknown-mcp-list') console.log('unknown response');
   else console.log('No MCP servers configured yet. Try …');
+} else if (runtime === 'codex' && args[0] === 'sandbox') {
+  if (tracePath) appendFileSync(tracePath, 'sandbox\n');
+  assert.match(profile, /^hearth-studio-write-/);
+  assert.ok(args.includes('--include-managed-config'));
+  assert.equal(args[args.indexOf('-P') + 1], profile);
+  assert.equal(args[args.indexOf('-C') + 1], process.cwd());
+  assert.equal(args.at(-1), '/usr/bin/true');
+  if (mode === 'no-write-sandbox') process.exitCode = 71;
 } else if (runtime === 'claude') {
   if (args[0] === 'auth') {
     send({ loggedIn: false, email: 'should-not-escape@example.org' });
@@ -31,7 +43,10 @@ if (args[0] === '--version') {
     assert.ok(args.includes('--safe-mode'));
     assert.ok(args.includes('--restricted'));
     assert.ok(args.includes('--strict-mcp-config'));
-    assert.equal(args[args.indexOf('--tools') + 1], '');
+    assert.equal(args[args.indexOf('--tools') + 1], writing ? 'Read,Glob,Grep,Edit,Write' : scopedRead ? 'Read,Glob,Grep' : '');
+    assert.equal(args.includes('--no-session-persistence'), writing || scopedRead);
+    assert.equal(args[args.indexOf('--permission-mode') + 1], writing ? 'acceptEdits' : 'dontAsk');
+    if (writing || scopedRead) assert.equal(args[args.indexOf('--permission-prompts') + 1], 'none');
     process.stdin.setEncoding('utf8');
     let prompt = '';
     for await (const chunk of process.stdin) prompt += chunk;
@@ -46,7 +61,16 @@ if (args[0] === '--version') {
       process.exitCode = 1;
     } else {
       const resumed = args.includes(`--resume=${sessionId}`);
-      send({ type: 'result', subtype: 'success', is_error: false, result: mode === 'blank' ? ' ' : resumed ? 'Claude resumed' : 'Claude answer', session_id: sessionId });
+      if (mode === 'scoped-background') {
+        const child = spawn(process.execPath, ['-e',
+          'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "late"), 300)', process.env.TEST_SCOPED_OUTPUT,
+        ], { stdio: 'ignore' });
+        child.unref();
+      }
+      const usage = mode === 'usage' ? {
+        input_tokens: 20, output_tokens: 5, cache_read_input_tokens: 7, cache_creation_input_tokens: 3,
+      } : undefined;
+      send({ type: 'result', subtype: 'success', is_error: false, result: mode === 'blank' ? ' ' : resumed ? 'Claude resumed' : 'Claude answer', session_id: sessionId, usage });
     }
   }
 } else {
@@ -58,9 +82,15 @@ if (args[0] === '--version') {
     assert.ok(args.includes('mcp_servers.http-mcp.url="http://127.0.0.1:0/"'));
     assert.ok(!args.includes('mcp_servers.disabled-mcp.enabled=false'));
   }
-  assert.ok(args.includes(`default_permissions="${profile}"`));
+  if (writing) assert.match(profile, /^hearth-studio-write-/);
+  else assert.equal(profile, readingProfile);
   const permissions = args.find(arg => arg.startsWith(`permissions.${profile}=`));
   assert.ok(permissions.includes('network={enabled=false}'));
+  if (writing) {
+    assert.match(permissions, /":workspace_roots"=\{"\."="write","\.git"="read"/);
+    assert.match(permissions, /scratch"=\{"\."="write"/);
+    assert.ok(args.some(arg => arg.startsWith('shell_environment_policy.set={TMPDIR=')));
+  }
   assert.ok(permissions.includes(`${JSON.stringify(realpathSync(process.execPath))}="read"`));
   assert.equal(process.argv0, realpathSync(process.execPath));
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -95,10 +125,11 @@ if (args[0] === '--version') {
         }
         if (mode !== 'missing-ephemeral') thread.ephemeral = mode !== 'persistent-thread';
         reply({ thread, cwd: params.cwd, approvalPolicy: 'never', model: params.model,
-          activePermissionProfile: { id: mode === 'wrong-sandbox' ? ':danger-full-access' : profile, extends: null }, runtimeWorkspaceRoots: [process.cwd()] });
+          activePermissionProfile: { id: ['wrong-sandbox', 'wrong-write-profile'].includes(mode) ? ':danger-full-access' : profile, extends: null }, runtimeWorkspaceRoots: [process.cwd()] });
       } else if (method === 'turn/start') {
         assert.deepEqual(params.input, [{ type: 'text', text: 'Test prompt', text_elements: [] }]);
         assert.equal(params.effort, 'high');
+        assert.equal(params.permissions, profile);
         reply({ turn: { id: turnId, status: 'inProgress' } });
         if (mode === 'interrupt' || mode === 'timeout') continue;
         event('item/completed', { turnId: 'foreign-turn', item: { type: 'agentMessage', text: 'foreign', phase: 'final_answer' } });
@@ -106,6 +137,12 @@ if (args[0] === '--version') {
         if (mode === 'failure') event('turn/completed', { turn: { id: turnId, status: 'failed', error: { message: 'fixture failure' } } });
         else {
           if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: 'Codex answer', phase: 'final_answer' } });
+          if (mode === 'usage') {
+            const total = { inputTokens: 30, outputTokens: 5, cachedInputTokens: 7, cacheWriteInputTokens: 3 };
+            event('thread/tokenUsage/updated', { turnId, tokenUsage: { total: { inputTokens: 10 }, last: { inputTokens: 5 } } });
+            event('thread/tokenUsage/updated', { turnId, tokenUsage: { total, last: { inputTokens: 20 } } });
+            event('thread/tokenUsage/updated', { turnId: 'foreign-turn', tokenUsage: { total: { inputTokens: 999 } } });
+          }
           event('turn/completed', { turn: { id: turnId, status: 'completed' } });
         }
       } else if (method === 'turn/interrupt') {

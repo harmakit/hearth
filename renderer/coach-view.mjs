@@ -90,10 +90,18 @@ function knowledgeSource({ title, source, url, revision, license, excerpt }) {
   </li>`;
 }
 
-function roleKnowledge({ studio, tasks, knowledge, customSkills }) {
+function roleKnowledge({ studio, tasks, knowledge, customSkills, knowledgeEvents }) {
   const trainingTasks = new Map(tasks.filter(task => task.kind === 'train').map(task => [task.id, task]));
   const knowledgeByAgent = Map.groupBy(knowledge, entry => entry.agentId);
   const skillsByAgent = Map.groupBy(customSkills, entry => entry.agentId);
+  const layers = { reference: 'Общая справка', decision: 'Решение студии', memory: 'Рабочая память', role: 'База роли' };
+  const scope = ({ agentId, layer, key }, kind) => JSON.stringify([kind, agentId ?? null, layer ?? 'role', key ?? 'role-notes']);
+  const current = (record, entries, kind) => {
+    const key = scope(record, kind);
+    const change = knowledgeEvents.findLast(event => scope(event, event.kind) === key);
+    if (change) return change.versionId === record.id;
+    return entries.filter(entry => scope(entry, kind) === key).toSorted((a, b) => (b.version ?? 1) - (a.version ?? 1))[0]?.id === record.id;
+  };
   const provenance = ({ trainingTaskId, createdAt }) => {
     const task = trainingTasks.get(trainingTaskId);
     const date = new Date(createdAt);
@@ -101,7 +109,11 @@ function roleKnowledge({ studio, tasks, knowledge, customSkills }) {
     return task || time ? `<p class="knowledge-provenance muted">${task ? taskLink(task) : ''}${time}</p>` : '';
   };
   const agents = (studio?.agents ?? []).filter(agent => knowledgeByAgent.has(agent.id) || skillsByAgent.has(agent.id));
+  const shared = (knowledgeByAgent.get(null) ?? []).filter(note => current(note, knowledge, 'knowledge'));
   return `<section class="stack compact"><h2>База знаний по ролям</h2>
+    ${shared.length ? `<article class="panel padded stack compact"><h3>Общие записи студии</h3>${shared.map(note =>
+      `<details class="advanced" data-library-detail="shared-${safe(note.id)}"><summary>${safe(layers[note.layer] ?? 'Запись')} · ${safe(note.key)} · Версия ${safe(note.version)}</summary>
+        ${provenance(note)}<p class="long-text">${safe(note.notes)}</p>${note.sources?.length ? `<ul class="skill-candidates">${note.sources.map(knowledgeSource).join('')}</ul>` : ''}</details>`).join('')}</article>` : ''}
     ${agents.length ? agents.map(agent => {
       const notes = knowledgeByAgent.get(agent.id) ?? [];
       const skills = Map.groupBy(skillsByAgent.get(agent.id) ?? [], skill => skill.key);
@@ -110,7 +122,7 @@ function roleKnowledge({ studio, tasks, knowledge, customSkills }) {
           ? ` <small class="muted">· ${safe(agent.roleTitle)}</small>` : ''}</h3>
         ${notes.length ? `<section class="stack compact"><h4>Утверждённые заметки</h4>
           ${notes.toReversed().map(note => `<div class="inline-result stack compact">${provenance(note)}
-            <details class="advanced" data-library-detail="note-${safe(note.id)}"><summary>Читать заметку</summary><p class="long-text">${safe(note.notes)}</p>
+            <details class="advanced" data-library-detail="note-${safe(note.id)}"><summary>Читать заметку · ${safe(layers[note.layer] ?? 'База роли')}${note.version ? ` · Версия ${safe(note.version)}` : ''}${current(note, notes, 'knowledge') ? ' · текущая' : ''}</summary><p class="long-text">${safe(note.notes)}</p>
               ${note.sources?.length ? `<ul class="skill-candidates">${note.sources.map(knowledgeSource).join('')}</ul>` : ''}
             </details></div>`).join('')}
         </section>` : ''}
@@ -118,8 +130,8 @@ function roleKnowledge({ studio, tasks, knowledge, customSkills }) {
           ${[...skills.values()].map(versions => {
             const ordered = versions.toSorted((first, second) => second.version - first.version);
             return `<div class="inline-result stack compact"><strong>${safe(ordered[0].title || ordered[0].key)}</strong>
-              ${ordered.map((skill, index) => `<details class="advanced" data-library-detail="skill-${safe(skill.id)}">
-                <summary>Версия ${safe(skill.version)}${index === 0 ? ' · текущая' : ''}</summary>
+              ${ordered.map(skill => `<details class="advanced" data-library-detail="skill-${safe(skill.id)}">
+                <summary>Версия ${safe(skill.version)}${current(skill, ordered, 'customSkill') ? ' · текущая' : ''}</summary>
                 ${provenance(skill)}<p class="long-text">${safe(skill.content)}</p>
               </details>`).join('')}</div>`;
           }).join('')}
@@ -142,10 +154,10 @@ export function renderSkillPreview(preview) {
     ${candidates.length ? `<ul class="skill-candidates">${candidates.map(candidate => `<li><strong>${safe(candidate.title || candidate.path)}</strong>${skillSource(candidate)}</li>`).join('')}</ul>` : ''}`;
 }
 
-export function renderSkillLibrary({ studio, skills = [], tasks = [], knowledge = [], customSkills = [], topics = '', preview = {} } = {}) {
+export function renderSkillLibrary({ studio, skills = [], tasks = [], knowledge = [], customSkills = [], knowledgeEvents = [], topics = '', preview = {} } = {}) {
   const busy = preview.status === 'pending';
   return `<div class="stack skill-library">
-    ${roleKnowledge({ studio, tasks, knowledge, customSkills })}
+    ${roleKnowledge({ studio, tasks, knowledge, customSkills, knowledgeEvents })}
     <section class="stack compact"><h2>Утверждённые навыки</h2>
       ${skills.length ? skills.map(skill => `<article class="panel padded stack compact" data-skill-id="${safe(skill.id)}">
         <h3>${safe(skill.title || skill.path)}</h3>${skillSource(skill)}

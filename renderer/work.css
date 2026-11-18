@@ -456,3 +456,42 @@
   cursor: progress;
   opacity: .65;
 }
+.legacy-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legacy-list > li {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow-wrap: anywhere;
+}
+
+.legacy-list > .legacy-attachment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.legacy-list p { margin: 0; }
+.legacy-record { display: grid; gap: 9px; min-width: 0; }
+.legacy-record summary { cursor: pointer; font-weight: 640; }
+.legacy-record details summary { margin-block-end: 6px; }
+.legacy-oid { overflow-wrap: anywhere; }
+.legacy-checklist { display: grid; gap: 8px; padding-block: 4px; }
+.legacy-row { align-items: center; }
+.legacy-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.legacy-table { max-width: 100%; overflow-x: auto; }
+.legacy-table table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+.legacy-table caption { padding: 6px; text-align: left; font-weight: 640; }
+.legacy-table th, .legacy-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.legacy-table thead th, .legacy-table td { white-space: nowrap; }
+.legacy-table tbody th { min-width: 12rem; overflow-wrap: anywhere; font-weight: 520; }
+.legacy-history > li { background: var(--surface-raised); }

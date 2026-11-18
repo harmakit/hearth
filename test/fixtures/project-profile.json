@@ -1,0 +1,32 @@
+{
+  "id": "game-fixture",
+  "checks": [
+    {
+      "id": "build",
+      "command": "project-check-fixture",
+      "args": ["build"],
+      "paths": ["game/**", "project.godot"],
+      "required": true,
+      "timeoutMs": 5000,
+      "evidenceGlobs": ["reports/*.bin"]
+    },
+    {
+      "id": "playtest",
+      "command": "project-check-fixture",
+      "args": ["playtest"],
+      "paths": ["game/**", "scenes/**"],
+      "required": true,
+      "timeoutMs": 5000,
+      "evidenceGlobs": ["reports/**/*.log"]
+    },
+    {
+      "id": "assets",
+      "command": "project-check-fixture",
+      "args": ["assets"],
+      "paths": ["assets/**/*.blend", "assets/**/*.wav"],
+      "required": false,
+      "timeoutMs": 5000,
+      "evidenceGlobs": ["reports/assets.json"]
+    }
+  ]
+}

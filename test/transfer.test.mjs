@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { link, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -41,7 +42,7 @@ const snapshot = {
 
 test('a template preserves only role setup and drops local information', () => {
   const bundle = makeStudioBundle(snapshot, { studioId: studio.id, mode: 'template' });
-  assert.equal(bundle.version, 1);
+  assert.equal(bundle.version, 2);
   assert.equal(bundle.mode, 'template');
   assert.equal(bundle.studio.agents[0].name, 'Builder');
   for (const key of ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings']) assert.deepEqual(bundle[key], []);
@@ -101,7 +102,8 @@ test('a snapshot remaps the connected record graph and keeps interrupted work pa
 test('a bundle rejects invalid versions, malformed edges and nonportable paths', () => {
   const bundle = makeStudioBundle(snapshot, { studioId: studio.id, mode: 'snapshot' });
   const copy = patch => prepareBundleImport({ ...bundle, ...patch }, { root: '/new/project' });
-  assert.throws(() => copy({ version: 2 }), /верси/i);
+  assert.throws(() => copy({ version: 3 }), /верси/i);
+  assert.equal(copy({ version: 1 }).studio.lifecycle, 'paused');
   assert.throws(() => copy({ tasks: [{ ...bundle.tasks[0], dependencies: ['unknown'] }] }), /связ/i);
   assert.throws(() => copy({ tasks: [{ ...bundle.tasks[0], artifactPath: '../outside' }, bundle.tasks[1]] }), /путь/i);
   assert.throws(() => copy({ artifacts: [{ path: 'C:\\outside', content: 'unsafe' }] }), /путь/i);
@@ -109,6 +111,78 @@ test('a bundle rejects invalid versions, malformed edges and nonportable paths',
   assert.throws(() => copy({ plans: [{ ...bundle.plans[0], files: [{ path: '/outside', content: 'unsafe' }] }] }), /путь/i);
   assert.throws(() => copy({ epics: false }), /формат/i);
   assert.equal(copy({}).tasks[0].artifactPath ?? '', '');
+});
+
+test('a snapshot transfers only selected evidence with exact bytes and fresh task links', () => {
+  const bytes = Buffer.from([0, 255, 128, 7]);
+  const original = owned({ id: 'one-video', taskId: task.id, attemptId: 'native-attempt',
+    kind: 'video', sourcePath: 'runs/playtest.mp4', revision: { headOid: 'a'.repeat(40), digest: 'b'.repeat(64) },
+    contentType: 'video/mp4', size: bytes.length, digest: createHash('sha256').update(bytes).digest('hex'),
+    storedRef: 'private-storage', identity: { inode: 412 },
+  });
+  const bundle = makeStudioBundle({ ...snapshot, evidence: [original, { ...original, id: 'two-videos' }] }, {
+    studioId: studio.id, mode: 'snapshot', evidenceFiles: [{ id: original.id, bytes }],
+  });
+  assert.equal(bundle.evidence.length, 1);
+  assert.doesNotMatch(JSON.stringify(bundle), /two-videos|private-storage|native-attempt/);
+  const payload = prepareBundleImport(bundle, { root: '/new/project' });
+  assert.deepEqual(Buffer.from(payload.evidence[0].content, 'base64'), bytes);
+  assert.deepEqual(payload.evidence[0].revision, original.revision);
+  assert.equal(payload.evidence[0].taskId, payload.tasks[0].id);
+  assert.notEqual(payload.evidence[0].id, original.id);
+  assert.throws(() => prepareBundleImport({ ...bundle, evidence: [{ ...bundle.evidence[0], content: 'AAAAAA==' }] }, { root: '/new/project' }), /контрольн|содержим/i);
+});
+
+test('a snapshot remaps and stores the version chain and event history of owner library decisions', t => {
+  const first = owned({ id: 'original', agentId: null, key: 'architecture', layer: 'decision', notes: 'First decision', version: 1,
+    createdAt: '2026-11-18', replacesId: null });
+  const second = { ...first, id: 'replacement', notes: 'Revised decision', version: 2, replacesId: first.id };
+  const event = owned({ id: 'library-event', agentId: null, key: first.key, layer: first.layer, kind: 'knowledge', action: 'publish',
+    previousId: first.id, versionId: second.id, reason: 'New evidence', operationId: 'private-op' });
+  const bundle = makeStudioBundle({ ...snapshot, knowledge: [first, second], knowledgeEvents: [event] }, { studioId: studio.id, mode: 'snapshot' });
+  const normalized = prepareBundleImport(bundle, { root: '/new/project' });
+  assert.equal(normalized.knowledge[1].replacesId, normalized.knowledge[0].id);
+  assert.equal(normalized.knowledgeEvents[0].previousId, normalized.knowledge[0].id);
+  assert.equal(normalized.knowledgeEvents[0].versionId, normalized.knowledge[1].id);
+  assert.doesNotMatch(JSON.stringify(bundle), /library-event|private-op/);
+  const service = createStudioService({ dbPath: ':memory:', run: async () => {} });
+  t.after(() => service.close());
+  service.importStudio(normalized);
+  const saved = service.snapshot();
+  assert.equal(saved.knowledge[1].replacesId, saved.knowledge[0].id);
+  assert.equal(saved.knowledgeEvents[0].versionId, saved.knowledge[1].id);
+});
+
+test('modern snapshot preserves typed history and holds imported Git work for review', () => {
+  const revision = { headOid: 'a'.repeat(40), targetOid: 'b'.repeat(40), digest: 'c'.repeat(64) };
+  const current = { ...task, points: 3, links: [{ type: 'origin', taskId: 'before' }],
+    carryoverHistory: [{ taskId: task.id, fromSprintId: 'sprint-native', sprintId: null, stage: 'backlog', reason: 'Wait for input' }],
+    gitDelivery: { worktreeId: 'private-worktree', status: 'candidate', revision, checks: [] } };
+  const workspace = { ...snapshot, tasks: [current, snapshot.tasks[1]],
+    sprints: [{ ...snapshot.sprints[0], closedTasks: [{ taskId: task.id, stage: 'backlog', title: 'Earlier work' }],
+      retrospective: { methodVersion: 1, sprintId: snapshot.sprints[0].id,
+        planned: { count: 2, taskIds: [task.id, 'before'], points: null, knownPoints: 3, missingPointTaskIds: ['before'] } } }],
+    conversations: [owned({ id: 'chat', taskId: task.id, agentId: studio.agents[0].id })],
+    conversationMessages: [owned({ id: 'msg', conversationId: 'chat', kind: 'note', status: 'queued', author: 'owner', text: 'Original note', operationId: 'private-operation' })],
+    phases: [owned({ id: 'phase', title: 'Release', goal: 'Launch', epicIds: ['epic-native'],
+      sprintIds: ['sprint-native'], criteria: [{ id: 'criterion', description: 'Check', evidenceIds: ['before'] }] })],
+  };
+  const bundle = makeStudioBundle(workspace, { studioId: studio.id, mode: 'snapshot' });
+  assert.doesNotMatch(JSON.stringify(bundle), /private-worktree|private-operation/);
+  const copy = prepareBundleImport(bundle, { root: '/new/project' });
+  assert.deepEqual(copy.tasks[0].links, [{ type: 'origin', taskId: copy.tasks[1].id }]);
+  assert.equal(copy.tasks[0].points, 3);
+  assert.equal(copy.tasks[0].carryoverHistory[0].fromSprintId, copy.sprints[0].id);
+  assert.equal(copy.tasks[0].carryoverHistory[0].taskId, copy.tasks[0].id);
+  assert.equal(copy.sprints[0].closedTasks[0].taskId, copy.tasks[0].id);
+  assert.deepEqual(copy.sprints[0].retrospective.planned.missingPointTaskIds, [copy.tasks[1].id]);
+  assert.equal(copy.tasks[0].legacyWorktreeReview, true);
+  assert.equal(copy.tasks[0].stage, 'blocked');
+  assert.deepEqual(copy.tasks[0].gitDelivery.revision, revision);
+  assert.equal(copy.conversationMessages[0].conversationId, copy.conversations[0].id);
+  assert.equal(copy.conversationMessages[0].status, 'held');
+  assert.deepEqual(copy.phases[0].criteria[0].evidenceIds, [copy.tasks[1].id]);
+  assert.throws(() => prepareBundleImport({ ...bundle, phases: [{ ...bundle.phases[0], studioId: 'elsewhere' }] }, { root: '/new/project' }), /другой студии/i);
 });
 
 test('only explicitly selected published file bytes appear anywhere in the snapshot', () => {
@@ -159,7 +233,7 @@ test('a copy commits to the real studio service and keeps historical approvals i
 test('approved role knowledge and debt planning survive a studio snapshot round trip', t => {
   const service = createStudioService({ dbPath: ':memory:', run: async () => {} });
   t.after(() => service.close());
-  const policy = { enabled: true, every: 4, minShare: 50, minOpenTasks: 2 };
+  const policy = { enabled: true, every: 4, minShare: 50, minOpenTasks: 2, measure: 'taskCount' };
   const assessment = { reason: 'Many debt tasks', assessedAt: '2026-11-18T00:00:00.000Z' };
   const coach = { id: 'coach', name: 'Coach', role: 'library', mode: 'inherit', systemRole: 'coach', trainingTaskId: 'bootstrap' };
   const trainee = { ...studio.agents[0], trainingTaskId: 'lesson' };
@@ -246,13 +320,14 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
   const put = async (path, content) => {
     const file = join(source, path);
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, typeof content === 'string' ? content : JSON.stringify(content));
+    await writeFile(file, typeof content === 'string' || Buffer.isBuffer(content) ? content : JSON.stringify(content));
   };
   await mkdir(root);
+  await put('studio/config.json', { owner_language: 'English', project_language: 'Français', token: 'private-token' });
   await put('studio/board.json', {
     schema: 2, tasks: [
       { id: 'T-1', title: 'First', status: 'in-progress', epic: 'E-1', story: 'US-1', sprint: 4, assignee: 'engineer',
-        deps: ['T-0'], acceptance: ['A report exists'], branch: 'feature/game-work', outputs: ['studio/artifacts/report.md'] },
+        deps: [{ type: 'task', id: 'T-0' }, { type: 'story', id: 'US-1' }], links: [{ type: 'origin', task_id: 'T-0' }], acceptance: ['A report exists'], branch: 'feature/game-work', outputs: ['studio/artifacts/report.md', 'studio/artifacts/clip.mp4', 'studio/artifacts/unselected.bin'] },
       { id: 'Q-1', title: 'Question', status: 'done', type: 'question', answer: 'Approved' },
       { id: 'T-2', title: 'Registered', status: 'review' },
     ],
@@ -264,20 +339,28 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
     id: 'M-2', type: 'grooming', sprint: 4, agenda: 'Plan review', decisions_md: 'Accept the report',
     participants: ['engineer'], positions: [{ role: 'engineer', text: 'Ready to share', ts: '2026-11-18' }], actions: ['T-1'],
   }) + '\n');
-  await put('.claude/agents/engineer.md', '---\nname: engineer\ndescription: Builds things\n---\nprivate system prompt');
+  await put('.claude/agents/engineer.md', '---\nname: engineer\ndescription: Builds things\ntools: Read, Bash\nskills: game-build\nmemory: project\n---\nLegacy role instructions');
   await put('.claude/agents/librarian.md', '---\nname: librarian\ndescription: Maintains knowledge\n---\nprivate librarian prompt');
   await put('.git/worktrees/feature/gitdir', join(workspace, 'external', '.git') + '\n');
   await put('.git/worktrees/review/gitdir', join(workspace, 'external-review', '.git') + '\n');
   await put('.git/worktrees/review/HEAD', 'ref: refs/heads/feature/T-2-revision\n');
   await put('studio/artifacts/report.md', 'report');
+  const clip = Buffer.from([1, 0, 255, 128]);
+  await put('studio/artifacts/clip.mp4', clip);
+  await put('studio/artifacts/unselected.bin', Buffer.from([2, 0]));
   await symlink(join(source, 'studio/artifacts/report.md'), join(source, 'studio/artifacts/link.md'));
+  await writeFile(join(workspace, 'outside.md'), 'outside');
+  await link(join(workspace, 'outside.md'), join(source, 'studio/artifacts/hardlink.md'));
   const paths = (await readdir(source, { recursive: true })).sort();
   const board = await readFile(join(source, 'studio/board.json'), 'utf8');
 
-  const payload = await prepareLegacyImport({ source, root, name: 'New', artifactPaths: ['studio/artifacts/report.md'] });
+  const payload = await prepareLegacyImport({ source, root, name: 'New', artifactPaths: ['studio/artifacts/report.md', 'studio/artifacts/clip.mp4'] });
   const [work, question, registered, before] = payload.tasks;
   assert.equal(payload.studio.root, root);
   assert.equal(payload.studio.lifecycle, 'paused');
+  assert.equal(payload.studio.language, 'English');
+  assert.equal(payload.studio.projectLanguage, 'Français');
+  assert.equal((await prepareLegacyImport({ source, root, language: 'Deutsch' })).studio.language, 'Deutsch');
   assert.equal(payload.studio.agents.find(({ name }) => name === 'librarian')?.role, 'library');
   assert.equal(work.legacyId, 'T-1');
   assert.equal(work.stage, 'blocked');
@@ -291,6 +374,8 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
   assert.equal(payload.inbox[0].taskId, question.id);
   assert.equal(payload.inbox[0].answer, 'Approved');
   assert.deepEqual(work.dependencies, [before.id]);
+  assert.deepEqual(work.links, [{ type: 'origin', taskId: before.id }]);
+  assert.deepEqual(work.references, [{ kind: 'story', id: payload.stories[0].id }]);
   assert.deepEqual(work.criteria, ['A report exists']);
   assert.equal(work.artifactPath, 'studio/artifacts/report.md');
   assert.equal(payload.meetings[0].taskId, work.id);
@@ -303,11 +388,19 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
   assert.match(payload.warnings.join('\n'), /feature\/game-work/);
   assert.match(payload.warnings.join('\n'), /вне выбранной папки/);
   assert.deepEqual(payload.artifacts, [{ path: 'studio/artifacts/report.md', content: 'report' }]);
-  assert.doesNotMatch(JSON.stringify(payload), /private system prompt/);
+  assert.equal(payload.evidence.length, 1);
+  assert.deepEqual(Buffer.from(payload.evidence[0].content, 'base64'), clip);
+  assert.equal(payload.evidence[0].taskId, work.id);
+  assert.doesNotMatch(JSON.stringify(payload), /unselected/);
+  assert.deepEqual(payload.studio.agents[0].legacyContract, {
+    instructions: 'Legacy role instructions', tools: 'Read, Bash', skills: 'game-build', memory: 'project',
+  });
+  assert.doesNotMatch(JSON.stringify(payload), /private-token/);
   assert.deepEqual((await readdir(source, { recursive: true })).sort(), paths);
   assert.equal(await readFile(join(source, 'studio/board.json'), 'utf8'), board);
   assert.deepEqual(await readdir(root), []);
   await assert.rejects(prepareLegacyImport({ source, root, artifactPaths: ['studio/artifacts/link.md'] }), /артефакт/i);
+  await assert.rejects(prepareLegacyImport({ source, root, artifactPaths: ['studio/artifacts/hardlink.md'] }), /артефакт/i);
   await assert.rejects(prepareLegacyImport({ source, root: source }), /отдельн/i);
   await assert.rejects(prepareLegacyImport({ source, root: workspace }), /отдельн/i);
   await assert.rejects(prepareLegacyImport({ source, root, artifactPaths: ['studio/artifacts/../../outside'] }), /путь/i);

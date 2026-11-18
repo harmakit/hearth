@@ -1,9 +1,14 @@
+import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { createInspector, previewImport } from './preview.mjs';
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { createInspector, legacyDependency, legacyItems as items, legacyLanguage, legacyReferenceId, legacyRoleHeader,
+  legacySprintId as sprintKey, legacyTaskLinkTypes, previewImport, readLegacyLanguages } from './preview.mjs';
 
 const maxMetadataFileBytes = 4 * 1024 * 1024;
 const roles = new Set(['library', 'engineer', 'editor', 'artist', 'other']);
+const textArtifacts = new Set(['.md', '.txt', '.json', '.csv', '.rst', '.yaml', '.yml', '.toml']);
+const evidenceKinds = { '.mp4': 'video', '.webm': 'video', '.mov': 'video', '.png': 'image', '.jpg': 'image',
+  '.jpeg': 'image', '.wav': 'audio', '.mp3': 'audio', '.ogg': 'audio', '.zip': 'build', '.pdf': 'report' };
 const stageAliases = new Map([
   ['todo', 'backlog'], ['backlog', 'backlog'], ['ready', 'ready'], ['queued', 'ready'],
   ['in-progress', 'in_progress'], ['doing', 'in_progress'], ['active', 'in_progress'], ['running', 'in_progress'],
@@ -15,23 +20,8 @@ const stageAliases = new Map([
 const string = value => typeof value === 'string' ? value : '';
 const firstText = (...values) => values.map(string).find(value => value.trim()) ?? '';
 const sequence = value => Array.isArray(value) ? value : [];
-const id = value => {
-  if (value && typeof value === 'object') value = value.id ?? value.number;
-  if (Number.isSafeInteger(value)) return String(value);
-  const text = string(value).trim();
-  return text && text.length <= 256 && !/[\x00-\x1f]/.test(text) ? text : '';
-};
+const id = legacyReferenceId;
 const key = value => id(value).toLowerCase();
-const sprintKey = value => key(value).replace(/^(?:sprint[-_ ]*)?0*(\d+)$/i, '$1');
-
-function items(value, collection) {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== 'object') return [];
-  if (Array.isArray(value[collection])) return value[collection];
-  if (value.id || value.number) return [value];
-  return Object.entries(value).filter(([, item]) => item && typeof item === 'object')
-    .map(([name, item]) => ({ id: name, ...item }));
-}
 
 function baseFields(record) {
   return {
@@ -114,12 +104,15 @@ async function loadData(source, warn) {
     const path = join(rolesPath, entry.name);
     const raw = await io.readMetadata(path, await io.inspect(path, '.claude/agents'), '.claude/agents', 256 * 1024);
     if (!raw) continue;
-    const header = raw.toString('utf8').match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? '';
-    const get = field => header.match(new RegExp(`^${field}:\\s*([^\\r\\n]+)`, 'm'))?.[1]?.trim().replace(/^(['"])(.*)\1$/, '$2') ?? '';
+    const { get, body } = legacyRoleHeader(raw.toString('utf8'));
     const name = firstText(get('name'), basename(entry.name, '.md'));
     const category = key(name) === 'librarian' ? 'library' : key(name);
     const role = roles.has(category) ? category : 'other';
-    agents.push({ id: basename(entry.name, '.md'), name, description: get('description'), role, mode: 'inherit' });
+    const legacyContract = Object.fromEntries(Object.entries({
+      instructions: body.trim(), tools: get('tools'), disallowedTools: get('disallowedTools'), skills: get('skills'),
+      memory: get('memory'), scope: get('scope'),
+    }).filter(([, value]) => value));
+    agents.push({ id: basename(entry.name, '.md'), name, description: get('description'), role, mode: 'inherit', legacyContract });
   }
   const registrations = new Map();
   const gitPath = join(source, '.git');
@@ -136,14 +129,15 @@ async function loadData(source, warn) {
       registrations.set(key(ref), branch);
     }
   }
-  return { io, board, extras, archives, agents, registrations };
+  return { io, board, extras, archives, agents, registrations, languages: await readLegacyLanguages(source, io, warn) };
 }
 
-function buildSnapshot({ board, extras, archives, agents, registrations, source, warn }) {
+function buildSnapshot({ board, extras, archives, agents, registrations, languages, language, artifactOwners, source, warn }) {
   const studio = {
     id: 'legacy', root: source, name: firstText(board.studio?.name, board.name, basename(source)),
     brief: firstText(board.studio?.brief, board.brief, board.goal),
-    language: firstText(board.studio?.language, board.language, 'Русский'),
+    language: language || languages.ownerLanguage || 'Русский',
+    projectLanguage: firstText(languages.projectLanguage, legacyLanguage(board.studio?.projectLanguage), legacyLanguage(board.projectLanguage)),
     director: { runtime: 'claude', model: '', effort: '' }, agents,
   };
   const own = record => ({ ...record, studioId: studio.id });
@@ -173,7 +167,7 @@ function buildSnapshot({ board, extras, archives, agents, registrations, source,
     addUnique(sprints, { number: board.sprint, status: 'active' }, sprintKey);
   }
   for (const task of tasks.values()) {
-    const sprint = task.sprintId ?? task.sprint;
+    const sprint = task.sprintId ?? task.sprint_id ?? task.sprint;
     if (sprintKey(sprint) && !sprints.has(sprintKey(sprint))) addUnique(sprints, { number: sprint }, sprintKey);
   }
 
@@ -185,6 +179,10 @@ function buildSnapshot({ board, extras, archives, agents, registrations, source,
     return null;
   }
   const agentIds = new Map(agents.flatMap(agent => [[key(agent.id), agent.id], [key(agent.name), agent.id]]));
+  const targets = { task: tasks, epic: epics, story: stories, sprint: sprints, meeting: meetings };
+  function agentLink(value) {
+    return agentIds.get(key(value)) ?? null;
+  }
   const inbox = [];
   const mappedTasks = Array.from(tasks.values(), task => {
     const legacyStatus = string(task.status);
@@ -196,11 +194,29 @@ function buildSnapshot({ board, extras, archives, agents, registrations, source,
       const details = branch ? ` (ветка ${branch})` : '';
       warn(`Задача ${task.id}${details} приостановлена до сверки рабочего дерева и изменений.`);
     }
-    const outputPath = sequence(task.outputs).find(value => string(value).startsWith('studio/artifacts/'));
+    const outputs = sequence(task.outputs).map(value => firstText(value, value?.path));
+    const outputPath = outputs.find(value => value.startsWith('studio/artifacts/') && textArtifacts.has(extname(value).toLowerCase()));
     const artifactPath = firstText(task.artifactPath, task.artifact_path, task.artifact?.path, outputPath,
       string(task.artifact).startsWith('studio/artifacts/') ? task.artifact : '');
+    for (const path of new Set([...outputs, artifactPath])) {
+      if (!path.startsWith('studio/artifacts/')) continue;
+      const owners = artifactOwners.get(path) ?? [];
+      owners.push(task.id);
+      artifactOwners.set(path, owners);
+    }
     const title = firstText(task.title, task.name, task.id);
     const kind = firstText(task.type, task.kind);
+    const dependencies = [...sequence(task.dependencies ?? task.depends_on ?? task.dependsOn ?? task.deps), ...sequence(task.links)].flatMap(value => {
+      const reference = legacyDependency(value);
+      if (!reference) return [];
+      const { kind, id } = reference;
+      const target = kind === 'agent' ? agentLink(id) : foreign(targets[kind], 'зависимость задачи', id);
+      const relation = value?.type ?? value?.kind;
+      const type = kind === 'task' && legacyTaskLinkTypes.has(relation) ? relation : undefined;
+      return target ? [{ kind, id: target, ...(type && { type }) }] : [];
+    });
+    const references = dependencies.filter(({ kind }) => kind !== 'task');
+    const links = dependencies.filter(({ type }) => type).map(({ type, id }) => ({ type, taskId: id }));
     if (kind === 'question') {
       inbox.push(own({ id: `question-${task.id}`, taskId: task.id, kind: 'question', title,
         body: firstText(task.body, task.description, task.prompt, title),
@@ -213,11 +229,14 @@ function buildSnapshot({ board, extras, archives, agents, registrations, source,
       artifact: firstText(task.result?.artifact, artifactPath ? '' : task.artifact), artifactPath,
       status: stage === 'done' ? 'completed' : kind === 'question' ? 'waiting' : 'queued',
       stage: needsReview ? 'blocked' : stage === 'in_progress' ? 'ready' : stage,
-      agentId: agentIds.get(key(task.agentId ?? task.assignee)) ?? agentIds.get(key(task.role)) ?? null,
-      epicId: foreign(epics, 'эпик', task.epicId ?? task.epic),
-      storyId: foreign(stories, 'история', task.storyId ?? task.story ?? task.user_story),
-      sprintId: foreign(sprints, 'спринт', task.sprintId ?? task.sprint),
-      dependencies: sequence(task.dependencies ?? task.depends_on ?? task.dependsOn ?? task.deps).map(ref => foreign(tasks, 'зависимость задачи', ref)).filter(Boolean),
+      agentId: agentLink(task.agentId ?? task.agent_id ?? task.assignee) ?? agentLink(task.role),
+      reviewerId: agentLink(task.reviewerId ?? task.reviewer_id ?? task.reviewer),
+      epicId: foreign(epics, 'эпик', task.epicId ?? task.epic_id ?? task.epic),
+      storyId: foreign(stories, 'история', task.storyId ?? task.story_id ?? task.story ?? task.user_story),
+      sprintId: foreign(sprints, 'спринт', task.sprintId ?? task.sprint_id ?? task.sprint),
+      dependencies: [...new Set(dependencies.filter(({ kind, type }) => kind === 'task' && (!type || type === 'blocks')).map(({ id }) => id))],
+      ...(references.length && { references }),
+      ...(links.length && { links }),
       criteria: typeof task.criteria === 'string' ? task.criteria : sequence(task.criteria ?? task.acceptance_criteria ?? task.acceptance).filter(value => typeof value === 'string'),
       legacyBranch: branch,
       ...(needsReview && { legacyWorktreeReview: true }),
@@ -259,7 +278,7 @@ function buildSnapshot({ board, extras, archives, agents, registrations, source,
   };
 }
 
-export async function prepareLegacySnapshot({ source, root, paths, maxArtifactBytes }) {
+export async function prepareLegacySnapshot({ source, root, paths, maxArtifactBytes, maxEvidenceBytes, language }) {
   if (typeof source !== 'string' || !isAbsolute(source) || source.includes('\0')) throw new Error('Выберите папку старой студии.');
   const sourceEntry = await lstat(resolve(source)).catch(() => null);
   if (!sourceEntry?.isDirectory()) throw new Error('Выберите доступную папку старой студии без символической ссылки.');
@@ -277,15 +296,36 @@ export async function prepareLegacySnapshot({ source, root, paths, maxArtifactBy
   const warnings = new Set(report.warnings);
   const warn = message => warnings.add(message);
   const data = await loadData(report.root, warn);
-  const snapshot = buildSnapshot({ ...data, source: report.root, warn });
+  if (language !== undefined && !legacyLanguage(language)) throw new Error('Укажите допустимый язык владельца.');
+  const artifactOwners = new Map();
+  const snapshot = buildSnapshot({ ...data, language: legacyLanguage(language), artifactOwners, source: report.root, warn });
   const artifacts = [];
+  const evidence = [];
+  const evidenceFiles = [];
   let bytes = 0;
+  let evidenceBytes = 0;
   for (const path of paths) {
     if (!path.startsWith('studio/artifacts/')) throw new Error('Выберите путь внутри studio/artifacts.');
     const nativePath = join(report.root, path);
     const label = 'выбранный артефакт';
-    const content = await data.io.readMetadata(nativePath, await data.io.inspect(nativePath, label), label, maxArtifactBytes);
+    const extension = extname(path).toLowerCase();
+    const isText = textArtifacts.has(extension);
+    const content = await data.io.readMetadata(nativePath, await data.io.inspect(nativePath, label), label,
+      isText ? maxArtifactBytes : maxEvidenceBytes, { singleLink: true });
     if (!content) throw new Error('Выбранный артефакт недоступен, является ссылкой или превышает лимит размера.');
+    if (!isText) {
+      evidenceBytes += content.length;
+      if (evidenceBytes > maxEvidenceBytes) throw new Error('Превышен допустимый размер выбранных доказательств.');
+      const owners = artifactOwners.get(path) ?? [];
+      if (owners.length !== 1) throw new Error('Выбранный бинарный артефакт должен ссылаться на одну задачу старой студии.');
+      const id = `legacy-evidence-${evidence.length + 1}`;
+      const digest = createHash('sha256').update(content).digest('hex');
+      evidence.push({ id, studioId: snapshot.studios[0].id, taskId: owners[0], attemptId: `legacy-${owners[0]}`,
+        revision: { digest }, sourcePath: path, size: content.length, digest, contentType: 'application/octet-stream',
+        kind: evidenceKinds[extension] ?? 'file' });
+      evidenceFiles.push({ id, bytes: content });
+      continue;
+    }
     bytes += content.length;
     if (bytes > 8 * maxArtifactBytes) throw new Error('Превышен допустимый размер артефактов.');
     try {
@@ -294,5 +334,5 @@ export async function prepareLegacySnapshot({ source, root, paths, maxArtifactBy
       throw new Error('Можно перенести только текстовый артефакт в UTF-8.');
     }
   }
-  return { snapshot, artifacts, warnings: [...warnings] };
+  return { snapshot: { ...snapshot, evidence }, artifacts, evidenceFiles, warnings: [...warnings] };
 }

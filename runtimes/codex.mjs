@@ -1,25 +1,68 @@
-import { realpath } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { capture, jsonLines, launch, providerError, stop } from './process.mjs';
+import { isolationError, verifyWriteRoots } from './scope.mjs';
 
-const profile = 'hearth-studio-read-only';
+const readProfile = 'hearth-studio-read-only';
 const appServerArgs = [
   'app-server', '--listen', 'stdio://',
   '--disable', 'hooks', '--disable', 'plugins', '--disable', 'apps', '--disable', 'computer_use',
   '--disable', 'multi_agent', '--disable', 'multi_agent_v2', '--disable', 'skill_mcp_dependency_install',
   '-c', 'notify=[]', '-c', 'web_search="disabled"',
   '-c', 'shell_environment_policy.inherit="none"',
-  '-c', `default_permissions="${profile}"`,
 ];
 
-async function withServer(binary, options, operate, extraArgs = []) {
+const pathUsesGlob = /[\u0000-\u001f*?\[\]{}]/u;
+
+async function linkedGitDirectory(root) {
+  const marker = join(root, '.git');
+  try {
+    const details = await lstat(marker);
+    if (!details.isFile() || details.size > 4096) return undefined;
+    const path = (await readFile(marker, 'utf8')).trim().match(/^gitdir: (.+)$/)?.[1];
+    if (!path) return undefined;
+    const gitdir = await realpath(isAbsolute(path) ? path : resolve(root, path));
+    const worktrees = dirname(gitdir);
+    const common = dirname(worktrees);
+    if (basename(worktrees) === 'worktrees' && basename(common) === '.git' && !pathUsesGlob.test(common)) return common;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function codexConfiguration(binary, scope) {
   // The macOS sandbox helper re-execs the app-server binary. Executing a
   // Homebrew symlink there can fail even if both paths are readable.
   const command = await realpath(binary.command);
   const executableRules = [...new Set([binary.command, command])].map(path => `${JSON.stringify(path)}="read"`);
-  const filesystem = ['":root"="deny"', '":minimal"="read"', '":workspace_roots"={"."="read"}', ...executableRules].join(',');
-  const permissions = `permissions.${profile}={filesystem={${filesystem}},network={enabled=false}}`;
+  const writing = scope?.access === 'worktree-write';
+  const profile = writing ? `hearth-studio-write-${randomUUID()}` : readProfile;
+  const workspace = writing
+    ? '":workspace_roots"={"."="write",".git"="read","*/**/.[gG][iI][tT]"="deny","*/**/.[gG][iI][tT]/**"="deny"}'
+    : '":workspace_roots"={"."="read"}';
+  const filesystem = ['":root"="deny"', '":minimal"="read"', workspace, ...executableRules];
+  if (scope?.scratch) {
+    const gitdir = await linkedGitDirectory(scope.root);
+    if (gitdir) filesystem.push(`${JSON.stringify(gitdir)}="read"`);
+  }
+  const config = ['-c', `default_permissions="${profile}"`];
+  if (writing) {
+    if (process.platform !== 'darwin' || pathUsesGlob.test(scope.scratch)) {
+      throw isolationError('Codex не может изолировать запись в эту рабочую копию. Проверьте систему и путь временной области.');
+    }
+    verifyWriteRoots(scope);
+    filesystem.push(`${JSON.stringify(scope.scratch)}={"."="write","**/.[gG][iI][tT]"="deny","**/.[gG][iI][tT]/**"="deny"}`);
+    config.push('-c', `shell_environment_policy.set={TMPDIR=${JSON.stringify(scope.scratch)}}`);
+    config.push('--disable', 'code_mode', '--disable', 'image_generation', '--disable', 'remote_plugin', '--disable', 'shell_snapshot');
+  }
+  config.push('-c', `permissions.${profile}={filesystem={${filesystem.join(',')}},network={enabled=false}}`);
+  return { executable: { ...binary, command }, config, profile };
+}
+
+async function withServer({ executable, config }, options, operate, extraArgs = []) {
   return new Promise((resolve, reject) => {
-    const child = launch({ ...binary, command }, [...appServerArgs, '-c', permissions, ...extraArgs], options);
+    const child = launch(executable, [...appServerArgs, ...config, ...extraArgs], options);
     const pending = new Map();
     let nextId = 0;
     let notify = () => {};
@@ -36,7 +79,7 @@ async function withServer(binary, options, operate, extraArgs = []) {
       for (const waiter of pending.values()) waiter.reject(error ?? new Error('Подключение Codex закрыто.'));
       pending.clear();
       reader.close();
-      stop(child, { graceful: !error }).then(() => {
+      stop(child, { graceful: !error, cleanupGroup: options.cleanupGroup }).then(() => {
         if (error) reject(error);
         else resolve(result);
       }, reject);
@@ -133,7 +176,7 @@ async function disableMcpServers(binary, options) {
 }
 
 export async function inspectCodex(binary, options) {
-  return withServer(binary, options, async ({ rpc }) => {
+  return withServer(await codexConfiguration(binary), options, async ({ rpc }) => {
     const [account, catalog] = await Promise.allSettled([
       rpc('account/read', { refreshToken: false }),
       rpc('model/list', { includeHidden: false }),
@@ -157,35 +200,64 @@ export async function inspectCodex(binary, options) {
   });
 }
 
-export async function runCodex(binary, { cwd, model, effort, prompt, emit, ...options }) {
-  const mcpOverrides = await disableMcpServers(binary, { cwd, ...options, timeoutMs: Math.min(options.timeoutMs, 8000) });
-  return withServer(binary, { cwd, ...options }, async server => {
-    const { rpc } = server;
-    const { signal } = options;
-    if (signal?.aborted) throw new DOMException('Запуск Codex отменён.', 'AbortError');
-    const scope = { cwd, runtimeWorkspaceRoots: [cwd], permissions: profile, approvalPolicy: 'never' };
-    let thread;
-    try {
-      thread = await rpc('thread/start', { ...scope, model, ephemeral: true });
-    } catch (error) {
-      throw new Error(`Не удалось открыть временную сессию Codex. ${error.message}`, { cause: error });
-    }
-    if (thread?.thread?.ephemeral !== true) {
-      throw new Error('Codex не подтвердил временный режим сессии. Проверьте подключение и версию Codex.');
-    }
-    const threadId = thread.thread?.id;
-    if (!threadId || thread.cwd !== cwd ||
-        thread.approvalPolicy !== 'never' || thread.activePermissionProfile?.id !== profile ||
-        thread.activePermissionProfile.extends != null || thread.runtimeWorkspaceRoots?.length !== 1 ||
-        thread.runtimeWorkspaceRoots[0] !== cwd) {
-      throw new Error('Codex не подтвердил изоляцию рабочей папки и профиль чтения.');
-    }
-    if (model && thread.model !== model) throw new Error('Codex не применил выбранную модель.');
-    return runTurn(server, { ...scope, threadId, effort, prompt, signal, emit });
-  }, mcpOverrides);
+export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope: execution, ...options }) {
+  const settings = await codexConfiguration(binary, execution);
+  const { profile } = settings;
+  const probeOptions = { cwd, ...options, timeoutMs: Math.min(options.timeoutMs, 8000) };
+  if (execution.access === 'worktree-write') {
+    const { code } = await capture(settings.executable, [
+      'sandbox', '-P', profile, '-C', cwd, '--include-managed-config', ...settings.config, '/usr/bin/true',
+    ], probeOptions);
+    if (code !== 0) throw isolationError('Codex не подтвердил изоляцию записи. Проверьте версию Codex и запустите Hearth Studio вне другой песочницы.');
+  }
+  const mcpOverrides = await disableMcpServers(binary, probeOptions);
+  let usage;
+  try {
+    return await withServer(settings, { cwd, ...options, cleanupGroup: Boolean(execution.scratch) }, async server => {
+      const { rpc } = server;
+      const { signal } = options;
+      if (signal?.aborted) throw new DOMException('Запуск Codex отменён.', 'AbortError');
+      const scope = { cwd, runtimeWorkspaceRoots: [cwd], permissions: profile, approvalPolicy: 'never' };
+      let thread;
+      try {
+        thread = await rpc('thread/start', { ...scope, model, ephemeral: true });
+      } catch (error) {
+        throw new Error(`Не удалось открыть временную сессию Codex. ${error.message}`, { cause: error });
+      }
+      if (thread?.thread?.ephemeral !== true) {
+        throw new Error('Codex не подтвердил временный режим сессии. Проверьте подключение и версию Codex.');
+      }
+      const threadId = thread.thread?.id;
+      if (!threadId || thread.cwd !== cwd ||
+          thread.approvalPolicy !== 'never' || thread.activePermissionProfile?.id !== profile ||
+          thread.activePermissionProfile.extends != null || thread.runtimeWorkspaceRoots?.length !== 1 ||
+          thread.runtimeWorkspaceRoots[0] !== cwd) {
+        throw isolationError('Codex не подтвердил изоляцию рабочей папки и запрошенный профиль доступа.');
+      }
+      if (model && thread.model !== model) throw new Error('Codex не применил выбранную модель.');
+      return runTurn(server, {
+        ...scope, threadId, effort, prompt, signal, emit,
+        onUsage(measured) { usage = measured; },
+      });
+    }, mcpOverrides);
+  } finally {
+    if (usage) emit('usage', { usage });
+  }
 }
 
-function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit, ...scope }) {
+const usageFields = {
+  inputTokens: 'inputTokens', outputTokens: 'outputTokens',
+  cachedInputTokens: 'cacheReadTokens', cacheWriteInputTokens: 'cacheWriteTokens',
+};
+
+function codexUsage(total) {
+  const usage = Object.fromEntries(Object.entries(usageFields)
+    .filter(([field]) => Number.isSafeInteger(total?.[field]) && total[field] >= 0)
+    .map(([field, key]) => [key, total[field]]));
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit, onUsage, ...scope }) {
   return new Promise((resolve, reject) => {
     const { threadId } = scope;
     let turnId;
@@ -196,6 +268,11 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
 
     function handle({ method, params }) {
       if (params.threadId !== threadId || (params.turnId ?? params.turn?.id) !== turnId) return;
+      if (method === 'thread/tokenUsage/updated') {
+        const usage = codexUsage(params.tokenUsage?.total);
+        if (usage) onUsage(usage);
+        return;
+      }
       const item = params.item;
       if (method === 'item/completed' && item?.type === 'agentMessage' && typeof item.text === 'string') {
         if (item.phase === 'final_answer') finalText = item.text;
@@ -209,7 +286,7 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
     }
 
     onNotify(message => {
-      if (!['item/completed', 'turn/completed'].includes(message.method)) return;
+      if (!['item/completed', 'turn/completed', 'thread/tokenUsage/updated'].includes(message.method)) return;
       if (turnId) handle(message);
       else if (message.params?.threadId === threadId) beforeTurn.push(message);
     });

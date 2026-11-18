@@ -17,7 +17,7 @@ export function launch(binary, args, { cwd, env }) {
   return child;
 }
 
-export async function stop(child, { graceful = false } = {}) {
+export async function stop(child, { graceful = false, cleanupGroup = false } = {}) {
   const state = processes.get(child);
 
   function send(signal) {
@@ -31,7 +31,7 @@ export async function stop(child, { graceful = false } = {}) {
   }
 
   if (state.closed) {
-    if (!graceful) send('SIGKILL');
+    if (!graceful || cleanupGroup) send('SIGKILL');
     return;
   }
   let terminate;
@@ -47,7 +47,7 @@ export async function stop(child, { graceful = false } = {}) {
     await Promise.race([state.closing, new Promise((_, reject) => {
       deadline = setTimeout(() => reject(new Error('Не удалось завершить процесс подключения.')), 2000);
     })]);
-    if (!graceful) send('SIGKILL');
+    if (!graceful || cleanupGroup) send('SIGKILL');
   } finally {
     clearTimeout(terminate);
     clearTimeout(force);

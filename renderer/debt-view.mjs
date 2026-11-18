@@ -3,15 +3,15 @@ const safe = value => String(value ?? '').replace(/[&<>"']/g, character => entit
 
 export const debtPolicyFields = [
   { name: 'every', label: 'Период в спринтах', min: 1, max: 52 },
-  { name: 'minShare', label: 'Минимальная доля задач техдолга, %', min: 1, max: 100 },
+  { name: 'minShare', label: 'Минимальная доля техдолга, %', min: 1, max: 100 },
   { name: 'minOpenTasks', label: 'Минимум незавершённых задач техдолга', min: 0, max: 40 },
 ];
 
 export const debtPolicyFor = studio => ({
-  enabled: false, every: 4, minShare: 60, minOpenTasks: 1, ...studio.debtPolicy,
+  enabled: false, every: 4, minShare: 60, minOpenTasks: 1, measure: 'taskCount', ...studio.debtPolicy,
 });
 
-export const debtPolicyHint = 'Период отсчитывается в спринтах после онбординга. Доля считается по числу рабочих задач в плане. Спринт техдолга планируется, когда в очереди достаточно незавершённых задач техдолга.';
+export const debtPolicyHint = 'Период отсчитывается в спринтах после онбординга. Доля считается по числу рабочих задач или по баллам, без обучения. Спринт техдолга планируется, когда в очереди достаточно незавершённых задач техдолга.';
 
 export function renderDebtSettings(studio, { pending = false, error = '' } = {}) {
   const policy = debtPolicyFor(studio);
@@ -23,6 +23,7 @@ export function renderDebtSettings(studio, { pending = false, error = '' } = {})
       <div class="row allowed-row"><h3>${policy.enabled ? 'Включён' : 'Выключен'} режим спринтов техдолга</h3>
         <button type="button" class="action secondary" data-open="debt-policy"${pending ? ' disabled' : ''}>Настроить вручную</button></div>
       <dl class="studio-meta">
+        <dt>Единица измерения доли</dt><dd>${policy.measure === 'points' ? 'Баллы' : 'Число задач'}</dd>
         ${debtPolicyFields.map(({ name, label }) => `<dt>${label}</dt><dd>${safe(policy[name])}</dd>`).join('')}
       </dl>
       <p class="muted">${debtPolicyHint}</p>

@@ -130,8 +130,11 @@ test('a director trains and hires in the same sprint, preserving prior dependenc
           const state = service.snapshot();
           manualTraining = state.training.find(({ training }) => training.objective === 'Improve the heading').id;
           const queuedManual = state.tasks.find(({ id }) => id === manual.id);
-          assert.equal(queuedManual.stage, 'backlog');
-          assert.ok(queuedManual.dependencies.includes(manualTraining));
+          const targeted = state.tasks.find(({ targetedTrainingId }) => targetedTrainingId === manualTraining);
+          assert.equal(targeted.stage, 'backlog');
+          assert.ok(targeted.dependencies.includes(manualTraining));
+          assert.notEqual(queuedManual.stage, 'backlog');
+          assert.ok(!queuedManual.dependencies.includes(manualTraining));
           return json({ pass: ++attempts === 2, summary: 'Checked the exercise and source' });
         }
         return json({ pass: true, summary: 'Checked the guide' });
@@ -150,8 +153,8 @@ test('a director trains and hires in the same sprint, preserving prior dependenc
         return json({ summary: 'Done' });
       }
       if (!purpose) {
-        assert.equal(context.training.skills[0].commit, candidate.commit);
-        assert.equal(service.snapshot().training.find(({ id }) => id === manualTraining).stage, 'done');
+        const approved = service.snapshot().training.find(({ id }) => id === manualTraining)?.stage === 'done';
+        assert.deepEqual(context.training.skills.map(({ commit }) => commit), approved ? [candidate.commit] : []);
         return json({ summary: 'Notes ready' });
       }
       return json({

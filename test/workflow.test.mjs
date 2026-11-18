@@ -127,7 +127,7 @@ test('the initial sprint uses allowed dynamic recommendations and reroutes stale
 test('the Director can assess and save debt settings using current studio data', async (t) => {
   const calls = [];
   let release;
-  let answer = { enabled: true, every: 2, minShare: 70, minOpenTasks: 1, reason: 'Есть незакрытая задача.' };
+  let answer = { enabled: true, every: 2, minShare: 70, minOpenTasks: 1, measure: 'points', reason: 'Есть незакрытая задача.' };
   const service = createStudioService({
     dbPath: ':memory:', now: () => new Date('2026-11-18T10:00:00Z'),
     run: async request => {
@@ -142,7 +142,7 @@ test('the Director can assess and save debt settings using current studio data',
   });
   const debt = service.createTask({ studioId, kind: 'debt', title: 'Unify chapter headings', prompt: 'Create a consistent format.' });
   const result = await service.assessDebtPolicy({ studioId });
-  assert.deepEqual(service.snapshot().studios[0].debtPolicy, { enabled: true, every: 2, minShare: 70, minOpenTasks: 1 });
+  assert.deepEqual(service.snapshot().studios[0].debtPolicy, { enabled: true, every: 2, minShare: 70, minOpenTasks: 1, measure: 'points' });
   assert.deepEqual(result.debtAssessment, { reason: answer.reason, assessedAt: '2026-11-18T10:00:00.000Z' });
   const { prompt, signal, ...call } = calls[0];
   assert.deepEqual(call, { runtime: 'claude', model: 'director', effort: 'high', projectRoot: '/project', purpose: 'assess-debt' });
@@ -334,7 +334,8 @@ test('scheduled workflows retain a queued continuation after hours, manual pause
   assert.deepEqual(calls, ['plan', 'task', 'review', 'director']);
   const other = service.createStudio({ name: 'Other', root: '/project' });
   service.deleteStudio({ studioId, confirmation: 'Writer' });
-  const { studios, modelPolicy, training, ...records } = service.snapshot();
+  const { studios, modelPolicy, notificationPreferences, training, ...records } = service.snapshot();
+  assert.deepEqual(notificationPreferences, { enabled: true, studios: {} });
   assert.deepEqual(modelPolicy, { configured: false, allowed: [] });
   assert.deepEqual(studios.map(({ id }) => id), [other.id]);
   assert.deepEqual(training.map(({ studioId }) => studioId), [other.id]);

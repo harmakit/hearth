@@ -2,15 +2,49 @@ import { field, object, relativeArtifactPath, trainingTopics } from './protocol.
 import { materialMetadata, customSkillDraft, knowledgeNoteLimit } from './knowledge.mjs';
 
 const learningCollections = ['knowledge', 'customSkills'];
-const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills', ...learningCollections];
+export const historicalCollections = ['phases', 'prerequisites', 'meeting_actions', 'conversations', 'conversationMessages',
+  'usageEvents', 'rosterProposals', 'knowledgeEvents'];
+const collections = ['tasks', 'inbox', 'plans', 'epics', 'stories', 'sprints', 'meetings', 'skills', 'evidence',
+  ...learningCollections, ...historicalCollections];
 const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'failed', 'interrupted'];
-const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'blocked'];
+const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'blocked', 'replaced'];
 const relations = {
   agentId: 'agents', reviewerId: 'agents', taskId: 'tasks', parentTaskId: 'tasks', reviewTaskId: 'tasks',
   planId: 'plans', epicId: 'epics', storyId: 'stories', sprintId: 'sprints', meetingId: 'meetings', targetedTrainingId: 'tasks',
   trainingTaskId: 'tasks', debtTaskId: 'tasks',
+  conversationId: 'conversations', replyTo: 'conversationMessages', replyId: 'conversationMessages', phaseId: 'phases',
+  facilitatorId: 'agents', transferAgentId: 'agents', firstTaskId: 'tasks', rosterProposalId: 'rosterProposals',
+  rollbackProposalId: 'rosterProposals', proposalId: 'rosterProposals', trainTaskId: 'tasks',
 };
-const many = { dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents' };
+const many = { dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents', epicIds: 'epics',
+  sprintIds: 'sprints', actionIds: 'meeting_actions', originalTaskIds: 'tasks', attachmentIds: 'evidence',
+  answerAttachmentIds: 'evidence', blockedTaskIds: 'tasks' };
+export const referenceTargets = Object.freeze({ task: 'tasks', epic: 'epics', story: 'stories', sprint: 'sprints', meeting: 'meetings', agent: 'agents' });
+
+export function copyReferences(value, link) {
+  return array(value, 'типизированные связи').flatMap(entry => {
+    const { kind, id: targetId } = object(entry, 'типизированная связь');
+    if (!Object.hasOwn(referenceTargets, kind)) throw new Error('Недопустимый тип ссылки в пакете студии.');
+    const key = link(referenceTargets[kind], id(targetId));
+    return key ? [{ kind, id: key }] : [];
+  });
+}
+
+export function copyTaskLinks(value, link) {
+  return array(value, 'связи задач').flatMap(entry => {
+    const { type, taskId } = object(entry, 'связь задачи');
+    if (!['blocks', 'origin', 'replaces', 'debt'].includes(type)) throw new Error('Недопустимый тип связи задач.');
+    const key = link('tasks', id(taskId));
+    return key ? [{ type, taskId: key }] : [];
+  });
+}
+
+export function copyLegacyContract(value, text = preserveText) {
+  const contract = object(value, 'контракт роли');
+  return Object.fromEntries(['instructions', 'tools', 'disallowedTools', 'skills', 'memory', 'scope']
+    .filter(key => contract[key] !== undefined)
+    .map(key => [key, text(field(contract[key], 'контракт роли', key === 'instructions' ? 256_000 : 8_000))]));
+}
 
 function array(value, label, max = 20_000) {
   if (value === undefined) return [];
@@ -44,15 +78,31 @@ function copyCustomSkill(value, text) {
 
 export function copyKnowledgeRecord(kind, item, text = preserveText) {
   const createdAt = text(field(item.createdAt, 'дата подтверждения', 64)).slice(0, 64);
+  const versioned = {};
+  for (const [key, limit] of [['key', 100], ['layer', 30], ['reason', 500]]) {
+    if (item[key] !== undefined) versioned[key] = text(field(item[key], key, limit)).slice(0, limit);
+  }
+  if (item.replacesId !== undefined) versioned.replacesId = item.replacesId === null ? null : id(item.replacesId);
+  if (item.version !== undefined) {
+    if (!Number.isSafeInteger(item.version) || item.version < 1) throw new Error('Некорректная версия знаний роли.');
+    versioned.version = item.version;
+  }
+  if (item.topics !== undefined) versioned.topics = array(item.topics, 'темы роли', 12).map(topic => text(field(topic, 'тема', 160)));
   if (kind === 'knowledge') {
     return {
+      ...versioned,
       notes: text(field(item.notes, 'знания агента', knowledgeNoteLimit)).slice(0, knowledgeNoteLimit),
       sources: array(item.sources, 'источники знаний', 3).map(source => copyMaterial(source, text, false)),
       createdAt,
     };
   }
   if (!Number.isSafeInteger(item.version) || item.version < 1) throw new Error('Некорректная версия авторского навыка.');
-  return { ...copyCustomSkill(item, text), version: item.version, createdAt };
+  return { ...copyCustomSkill(item, text), ...versioned, createdAt };
+}
+
+export function isIndependentKnowledge(kind, item) {
+  return kind === 'knowledge' && !item.trainingTaskId &&
+    (['reference', 'decision'].includes(item.layer) && item.agentId == null || item.layer === 'memory' && typeof item.agentId === 'string');
 }
 
 export function copyTrainingMaterials(training, approved, text = preserveText) {
@@ -88,6 +138,12 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     return {
       id: id(row.id), ...agentSettings(row), ...(row.key ? { key: field(row.key, 'ключ роли', 256) } : {}),
       ...(row.systemRole === 'coach' ? { systemRole: 'coach', role: 'library' } : {}),
+      ...(row.legacyContract === undefined ? {} : { legacyContract: copyLegacyContract(row.legacyContract) }),
+      ...(row.rosterStatus === 'retired' && row.systemRole !== 'coach' && { rosterStatus: 'retired' }),
+      ...(Number.isSafeInteger(row.rosterVersion) && row.rosterVersion >= 0 && { rosterVersion: row.rosterVersion }),
+      ...(row.rosterProposalId !== undefined && { rosterProposalId: id(row.rosterProposalId) }),
+      ...(typeof row.firstResult === 'string' && { firstResult: field(row.firstResult, 'первый результат роли', 8_000) }),
+      ...(Number.isFinite(row.estimatedBudget) && row.estimatedBudget >= 0 && { estimatedBudget: row.estimatedBudget }),
       ...(row.trainingTaskId === undefined ? {} : { trainingTaskId: id(row.trainingTaskId), skillIds: array(row.skillIds, 'навыки агента') }),
     };
   });
@@ -110,7 +166,9 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
       const item = object(value, table);
       if (item.studioId !== undefined && item.studioId !== studioId) throw new Error('Импорт содержит запись другой студии.');
       if (learningCollections.includes(table)) {
-        return { id: id(item.id), studioId, agentId: id(item.agentId), trainingTaskId: id(item.trainingTaskId), ...copyKnowledgeRecord(table, item) };
+        const firstParty = isIndependentKnowledge(table, item);
+        return { id: id(item.id), studioId, agentId: item.agentId == null && firstParty ? null : id(item.agentId),
+          ...(firstParty ? {} : { trainingTaskId: id(item.trainingTaskId) }), ...copyKnowledgeRecord(table, item) };
       }
       const row = { ...item, id: id(item.id), studioId };
       if (table === 'tasks') {
@@ -160,6 +218,12 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
           }
         }
       }
+      if (table === 'evidence') {
+        if ('content' in row || typeof row.storedRef !== 'string' || !row.storedRef.startsWith(row.id + '.') ||
+            typeof row.identity !== 'string' || !/^[a-f0-9]{64}$/.test(row.digest) || !Number.isSafeInteger(row.size) || row.size < 0) {
+          throw new Error('Доказательство импорта отсутствует в хранилище.');
+        }
+      }
       if (table === 'skills') {
         const path = relativeArtifactPath(row.path).split('/').map(encodeURIComponent).join('/');
         if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(row.repo) || !/^[a-f0-9]{40}$/i.test(row.commit)
@@ -170,11 +234,16 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
         row.createdAt ??= date;
         row.answer ??= '';
         if (!['open', 'resolved'].includes(row.status)) throw new Error('Некорректный статус сообщения.');
-        if (!row.taskId && !['plan', 'error'].includes(row.kind)) throw new Error('Сообщение должно ссылаться на задачу.');
-        if (row.kind === 'plan') {
-          id(row.planId);
-          if (row.status === 'open') row.status = 'resolved';
+        if (!row.taskId && !['plan', 'error', 'meeting', 'roster', 'reconcile'].includes(row.kind)) {
+          throw new Error('Сообщение должно ссылаться на задачу.');
         }
+        if (row.kind === 'meeting') id(row.meetingId);
+        if (row.kind === 'roster') id(row.proposalId);
+        if (row.kind === 'plan') id(row.planId);
+        if (['plan', 'roster', 'reconcile'].includes(row.kind)) row.status = 'resolved';
+        delete row.attemptId;
+        delete row.answerOperationId;
+        delete row.answerKey;
       }
       if (table === 'plans' && row.status === 'pending') row.status = 'returned';
       return row;
@@ -188,7 +257,14 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
   }));
   for (const name of collections) {
     for (const row of normalized[name]) {
+      const verifiedLink = (target, key) => {
+        if (!ids[target].has(key)) throw new Error('Некорректная типизированная связь при импорте.');
+        return key;
+      };
+      if (row.references !== undefined) row.references = copyReferences(row.references, verifiedLink);
+      if (name === 'tasks' && row.links !== undefined) row.links = copyTaskLinks(row.links, verifiedLink);
       for (const [key, target] of Object.entries(relations)) {
+        if (name === 'evidence' && key === 'taskId' && row.kind === 'attachment' && row.taskId === studioId) continue;
         if (row[key] != null && !ids[target].has(row[key])) throw new Error(`Некорректная связь «${key}» при импорте.`);
       }
       for (const [key, target] of Object.entries(many)) {
@@ -212,6 +288,22 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
   const linkedSkills = new Set();
   const linkedKnowledge = new Set();
   const linkedCustomSkills = new Set();
+  for (const entry of normalized.knowledge) {
+    if (isIndependentKnowledge('knowledge', entry)) linkedKnowledge.add(entry.id);
+  }
+  for (const name of learningCollections) {
+    const records = new Map(normalized[name].map(entry => [entry.id, entry]));
+    for (const entry of normalized[name]) {
+      if (entry.replacesId == null) continue;
+      const previous = records.get(entry.replacesId);
+      if (!previous || previous.agentId !== entry.agentId || previous.key !== entry.key || previous.layer !== entry.layer || previous.version >= entry.version) {
+        throw new Error('Некорректная связь с предыдущей версией знаний.');
+      }
+    }
+  }
+  for (const agent of agents) {
+    if (agent.rosterProposalId !== undefined && !ids.rosterProposals.has(agent.rosterProposalId)) throw new Error('Некорректная ссылка на историю роли.');
+  }
   function linkMaterial(record, task, linked) {
     if (!record || record.agentId !== task.training.targetAgentId || record.trainingTaskId !== task.id || linked.has(record.id)) {
       throw new Error('Некорректная связь утверждённых материалов обучения при импорте.');

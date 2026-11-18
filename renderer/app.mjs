@@ -5,6 +5,7 @@ import { installDialogSize } from './dialog-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey, readPolicyRows } from './model-policy.mjs';
 import { coachTitle, parseSkillTopics, pendingDependencies, renderSkillLibrary, renderSkillPreview, renderTrainingDetails, roleReadiness, skillMinStars, skillStarLabel } from './coach-view.mjs';
 import { debtPolicyFields, debtPolicyFor, debtPolicyHint, renderDebtSettings } from './debt-view.mjs';
+import { answerPayload, questionOptions, renderDelivery, renderDiagnostic, renderEvidence, renderQuestionDetails, renderUsageReport } from './legacy-view.mjs';
 
 const bridge = window.hearth;
 const $ = selector => document.querySelector(selector);
@@ -47,6 +48,8 @@ let submission;
 let dialogBusy = false;
 let opener;
 let taskDialog;
+let dialogMeeting;
+let dialogConversation;
 let notificationTarget;
 let openingNotification = false;
 let workBusy = false;
@@ -57,6 +60,13 @@ let policyPromptShown = false;
 let policyRowId = 0;
 let skillSearch = { topics: '', preview: {} };
 const debtAssessments = new Map();
+const legacyPreviews = new Map();
+const studioRows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
+const operationId = () => crypto.randomUUID();
+const lines = value => String(value ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+const checkbox = (label, name, checked) => `<label class="checkbox-field"><input type="checkbox" name="${safe(name)}"${checked ? ' checked' : ''}> <span>${safe(label)}</span></label>`;
+const rowAction = (title, detail, actions) => `<div class="row allowed-row legacy-row"><div><h3>${safe(title)}</h3><p class="muted">${safe(detail)}</p></div><div class="actions">${actions}</div></div>`;
+const studioDate = value => Number.isFinite(new Date(value ?? '').getTime()) ? new Date(value).toLocaleString('ru-RU') : '';
 
 function stored(key, value) {
   try {
@@ -87,9 +97,9 @@ const taskAgent = task => studio()?.agents?.find(agent => agent.id === task.agen
 const runtimeName = runtime => runtimeNames[runtime] ?? runtime;
 const configText = value => [runtimeName(value?.runtime), value?.model, value?.effort].filter(Boolean).join(' · ');
 const option = (value, label = value, selected) => `<option value="${safe(value)}"${value === selected ? ' selected' : ''}>${safe(label)}</option>`;
-const select = (label, name, options) => `<label class="field"><span>${safe(label)}</span><select name="${name}">${options}</select></label>`;
-const input = (label, name, value = '', attrs = '') => `<label class="field"><span>${safe(label)}</span><input name="${name}" value="${safe(value)}" ${attrs}></label>`;
-const textarea = (label, name, value = '', attrs = '') => `<label class="field"><span>${safe(label)}</span><textarea name="${name}" rows="4" ${attrs}>${safe(value)}</textarea></label>`;
+const select = (label, name, options) => `<label class="field"><span>${safe(label)}</span><select name="${safe(name)}">${options}</select></label>`;
+const input = (label, name, value = '', attrs = '') => `<label class="field"><span>${safe(label)}</span><input name="${safe(name)}" value="${safe(value)}" ${attrs}></label>`;
+const textarea = (label, name, value = '', attrs = '') => `<label class="field"><span>${safe(label)}</span><textarea name="${safe(name)}" rows="4" ${attrs}>${safe(value)}</textarea></label>`;
 const plain = (value, cls = 'long-text') => `<div class="${cls}">${safe(value)}</div>`;
 
 function notice(message = '', error = false) {
@@ -116,6 +126,7 @@ async function refresh() {
     const snapshot = await bridge.request('snapshot');
     if (version !== snapshotVersion) return;
     const previousTraining = taskDialog && renderTrainingDetails(taskDialog, studio(), tasks());
+    const previousEvidence = taskDialog && JSON.stringify(studioRows('evidence').filter(row => row.taskId === taskDialog.id));
     state = snapshot;
     if (!studio()) selectStudio(snapshot.studios[0]?.id);
     ready = true;
@@ -124,7 +135,22 @@ async function refresh() {
     if (dialog.open && !dialogBusy && taskDialog) {
       const latest = snapshot.tasks.find(task => task.id === taskDialog.id);
       if (latest && (JSON.stringify(latest) !== JSON.stringify(taskDialog) ||
-          previousTraining !== renderTrainingDetails(latest, studio(), tasks()))) openTask(latest);
+          previousTraining !== renderTrainingDetails(latest, studio(), tasks()) ||
+          previousEvidence !== JSON.stringify(studioRows('evidence').filter(row => row.taskId === latest.id)))) openTask(latest);
+    } else if (dialog.open && !dialogBusy && dialogMeeting) {
+      const latest = studioRows('meetings').find(row => row.id === dialogMeeting.id);
+      if (latest && JSON.stringify(latest) !== JSON.stringify(dialogMeeting)) {
+        const scroll = $('#dialog-body').scrollTop;
+        meetingDetail(latest);
+        $('#dialog-body').scrollTop = scroll;
+      }
+    } else if (dialog.open && dialogConversation) {
+      const thread = studioRows('conversations').find(row => (row.agentId ?? null) === dialogConversation.agentId &&
+        (row.taskId ?? null) === dialogConversation.taskId);
+      const agent = studio().agents?.find(row => row.id === dialogConversation.agentId);
+      const region = $('[data-message-history]');
+      const markup = messageHistoryMarkup(thread, agent);
+      if (region && region.innerHTML !== markup) region.innerHTML = markup;
     }
   } catch (error) {
     if (version === snapshotVersion) {
@@ -139,7 +165,7 @@ function render() {
   const picker = $('#studio-select');
   const focused = document.activeElement;
   const focusRoot = [content, $('#navigation')].find(container => container.contains(focused) && focused !== container);
-  const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab', 'assessDebt'].includes(key));
+  const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab', 'assessDebt', 'message', 'meetingDetail', 'legacyAction', 'evidence'].includes(key));
   const autonomyFocused = focused?.getAttribute('name') === 'approveSprints';
   const skillFieldSelection = focused?.matches('[data-skill-search] [name="topics"]')
     ? [focused.selectionStart, focused.selectionEnd] : null;
@@ -174,14 +200,18 @@ function work() {
   return heading('Работа', studio().name, button('Новая задача', 'data-open="task"')) + renderWork({
     studio: studio(), tasks: tasks(), epics: rows('epics'), stories: rows('stories'),
     sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab, expandedEpics,
+    phases: rows('phases'),
+    evidence: rows('evidence').filter(item => item.kind !== 'attachment'),
   });
 }
 
 function skills() {
   const current = studio();
   const rows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
-  return heading('Библиотека', current.name) + renderSkillLibrary({
-    studio: current, tasks: tasks(), skills: rows('skills'), knowledge: rows('knowledge'), customSkills: rows('customSkills'), ...skillSearch,
+  return heading('Библиотека', current.name, button('Добавить запись', 'data-open="publish-library"') +
+    button('Версии и история', 'data-open="library-history"', true)) + renderSkillLibrary({
+    studio: current, tasks: tasks(), skills: rows('skills'), knowledge: rows('knowledge'), customSkills: rows('customSkills'),
+    knowledgeEvents: rows('knowledgeEvents'), ...skillSearch,
   });
 }
 
@@ -245,8 +275,9 @@ function overview() {
   const open = entries().filter(item => item.status === 'open');
   const decision = open.find(item => item.kind === 'question') ?? open.find(item => item.kind !== 'plan');
   const last = all.find(task => task.status === 'completed' && (!task.stage || task.stage === 'done'));
-  const rooms = buildRooms(current);
+  const rooms = buildRooms({ ...current, agents: activeRoster(current) });
   const workCount = all.filter(task => ['running', 'queued'].includes(task.status)).length;
+  const activeAttempts = current.activeAttempts ?? all.filter(task => task.status === 'running').length;
   const pendingPlan = pendingStudioPlan(plans(), current.id);
   const activePlan = plans().findLast(plan => plan.status === 'approved');
   const initial = plans().some(plan => plan.kind === 'initial' && plan.status === 'approved');
@@ -259,13 +290,14 @@ function overview() {
   const intro = canInitialize ? '<p class="muted">Директор предложит команду, первый спринт и критерии результата.</p>' : '';
   const activity = current.scheduleWaiting ? 'Новые задачи запустятся в рабочее время студии.' :
     current.activity || (current.lifecycle === 'planning' ? 'Директор готовит предложение по проекту.' : '');
-  return heading('Обзор студии', current.name, (canInitialize ? '' : button('Новая задача', 'data-open="task"')) + runButtons) +
+  return heading('Обзор студии', current.name, button('Связь с командой', 'data-open="messages"', true) + (canInitialize ? '' : button('Новая задача', 'data-open="task"')) + runButtons) +
     `<div class="split"><div class="stack">
       ${current.lifecycle || activity || pendingPlan ? `<section class="panel padded stack compact">
         <div class="row"><h2>${canInitialize ? 'Начало работы' : 'Студия'}</h2>${current.scheduleWaiting ? badge('Ждёт рабочего времени', 'warn') :
           manuallyPaused ? badge('На паузе', 'warn') :
           studioStatuses[current.lifecycle] ? badge(...studioStatuses[current.lifecycle]) : ''}</div>
         ${intro}${activity ? `<p class="activity" role="status">${safe(activity)}</p>` : ''}
+        <p class="muted">Активные попытки: ${safe(activeAttempts)} из ${safe(current.wipLimit ?? 1)}${current.nextScheduleAt ? ` · Следующее окно: ${safe(studioDate(current.nextScheduleAt))}` : ''}</p>
         <div class="actions">${canInitialize ? button('Инициализировать студию', 'data-initialize' + (workBusy ? ' disabled' : '')) : ''}
           ${pendingPlan ? actionFor('Посмотреть план', 'plan', pendingPlan.id, false) : activePlan ? actionFor('Открыть план', 'plan', activePlan.id) : ''}</div>
       </section>` : ''}
@@ -319,13 +351,16 @@ function inboxCard(item) {
   const task = tasks().find(entry => entry.id === item.taskId);
   const isQuestion = item.kind === 'question';
   const isAcceptance = item.kind === 'acceptance';
+  if (item.kind === 'meeting') return `<article class="panel padded stack compact">
+    <div>${badge(item.status === 'open' ? 'Решение встречи' : 'Решение сохранено', item.status === 'open' ? 'warn' : 'good')}</div>
+    <h2>${safe(item.title)}</h2>${plain(item.body)}<div>${actionFor('Открыть встречу', 'meeting-detail', item.meetingId, false)}</div></article>`;
   return `<article class="panel padded stack compact">
     <div class="row">${badge(isQuestion ? 'Вопрос' : isAcceptance ? 'Приёмка результата' : 'Ошибка', isQuestion || isAcceptance ? 'warn' : 'attention')}
       <small class="muted">${safe(task?.title)}</small></div>
-    <h2>${safe(item.title)}</h2><div class="long-text">${safe(item.body)}</div>
+    <h2>${safe(item.title)}</h2><div class="long-text">${safe(item.body)}</div>${isQuestion && item.version ? `<p class="muted">Версия ${safe(item.version)}</p>` : ''}
     ${item.answer ? `<div class="inline-result"><strong>Ответ</strong>${plain(item.answer)}</div>` : ''}
     <div class="actions">
-      ${item.status === 'open' && isQuestion ? actionFor('Ответить', 'inbox', item.id, false) : ''}
+      ${isQuestion ? actionFor(item.status === 'open' ? 'Ответить' : 'История вопроса', 'inbox', item.id, item.status !== 'open') : ''}
       ${task ? actionFor('Открыть задачу', 'task', task.id) : ''}
       ${item.status === 'open' && isAcceptance ? actionFor('Открыть приёмку', 'inbox', item.id, false) : ''}
       ${item.status === 'open' && !isQuestion && !isAcceptance ? actionFor('Просмотреть ошибку', 'inbox', item.id) : ''}
@@ -335,7 +370,7 @@ function inboxCard(item) {
 
 function workshop() {
   const current = studio();
-  const rooms = buildRooms(current);
+  const rooms = buildRooms({ ...current, agents: activeRoster(current) });
   const roster = rooms.flatMap(room => room.desks.map(({ agent }) => ({ room, agent })));
   const selection = roster.find(({ agent }) => (agent.id == null ? '' : String(agent.id)) === selectedAgent) ?? roster[0];
   const { agent, room } = selection;
@@ -388,7 +423,8 @@ function workshop() {
       ${agent.description ? `<p>${safe(agent.description)}</p>` : ''}
       ${job ? `<div class="inline-result"><strong>${safe(job.title)}</strong>${job.summary ? plain(job.summary, 'muted clamp') : ''}</div>`
         : '<p>У агента пока нет задачи.</p>'}
-      <div class="actions">${job ? actionFor('Открыть задачу', 'task', job.id, false) : ''}${agent.systemRole === 'coach' ? '' : actionFor('Поставить задачу', 'new-task', agent.id ?? '', !!job)}</div>
+      <div class="actions">${job ? actionFor('Открыть задачу', 'task', job.id, false) : ''}${agent.systemRole === 'coach' ? '' : actionFor('Поставить задачу', 'new-task', agent.id ?? '', !!job)}
+        ${actionFor('Написать', 'message', agent.id ?? '')}${actionFor('История работы', 'agent-history', agent.id ?? '')}</div>
     </article><section class="stack compact"><h2>Роли</h2><div class="panel work-list">${rooms.flatMap(zone => zone.desks.map(({ agent: person, props }) => renderAgent(person, false, props))).join('')}</div></section></div>`;
 }
 
@@ -434,6 +470,12 @@ function settings() {
         <p class="muted">При инициализации Hearth всегда запрашивает согласование. Настройка применяется к будущим спринтам.</p>
         <div class="row allowed-row"><div><h3>Расписание</h3><p class="muted">${safe(scheduleLabel(current.schedule))}</p></div>
           ${button('Настроить расписание', 'data-open="schedule"', true)}</div>
+        ${rowAction('Параллельная работа и питание', `Лимит попыток: ${current.wipLimit ?? 1} · ${powerLabels[current.powerMode] ?? powerLabels.normal}`, button('Настроить', 'data-open="dispatch"', true))}
+        ${rowAction('Груминг', current.groomingPolicy?.enabled ? 'Директор проверяет готовность очереди к следующему спринту.' : 'Автоматический запуск выключен.', button('Настроить', 'data-open="grooming-settings"', true))}
+      </div></section>
+      <section class="stack compact"><h2>Доставка проекта</h2><div class="panel padded stack compact">
+        ${rowAction('Репозиторий Git', current.projectGit?.enabled ? current.projectGit.targetRef || 'Управляемая целевая ветка' : 'Git-доставка не подключена.', button('Настроить Git и проверки', 'data-open="project-git"', true))}
+        ${current.projectGit?.enabled ? rowAction('Рабочие копии', 'Посмотрите, какие управляемые копии доступны для уборки.', button('Проверить уборку', 'data-open="cleanup"', true)) : ''}
       </div></section>
       ${renderDebtSettings(current, debtAssessments.get(current.id))}
       <section class="stack compact"><h2>Модели студии</h2><div class="panel padded stack compact">
@@ -446,14 +488,19 @@ function settings() {
       <section class="stack compact"><h2>Библиотека</h2><div class="panel padded row">
         <div><h3>Порог поиска на GitHub</h3><p class="muted">Минимум звёзд · ${skillStarLabel(current)}</p></div>
         ${button('Настроить порог', 'data-open="skill-settings"', true)}</div></section>
+      <section class="stack compact"><h2>Состояние и уведомления</h2><div class="panel padded stack compact">
+        <div class="actions">${button('Расход моделей', 'data-open="usage"', true)}${button('Диагностика', 'data-open="diagnosis"', true)}${button('Уведомления', 'data-open="notifications"', true)}</div>
+      </div></section>
       <details class="panel padded advanced" id="advanced"${advancedOpen ? ' open' : ''}><summary>Расширенные настройки</summary><div class="stack">
-      <section class="stack compact"><div class="row"><h2>Роли</h2>${button('Добавить агента', 'data-open="agent"')}</div>
+      <section class="stack compact"><div class="row"><h2>Роли</h2><div class="actions">${button('Предложить найм', 'data-open="roster-hire"')}
+        ${button('Лимиты состава', 'data-open="staffing"', true)}${button('Предложения и история', 'data-open="roster-history"', true)}</div></div>
         <div class="panel work-list">${current.agents?.length ? current.agents.map(agent => `<div class="list-row static-row"${agent.systemRole === 'coach' ? ' data-system-role="coach"' : ''}><span><strong>${safe(nameFor(agent))}</strong>
           <small>${safe([secondaryTitle(agent), modeNames[agent.mode], agent.mode === 'fixed' ? configText(agent) : ''].filter(Boolean).join(' · '))}</small>
           ${agent.description ? `<small>${safe(agent.description)}</small>` : ''}
-          ${roleReadiness(agent, tasks(), { showTask: false })}</span>
-          ${actionFor('Настроить', 'edit-agent', agent.id)}</div>`).join('')
-          : '<p class="padded muted">Роли появятся после согласования плана. Здесь можно добавить агента вручную.</p>'}</div></section></div></details>` : ''}
+          ${agent.rosterStatus === 'retired' ? badge('Роль выведена') : roleReadiness(agent, tasks(), { showTask: false })}</span>
+          <div class="actions">${agent.rosterStatus !== 'retired' ? actionFor('Настроить', 'edit-agent', agent.id) : ''}
+            ${agent.systemRole ? '' : actionFor(agent.rosterStatus === 'retired' ? 'Предложить возврат' : 'Предложить вывод', 'roster-agent', agent.id)}</div></div>`).join('')
+          : '<p class="padded muted">Роли появятся после согласования плана. Предложение можно подготовить вручную.</p>'}</div></section></div></details>` : ''}
       <section class="stack compact"><h2>Импорт и экспорт</h2><div class="panel padded stack compact">
         <div class="actions">${button('Импортировать файл Hearth', 'data-open="import-bundle"', true)}${button('Проверить старую студию', 'data-open="import"', true)}</div>
         ${current ? `<div class="actions">${actionFor('Экспортировать шаблон', 'export-mode', 'template')}${actionFor('Экспортировать снимок', 'export-mode', 'snapshot')}</div>` : ''}
@@ -461,6 +508,10 @@ function settings() {
 }
 
 function dialogTo(title, body, submitLabel, submit, { adjustable = false } = {}) {
+  dialogLoadVersion++;
+  dialogAttachments = undefined;
+  dialogMeeting = undefined;
+  dialogConversation = undefined;
   opener = dialog.open ? opener : document.activeElement;
   taskDialog = undefined;
   submission = submit;
@@ -511,6 +562,659 @@ function scheduleLabel(schedule) {
   if (!schedule?.enabled) return 'Выключено';
   return [weekdays.filter(([day]) => schedule.days.includes(day)).map(([, label]) => label).join(', '),
     `${schedule.start}–${schedule.end}`, schedule.end < schedule.start ? 'до следующего дня' : ''].filter(Boolean).join(' · ');
+}
+
+const powerLabels = {
+  normal: 'Сон по настройкам системы',
+  active: 'Не засыпать во время активной работы',
+  window: 'Не засыпать в рабочее окно',
+};
+
+function dispatchEditor() {
+  const current = studio();
+  dialogTo('Параллельная работа и питание',
+    input('Лимит активных попыток', 'wipLimit', current.wipLimit ?? 1, 'type="number" min="1" max="8" step="1" required') +
+    select('Режим питания', 'powerMode', Object.entries(powerLabels).map(([value, label]) => option(value, label, current.powerMode ?? 'normal')).join('')) +
+    '<p class="muted">Попытка, которая ждёт вашего решения, освобождает место в очереди.</p>',
+    'Сохранить', ({ wipLimit, powerMode }) => bridge.request('updateStudio', { studioId: current.id, wipLimit: Number(wipLimit), powerMode }));
+}
+
+let checkRowId = 0;
+function projectCheckFields(check = {}) {
+  const key = `check-${++checkRowId}`;
+  return `<fieldset class="export-files form-body" data-project-check="${key}">
+    <legend>Проверка${check.id ? ` · ${safe(check.id)}` : ''}</legend>
+    ${input('Идентификатор проверки', `${key}-id`, check.id, 'maxlength="64" placeholder="test"')}
+    ${input('Исполняемая команда', `${key}-command`, check.command, 'placeholder="npm"')}
+    ${textarea('Аргументы, по одному на строку', `${key}-args`, check.args?.join('\n'), 'placeholder="test"')}
+    ${checkbox('Обязательная проверка', `${key}-required`, check.required ?? true)}
+    <details><summary>Пути, доказательства и время</summary><div class="form-body">
+      ${textarea('Пути изменений, по одному шаблону на строку', `${key}-paths`, check.paths?.join('\n'), 'placeholder="src/**"')}
+      ${textarea('Файлы с доказательствами, по одному шаблону на строку', `${key}-evidence`, check.evidenceGlobs?.join('\n'), 'placeholder="reports/**"')}
+      ${input('Лимит времени, мс', `${key}-timeout`, check.timeoutMs ?? 120000, 'type="number" min="1" max="2147483647"')}
+    </div></details>
+    <div>${actionFor('Убрать проверку', 'remove-project-check', key)}</div>
+  </fieldset>`;
+}
+
+function projectGitEditor() {
+  const current = studio();
+  const git = current.projectGit ?? {};
+  const checks = git.profile?.checks ?? [];
+  dialogTo('Git и проверки проекта',
+    checkbox('Разрешить Git-доставку для задач студии', 'enabled', git.enabled) +
+    input('Целевая локальная ветка', 'targetRef', git.targetRef, 'placeholder="Автоматически создать управляемую ветку"') +
+    input('Идентификатор профиля проверок', 'profileId', git.profile?.id ?? 'default', 'required maxlength="64"') +
+    `<p class="muted">Команды запускаются в рабочей копии задачи. Например, для <code>npm test</code> укажите команду <code>npm</code> и аргумент <code>test</code>.</p>
+      <div class="form-body" data-project-checks>${checks.map(projectCheckFields).join('')}</div>
+      <div>${button('Добавить проверку', 'data-add-project-check', true)}</div>`,
+    'Сохранить профиль', ({ enabled, targetRef, profileId, ...values }) => {
+      const profile = { id: profileId, checks: [] };
+      if (enabled) profile.checks = [...form.querySelectorAll('[data-project-check]')].map(({ dataset: { projectCheck: key } }) => {
+        const id = values[`${key}-id`];
+        const command = values[`${key}-command`];
+        if (!id || !command) throw new Error('Укажите идентификатор и команду для каждой проверки.');
+        return { id, command, args: lines(values[`${key}-args`]), paths: lines(values[`${key}-paths`]),
+          required: Boolean(values[`${key}-required`]), timeoutMs: Number(values[`${key}-timeout`] || 120000),
+          evidenceGlobs: lines(values[`${key}-evidence`]) };
+      });
+      return bridge.request('configureProject', { studioId: current.id, enabled: Boolean(enabled), targetRef, profile });
+    }, { adjustable: true });
+}
+
+async function cleanupEditor() {
+  const current = studio();
+  const op = operationId();
+  await loadDialog('Уборка рабочих копий', async isCurrent => {
+    const preview = await bridge.request('previewCleanup', { studioId: current.id });
+    const rows = Array.isArray(preview) ? preview : preview.candidates ?? preview.worktrees ?? [];
+    const allowed = rows.filter(row => row.eligible ?? row.allowed ?? row.removable);
+    const rowId = row => row.id ?? row.worktreeId ?? row.candidateId;
+    const body = rows.length ? `<ul class="legacy-list">${rows.map(row => `<li>
+      ${(row.eligible ?? row.allowed ?? row.removable) ? checkbox(row.branchRef ?? row.path ?? rowId(row), `tree-${rowId(row)}`, false)
+        : `<strong>${safe(row.branchRef ?? row.path ?? rowId(row))}</strong>`}
+      <p class="muted">${safe(Array.isArray(row.reasons) ? row.reasons.join(' · ') : row.reason ?? '')}</p></li>`).join('')}</ul>`
+      : '<p class="muted">Зарегистрированных рабочих копий пока нет.</p>';
+    if (isCurrent()) dialogTo('Уборка рабочих копий', `<p>Выберите копии, которые нужно удалить. Сохранённые доказательства останутся в студии.</p>${body}`,
+      allowed.length ? 'Удалить выбранные копии' : undefined, allowed.length ? async values => {
+        const candidateIds = allowed.filter(row => values[`tree-${rowId(row)}`]).map(rowId);
+        if (!candidateIds.length) throw new Error('Выберите хотя бы одну копию.');
+        const result = await bridge.request('applyCleanup', { studioId: current.id, candidateIds, operationId: op });
+        notice((result.results ?? []).map(row => [row.id, row.status, ...(row.reasons ?? [])].join(' · ')).join(' / ') || 'Уборка рабочих копий завершена.');
+      } : undefined, { adjustable: true });
+  });
+}
+
+async function loadDialog(title, load) {
+  dialogTo(title, '<p class="muted" role="status">Загрузка…</p>');
+  const version = dialogLoadVersion;
+  try { await load(() => dialog.open && version === dialogLoadVersion); }
+  catch (error) {
+    if (dialog.open && version === dialogLoadVersion) dialogTo(title, `<p class="error" role="alert">${safe(error.message || 'Не удалось загрузить данные.')}</p>`);
+  }
+}
+
+let dialogLoadVersion = 0;
+let dialogAttachments;
+
+function attachmentFields() {
+  return `<div class="stack compact"><div class="actions">${button('Приложить файл', 'data-pick-attachment', true)}</div>
+    <ul class="legacy-list" data-attachments aria-live="polite"></ul></div>`;
+}
+
+function renderAttachmentFields() {
+  const list = $('[data-attachments]');
+  if (!list || !dialogAttachments) return;
+  list.innerHTML = dialogAttachments.map((row, index) => `<li class="legacy-attachment"><span>${safe(row.name ?? row.filename ?? row.sourcePath ?? row.id)}</span>
+    ${actionFor('Убрать', 'remove-attachment', index)}</li>`).join('');
+}
+
+async function addAttachment(target) {
+  const attachments = dialogAttachments;
+  if (!attachments || target.disabled) return;
+  if (attachments.length >= 8) { dialogError('Можно приложить до восьми файлов.'); return; }
+  target.disabled = true;
+  try {
+    const row = await bridge.request('pickAttachment', { studioId: studio().id,
+      ...(dialogConversation?.taskId ? { taskId: dialogConversation.taskId } : {}) });
+    if (row && dialogAttachments === attachments && !attachments.some(value => value.id === row.id)) {
+      attachments.push(row);
+      renderAttachmentFields();
+    }
+  } catch (error) {
+    if (dialogAttachments === attachments) dialogError(error.message || 'Не удалось приложить файл.');
+  } finally { target.disabled = false; }
+}
+
+const messageStatuses = { queued: 'В очереди', received: 'Получено', processed: 'Обработано' };
+function messageHistoryMarkup(thread, agent) {
+  const history = thread ? studioRows('conversationMessages').filter(row => row.conversationId === thread.id) : [];
+  return history.length ? `<ul class="legacy-list legacy-history">${history.map(row => {
+    const sender = row.author === 'owner' ? (row.kind === 'note' ? 'Ваша записка' : 'Вы') : nameFor(agent);
+    const files = studioRows('evidence').filter(file => row.attachmentIds?.includes(file.id));
+    const priority = row.priorityProposal;
+    return `<li><div class="row"><strong>${safe(sender)}</strong><small class="muted">${safe(studioDate(row.createdAt))}</small></div>
+      ${row.status && row.author === 'owner' ? badge(messageStatuses[row.status] ?? row.status) : ''}
+      ${plain(row.text)}${row.outcome ? plain(row.outcome, 'muted') : ''}${renderEvidence(files)}
+      ${priority ? `<p>${safe(priority.taskTitle)} · приоритет ${safe(priority.priority)}</p>
+        ${priority.appliedAt ? badge('Применено') : actionFor('Применить приоритет', 'message-priority', row.id)}` : ''}</li>`;
+  }).join('')}</ul>` : '';
+}
+
+function conversationsDialog() {
+  const rows = studioRows('conversations');
+  const current = studio();
+  const recipient = row => nameFor(current.agents?.find(agent => agent.id === row.agentId));
+  const conversationList = rows.length ? `<ul class="legacy-list">${rows.map(row => {
+    const task = tasks().find(task => task.id === row.taskId);
+    const last = studioRows('conversationMessages').findLast(item => item.conversationId === row.id);
+    return `<li><strong>${safe(recipient(row))}${task ? ` · ${safe(task.title)}` : ''}</strong>
+      ${last ? `<p class="muted clamp">${safe(last.text)}</p>` : ''}
+      ${actionFor('Открыть беседу', 'conversation', row.id)}</li>`;
+  }).join('')}</ul>` : '<p class="muted">Здесь появятся сообщения и ответы команды.</p>';
+  dialogTo('Связь с командой', `<div class="actions">${actionFor('Написать директору', 'message', '', false)}
+    ${actionFor('Оставить записку', 'message-note', '')}</div>${conversationList}`, undefined, undefined, { adjustable: true });
+}
+
+function messageEditor({ conversation, agentId = conversation?.agentId, taskId = conversation?.taskId, kind = 'chat' } = {}) {
+  const current = studio();
+  const agent = current.agents?.find(row => String(row.id) === String(agentId));
+  const task = tasks().find(row => String(row.id) === String(taskId));
+  const thread = conversation ?? studioRows('conversations').find(row =>
+    (row.agentId ?? null) === (agent?.id ?? null) && (row.taskId ?? null) === (task?.id ?? null));
+  const op = operationId();
+  const selectedAttachments = [];
+  const submit = async ({ text }) => {
+    if (!text && !selectedAttachments.length) throw new Error('Напишите сообщение или приложите файл.');
+    await bridge.request('postStudioMessage', {
+      studioId: current.id, ...(thread?.id ? { conversationId: thread.id } : {}),
+      ...(agent ? { agentId: agent.id } : {}), ...(task ? { taskId: task.id } : {}),
+      kind, text, attachmentIds: selectedAttachments.map(row => row.id), operationId: op,
+    });
+    await refresh();
+    if (studio()?.id === current.id) {
+      messageEditor({ agentId: agent?.id, taskId: task?.id });
+      return false;
+    }
+  };
+  dialogTo(kind === 'note' ? 'Записка директору' : `Беседа · ${nameFor(agent)}`, (task ? `<p>${safe(task.title)}</p>` : '') +
+    `<div data-message-history aria-live="polite">${messageHistoryMarkup(thread, agent)}</div>` +
+    textarea(kind === 'note' ? 'Текст записки' : 'Сообщение', 'text') + attachmentFields(),
+    kind === 'note' ? 'Передать записку' : 'Отправить', submit, { adjustable: true });
+  dialogAttachments = selectedAttachments;
+  dialogConversation = { agentId: agent?.id ?? null, taskId: task?.id ?? null };
+}
+
+function agentHistory(raw) {
+  const current = studio();
+  const agent = current.agents?.find(row => same(row.id, raw));
+  const own = tasks().filter(task => (task.agentId ?? null) === (agent?.id ?? null));
+  const meetings = studioRows('meetings').filter(meeting => meeting.participants?.some(row => (row.agentId ?? row) === agent?.id));
+  const attempts = studioRows('attempts').filter(attempt => own.some(task => task.id === attempt.taskId)).slice(-10).reverse();
+  const taskList = records => `<ul class="legacy-list">${records.map(task => `<li>${actionFor(task.title, 'task', task.id)} ${status(task)}</li>`).join('')}</ul>`;
+  dialogTo(`Работа · ${nameFor(agent)}`, (own.length ? `<section class="stack compact"><h3>Задачи и обучение</h3>${taskList(own.slice(-15).reverse())}</section>` : '<p class="muted">Задач пока нет.</p>') +
+    (attempts.length ? `<section class="stack compact"><h3>Последние попытки</h3><ul class="legacy-list">${attempts.map(row =>
+      `<li>${safe(own.find(task => task.id === row.taskId)?.title)} ${status(row)} ${safe(studioDate(row.startedAt))}${row.error ? plain(row.error) : ''}</li>`).join('')}</ul></section>` : '') +
+    (meetings.length ? `<section class="stack compact"><h3>Встречи</h3><div class="actions">${meetings.map(row => actionFor(row.title ?? 'Встреча', 'meeting-detail', row.id)).join('')}</div></section>` : ''), undefined, undefined, { adjustable: true });
+}
+
+async function usageDialog() {
+  const current = studio();
+  await loadDialog('Расход моделей', async isCurrent => {
+    const report = await bridge.request('studioUsage', { studioId: current.id });
+    if (isCurrent()) dialogTo('Расход моделей', renderUsageReport(report) +
+      `<div class="actions">${button('Задать тариф модели', 'data-open="usage-tariff"', true)}</div>`, undefined, undefined, { adjustable: true });
+  });
+}
+
+function usageTariffEditor() {
+  const current = studio();
+  const rate = 'type="number" min="0" step="any"';
+  dialogTo('Тариф за миллион токенов',
+    select('Подключение', 'runtime', option('codex', 'Codex') + option('claude', 'Claude Code')) +
+    input('Модель', 'model', current.director?.model ?? '', 'required') +
+    input('Валюта', 'currency', 'USD', 'required maxlength="3"') +
+    input('Вход', 'input', '', rate + ' required') + input('Выход', 'output', '', rate + ' required') +
+    input('Чтение из кэша', 'cacheRead', '', rate) + input('Запись в кэш', 'cacheWrite', '', rate),
+    'Сохранить тариф', values => bridge.request('updateUsageTariff', {
+      studioId: current.id, runtime: values.runtime, model: values.model, currency: values.currency.toUpperCase(),
+      input: Number(values.input), output: Number(values.output),
+      cacheRead: values.cacheRead === '' ? null : Number(values.cacheRead), cacheWrite: values.cacheWrite === '' ? null : Number(values.cacheWrite),
+    }));
+}
+
+async function diagnosisDialog() {
+  const current = studio();
+  await loadDialog('Диагностика студии', async isCurrent => {
+    const report = await bridge.request('diagnoseStudio', { studioId: current.id });
+    const actions = (['resume', 'recover', 'retry'].includes(report.action) ? actionFor('Восстановить работу', 'run-action', 'resume', false) : '') +
+      button('Сохранить диагностику', 'data-save-diagnostics', true) +
+      button('Перезапустить Hearth', 'data-open="restart-app"', true);
+    if (isCurrent()) dialogTo('Диагностика студии', renderDiagnostic(report) + (actions ? `<div class="actions">${actions}</div>` : ''));
+  });
+}
+
+function restartAppEditor() {
+  dialogTo('Перезапустить Hearth', '<p>Приложение завершит работу штатно и откроется снова. Студии восстановят состояние из сохранённых записей.</p>',
+    'Перезапустить', () => bridge.request('restartApp'));
+}
+
+function notificationsEditor() {
+  const current = studio();
+  dialogTo('Уведомления', checkbox('Системные уведомления приложения', 'app', state.notificationPreferences?.enabled !== false) +
+    checkbox('События этой студии', 'studio', state.notificationPreferences?.studios?.[current.id] !== false),
+    'Сохранить', async values => {
+      await bridge.request('updateNotifications', { enabled: Boolean(values.app) });
+      await bridge.request('updateNotifications', { studioId: current.id, enabled: Boolean(values.studio) });
+    });
+}
+
+const recordOptions = (rows, selected = '', emptyLabel = 'Не выбрано', label = row => row.title ?? row.name) =>
+  option('', emptyLabel, selected) + rows.map(row => option(String(row.id), label(row), String(selected))).join('');
+const checkedIds = (rows, values, prefix) => rows.filter((_, index) => values[`${prefix}-${index}`]).map(row => row.id);
+const checkList = (title, rows, prefix, selected = [], label = row => row.title ?? row.name) => rows.length
+  ? `<fieldset class="export-files"><legend>${safe(title)}</legend><div class="legacy-checklist">${rows.map((row, index) =>
+    checkbox(label(row), `${prefix}-${index}`, selected.includes(row.id))).join('')}</div></fieldset>` : '';
+
+function groomingEditor() {
+  const current = studio();
+  const policy = current.groomingPolicy ?? {};
+  dialogTo('Груминг', checkbox('Запускать груминг автоматически', 'enabled', policy.enabled) +
+    input('Порог количества готовых задач', 'threshold', policy.threshold, 'type="number" min="1" max="200" placeholder="Двойной лимит активных попыток"') +
+    input('Ёмкость следующего спринта, задач', 'nextSprintCapacity', policy.nextSprintCapacity ?? 1, 'type="number" min="0" max="200" required'),
+    'Сохранить', values => bridge.request('updateGrooming', { studioId: current.id, enabled: Boolean(values.enabled),
+      threshold: values.threshold ? Number(values.threshold) : null, nextSprintCapacity: Number(values.nextSprintCapacity) }));
+}
+
+function backlogEditor(task) {
+  const current = studio();
+  const records = tasks().filter(row => row.id !== task?.id);
+  const blockedBy = task?.dependencies ?? [];
+  const priorLinks = (task?.links ?? []).filter(row => !['blocks', 'replaces'].includes(row.type));
+  const linksOf = kind => priorLinks.filter(row => row.type === kind).map(row => row.taskId);
+  dialogTo(task ? 'Изменить задачу бэклога' : 'Добавить в бэклог',
+    input('Название', 'title', task?.title, 'required maxlength="200"') +
+    textarea('Описание', 'prompt', task?.prompt, 'required') + textarea('Критерии приёмки', 'criteria', listText(task?.criteria)) +
+    input('Приоритет (0–100)', 'priority', task?.priority ?? 0, 'type="number" min="0" max="100" required') +
+    input('Оценка, баллов', 'points', task?.points, 'type="number" min="1"') +
+    (!task ? checkbox('Техдолг', 'debt') : '') +
+    (records.length ? `<details class="advanced"><summary>Связи с другими задачами</summary>
+      ${checkList('Готовность этой задачи зависит от', records, 'blocks', blockedBy)}
+      ${checkList('Источники задачи', records, 'origin', linksOf('origin'))}
+      ${checkList('Связанный техдолг', records.filter(row => row.kind === 'debt'), 'debt-link', linksOf('debt'))}</details>` : ''),
+    'Сохранить', values => bridge.request('reviseBacklog', {
+      studioId: current.id, baseVersion: current.backlogVersion ?? 0,
+      edits: [{ type: task ? 'update' : 'create', ...(task ? { taskId: task.id } : {}),
+        title: values.title, prompt: values.prompt, criteria: values.criteria || null, priority: Number(values.priority),
+        points: values.points ? Number(values.points) : null, ...(values.debt ? { kind: 'debt' } : {}),
+        links: [
+          ...checkedIds(records, values, 'blocks').map(taskId => ({ taskId, type: 'blocks' })),
+          ...checkedIds(records, values, 'origin').map(taskId => ({ taskId, type: 'origin' })),
+          ...checkedIds(records.filter(row => row.kind === 'debt'), values, 'debt-link').map(taskId => ({ taskId, type: 'debt' })),
+        ],
+      }],
+    }), { adjustable: true });
+}
+
+function replaceBacklogEditor(task) {
+  const current = studio();
+  const records = tasks().filter(row => row.id !== task.id && !row.sprintId && row.kind !== 'train' && row.status !== 'running' && !['done', 'replaced'].includes(row.stage));
+  dialogTo('Заменить задачу', `<p>${safe(task.title)}</p>` +
+    select('Задача на замену', 'replacementId', recordOptions(records)) + checkbox('Перенести зависимые задачи на замену', 'redirect', true),
+    'Сохранить замену', ({ replacementId, redirect }) => {
+      if (!replacementId) throw new Error('Выберите задачу на замену.');
+      return bridge.request('reviseBacklog', { studioId: current.id, baseVersion: current.backlogVersion ?? 0,
+        edits: [{ type: 'replace', taskId: task.id, replacementId, redirectDependencies: Boolean(redirect) }] });
+    });
+}
+
+function closeSprintEditor(sprint) {
+  const current = studio();
+  const members = tasks().filter(task => task.sprintId === sprint.id && sprint.taskIds?.includes(task.id) && !['done', 'replaced'].includes(task.stage));
+  const nextSprints = studioRows('sprints').filter(row => row.id !== sprint.id && row.status === 'active');
+  const op = operationId();
+  dialogTo('Закрыть спринт', `<p>${safe(sprint.title)}. ${members.length ? 'Укажите, куда перенести каждую незавершённую задачу.' : 'Все задачи завершены или заменены.'}</p>` +
+    members.map((task, index) => `<fieldset class="export-files"><legend>${safe(task.title)}</legend><div class="form-body">
+      ${select('Этап после переноса', `stage-${index}`, option('backlog', 'Бэклог') + option('ready', 'Готова к работе'))}
+      ${nextSprints.length ? select('Следующий спринт', `sprint-${index}`, recordOptions(nextSprints, '', 'Оставить вне спринта')) : ''}
+      ${input('Причина переноса', `reason-${index}`, '', 'required')}</div></fieldset>`).join(''),
+    'Закрыть спринт', values => bridge.request('closeSprint', { studioId: current.id, sprintId: sprint.id, operationId: op,
+      carryovers: members.map((task, index) => ({ taskId: task.id, reason: values[`reason-${index}`], stage: values[`stage-${index}`],
+        ...(values[`sprint-${index}`] ? { sprintId: values[`sprint-${index}`] } : {}) })) }), { adjustable: true });
+}
+
+function phaseEditor(phase) {
+  const current = studio();
+  const epics = studioRows('epics');
+  const sprints = studioRows('sprints');
+  dialogTo(phase ? 'Изменить фазу' : 'Добавить фазу',
+    input('Название', 'title', phase?.title, 'required maxlength="200"') +
+    textarea('Цель', 'goal', phase?.goal, 'required') +
+    textarea('Критерии завершения, каждый с новой строки', 'criteria', phase?.criteria?.map(row => row.description).join('\n'), 'required') +
+    checkList('Эпики фазы', epics, 'epic', phase?.epicIds) + checkList('Спринты фазы', sprints, 'sprint', phase?.sprintIds),
+    'Сохранить', values => bridge.request(phase ? 'updatePhase' : 'createPhase', {
+      studioId: current.id, ...(phase ? { phaseId: phase.id } : {}), title: values.title, goal: values.goal,
+      criteria: lines(values.criteria).map(description => phase?.criteria.find(row => row.description === description) ?? { description }),
+      epicIds: checkedIds(epics, values, 'epic'), sprintIds: checkedIds(sprints, values, 'sprint'),
+    }), { adjustable: true });
+}
+
+function phaseTransitionEditor(phase) {
+  const current = studio();
+  const sprints = studioRows('sprints').filter(row => phase.sprintIds.includes(row.id) || phase.epicIds.includes(row.epicId));
+  const done = [...tasks().filter(row => row.stage === 'done' && row.kind !== 'train' &&
+    (phase.epicIds.includes(row.epicId) || sprints.some(sprint => sprint.id === row.sprintId || sprint.taskIds?.includes(row.id)))),
+    ...sprints.filter(row => row.status === 'completed')];
+  const pending = phase.transition?.status === 'pending';
+  if (pending) {
+    dialogTo('Завершение фазы', plain(phase.title) + `<ul class="legacy-list">${(phase.transition.evidenceIds ?? []).map(id =>
+      `<li>${safe(done.find(row => row.id === id)?.title ?? id)}</li>`).join('')}</ul>` +
+      select('Решение', 'decision', option('approve', 'Подтвердить завершение') + option('reject', 'Вернуть в работу')),
+      'Сохранить решение', ({ decision }) => bridge.request('decidePhaseTransition', { studioId: current.id, phaseId: phase.id, decision }));
+    return;
+  }
+  const needsBindings = phase.criteria.length > 1 || phase.criteria.some(row => row.evidenceIds?.length);
+  const criterionFields = needsBindings ? phase.criteria.map((criterion, index) =>
+    checkList(criterion.description, done, `criterion-${index}`, criterion.evidenceIds)).join('') : checkList('Доказательства', done, 'evidence');
+  dialogTo('Предложить завершение фазы', plain(phase.title) + (!done.length ?
+    '<p class="muted">Свяжите фазу с эпиком или спринтом, где есть принятые результаты.</p>' : criterionFields),
+    done.length ? 'Предложить завершение' : undefined, done.length ? async values => {
+      const criteria = needsBindings ? phase.criteria.map((row, index) => ({ ...row, evidenceIds: checkedIds(done, values, `criterion-${index}`) })) : phase.criteria;
+      if (needsBindings && criteria.some(row => !row.evidenceIds.length)) throw new Error('Выберите доказательство для каждого критерия.');
+      const evidenceIds = needsBindings ? [...new Set(criteria.flatMap(row => row.evidenceIds))] : checkedIds(done, values, 'evidence');
+      if (!evidenceIds.length) throw new Error('Выберите хотя бы одно доказательство.');
+      if (needsBindings) await bridge.request('updatePhase', { studioId: current.id, phaseId: phase.id, criteria });
+      await bridge.request('proposePhaseTransition', { studioId: current.id, phaseId: phase.id, evidenceIds });
+    } : undefined, { adjustable: true });
+}
+
+const activeRoster = current => (current.agents ?? []).filter(agent => agent.rosterStatus !== 'retired');
+const meetingKinds = { planning: 'Планирование', grooming: 'Груминг', retrospective: 'Ретроспектива', topic: 'Обсуждение', review: 'Ревью' };
+const meetingStages = { positions: 'Позиции участников', facilitation: 'Обсуждение', objections: 'Возражения', owner_review: 'Ждёт решения владельца', resolved: 'Решение сохранено', held: 'Приостановлена' };
+const listJson = (raw, label) => {
+  try { const result = JSON.parse(raw || '[]'); if (Array.isArray(result)) return result; }
+  catch { /* Display a validation message alongside this dialog's fields. */ }
+  throw new Error(`«${label}» должен быть массивом JSON.`);
+};
+
+function meetingEditor() {
+  const current = studio();
+  const agents = activeRoster(current);
+  const trainings = tasks().filter(task => task.kind === 'train');
+  const available = [...tasks().filter(task => task.stage === 'done').map(row => ({ id: row.id, title: row.title, type: 'task' })),
+    ...studioRows('evidence').filter(row => row.kind !== 'attachment').map(row => ({ id: row.id, title: row.name ?? row.filename ?? row.kind, type: 'evidence', digest: row.digest, revisionDigest: row.revision?.digest }))];
+  const intro = agents.length ? '' : '<p class="muted">Добавьте участника в состав студии, чтобы назначить встречу.</p>';
+  dialogTo('Назначить встречу', intro + input('Название', 'title', '', 'required maxlength="150"') +
+    select('Вид встречи', 'kind', Object.entries(meetingKinds).map(([value, label]) => option(value, label, 'topic')).join('')) +
+    textarea('Повестка', 'agenda', '', 'required') +
+    (agents.length ? checkbox('Доверить директору выбор участников', 'chooseParticipants') +
+      `<div data-manual-participants>${checkList('Участники', agents, 'participant', [], nameFor)}</div>` : '') +
+    select('Ведущий', 'facilitatorId', recordOptions(agents, '', 'Директор', nameFor)) +
+    select('Спринт', 'sprintId', recordOptions(studioRows('sprints'))) + select('Фаза', 'phaseId', recordOptions(studioRows('phases'))) +
+    checkList('Материалы', available, 'material') +
+    (trainings.length ? `<details class="advanced" data-manual-prerequisites><summary>Учебный допуск участника</summary><div class="form-body">
+      ${select('Задача обучения', 'trainTaskId', recordOptions(trainings, '', 'Без допуска'))}
+      ${input('Требуемый навык или версия', 'skillRef')}${input('Зачем нужен допуск', 'prerequisiteReason')}${input('Критерий допуска', 'prerequisiteCriterion')}</div></details>` : ''),
+    agents.length ? 'Назначить' : undefined, agents.length ? async values => {
+      const chooseParticipants = Boolean(values.chooseParticipants);
+      const participants = chooseParticipants ? [] : checkedIds(agents, values, 'participant');
+      if (!chooseParticipants && !participants.length) throw new Error('Выберите хотя бы одного участника.');
+      const materialRefs = available.filter((_, index) => values[`material-${index}`]).map(({ type, id, digest, revisionDigest }) => ({
+        type, id, ...(typeof digest === 'string' ? { digest } : {}), ...(revisionDigest ? { revisionDigest } : {}),
+      }));
+      const train = !chooseParticipants && trainings.find(row => row.id === values.trainTaskId);
+      const prerequisites = train ? [{ trainTaskId: train.id, agentId: train.training?.targetAgentId,
+        skillRef: values.skillRef, reason: values.prerequisiteReason, criterion: values.prerequisiteCriterion }] : [];
+      await bridge.request('openMeeting', { studioId: current.id, title: values.title, kind: values.kind, agenda: values.agenda,
+        ...(chooseParticipants ? { chooseParticipants: true } : { participants }), materialRefs, prerequisites,
+        ...(values.facilitatorId ? { facilitatorId: values.facilitatorId } : {}),
+        ...(values.sprintId ? { sprintId: values.sprintId } : {}), ...(values.phaseId ? { phaseId: values.phaseId } : {}) });
+    } : undefined, { adjustable: true });
+}
+
+function prerequisiteBlock(type, consumerId) {
+  const rows = studioRows('prerequisites').filter(row => row.consumerType === type && row.consumerId === consumerId);
+  if (!rows.length) return '';
+  const show = rows.map(row => {
+    const training = tasks().find(task => task.id === row.trainTaskId);
+    return `<li><strong>${safe(row.skillRef)}</strong>${plain(row.reason)}${plain(row.criterion, 'muted')}
+      <div class="actions">${training ? actionFor('Открыть обучение', 'task', training.id) : ''}
+        ${row.retired ? badge('Допуск снят после замены') : row.exception ? badge(`Исключение: ${row.exception.author}`) : training?.stage === 'done' && training.status === 'completed' ? badge('Обучение принято', 'good') : badge('Ждёт обучения', 'warn')}
+        ${!row.exception && !row.retired && training?.stage !== 'done' ? actionFor('Оформить исключение', 'waive-prerequisite', row.id) : ''}</div>
+      ${row.exception ? plain(row.exception.reason, 'muted') : ''}</li>`;
+  });
+  return `<section class="inline-result"><h3>Учебные допуски</h3><ul class="legacy-list">${show.join('')}</ul></section>`;
+}
+
+function waivePrerequisiteEditor(row) {
+  dialogTo('Исключение для учебного допуска', plain(row.skillRef) +
+    input('Кто разрешил исключение', 'author', '', 'required') + textarea('Причина', 'reason', '', 'required'),
+    'Сохранить исключение', values => bridge.request('waivePrerequisite', { prerequisiteId: row.id, ...values }));
+}
+
+const trainingForTask = task => tasks().filter(row => row.kind === 'train' &&
+  [task.agentId, task.reviewerId].filter(Boolean).includes(row.training?.targetAgentId));
+
+function taskPrerequisiteEditor(task) {
+  const rows = trainingForTask(task);
+  dialogTo('Учебный допуск задачи',
+    select('Задача обучения', 'trainTaskId', recordOptions(rows)) +
+    input('Требуемый навык или версия', 'skillRef', '', 'required') +
+    textarea('Зачем нужен допуск', 'reason', '', 'required') +
+    textarea('Критерий допуска', 'criterion', '', 'required'), 'Добавить допуск', values => {
+      const train = rows.find(row => row.id === values.trainTaskId);
+      if (!train) throw new Error('Выберите задачу обучения.');
+      return bridge.request('addPrerequisite', { ...values, consumerType: 'task', consumerId: task.id, agentId: train.training.targetAgentId });
+    });
+}
+
+function meetingDetail(meeting) {
+  const current = studio();
+  const active = activeRoster(current);
+  const participant = id => nameFor(current.agents?.find(agent => agent.id === id));
+  const outcome = meeting.resolution?.outcome ?? meeting.proposedOutcome ?? meeting;
+  const decisions = outcome.decisions ?? [];
+  const actionItems = outcome.actionItems ?? [];
+  const present = meeting.participants ?? [];
+  const canReplace = meeting.stage === 'positions' && !meeting.activeStep && active.some(agent => !present.includes(agent.id));
+  const canResolve = ['facilitation', 'owner_review'].includes(meeting.stage) && !meeting.activeStep;
+  const position = row => `<li><strong>${safe(participant(row.agentId))}</strong>
+    <p class="muted">${row.purpose === 'meeting-objection' ? 'Возражение' : 'Позиция'}${row.superseded ? ' · Заменена' : ''}</p>${plain(row.text)}</li>`;
+  dialogTo(meeting.title ?? meetingKinds[meeting.kind] ?? 'Встреча',
+    `<div class="row">${badge(meetingStages[meeting.stage] ?? meetingKinds[meeting.kind] ?? 'Архив', meeting.stage === 'owner_review' ? 'warn' : '')}
+      ${meeting.version ? `<span class="muted">Версия ${safe(meeting.version)}</span>` : ''}</div>` +
+    (meeting.agenda ? `<section class="inline-result"><h3>Повестка</h3>${plain(meeting.agenda)}</section>` : '') +
+    (present.length ? `<p class="muted">Участники: ${present.map(id => safe(participant(id))).join(', ')}</p>` : '') +
+    (meeting.materialRefs?.length ? `<section class="inline-result"><h3>Материалы</h3><div class="actions">${meeting.materialRefs.map(ref => ref.type === 'evidence'
+      ? actionFor('Открыть доказательство', 'evidence', ref.id)
+      : ['task', 'artifact'].includes(ref.type) ? actionFor(tasks().find(task => task.id === ref.id)?.title ?? 'Задача', 'task', ref.id) : '').join('')}</div></section>` : '') +
+    prerequisiteBlock('meeting', meeting.id) +
+    (meeting.positions?.length ? `<section class="inline-result"><h3>Позиции и возражения</h3><ul class="legacy-list">${meeting.positions.map(position).join('')}</ul></section>` : '') +
+    (meeting.objectionRound?.question ? `<section class="inline-result"><h3>Вопрос к участникам</h3>${plain(meeting.objectionRound.question)}</section>` : '') +
+    (meeting.error ? plain(meeting.error, 'error') : '') +
+    (meeting.ownerReason ? `<section class="inline-result"><h3>Почему нужно ваше решение</h3>${plain(meeting.ownerReason)}</section>` : '') +
+    (outcome.summary || meeting.outcome ? `<section class="inline-result"><h3>Итог</h3>${plain(outcome.summary ?? meeting.outcome)}</section>` : '') +
+    (decisions.length ? `<section class="inline-result"><h3>Решения</h3><ul class="legacy-list">${decisions.map(row =>
+      `<li><strong>${safe(row.text ?? row)}</strong>${row.rationale ? plain(row.rationale) : ''}${row.verification ? plain(`Проверка: ${row.verification}`, 'muted') : ''}</li>`).join('')}</ul></section>` : '') +
+    (actionItems.length ? `<section class="inline-result"><h3>Действия</h3><ul class="legacy-list">${actionItems.map(row =>
+      `<li><strong>${safe(row.title)}</strong>${plain(row.prompt)}${row.agentId ? plain(participant(row.agentId), 'muted') : ''}</li>`).join('')}</ul></section>` : '') +
+    (meeting.taskIds?.length ? `<div class="actions">${meeting.taskIds.map(id => actionFor(tasks().find(row => row.id === id)?.title ?? 'Открыть задачу', 'task', id)).join('')}</div>` : '') +
+    `<div class="actions">${canResolve ? actionFor('Сохранить решение', 'meeting-resolve', meeting.id, false) : ''}
+      ${meeting.stage === 'held' ? actionFor('Возобновить', 'meeting-resume', meeting.id, false) : ''}
+      ${canReplace ? actionFor('Заменить участника', 'meeting-replace', meeting.id) : ''}</div>`, undefined, undefined, { adjustable: true });
+  dialogMeeting = meeting;
+}
+
+function resolveMeetingEditor(meeting) {
+  const outcome = meeting.proposedOutcome ?? {};
+  const agents = activeRoster(studio());
+  dialogTo('Решение встречи', textarea('Итог', 'summary', outcome.summary, 'required') +
+    textarea('Дополнительное решение', 'decisionText') + input('Аргументы', 'rationale') + input('Как проверить решение', 'verification') +
+    `<details class="advanced"><summary>Действия по итогам встречи</summary><div class="form-body">
+      ${input('Название нового действия', 'actionTitle')}${textarea('Описание действия', 'actionPrompt')}${input('Критерии действия', 'actionCriteria')}
+      ${select('Тип действия', 'actionKind', option('work', 'Задача') + option('train', 'Обучение') + option('recommendation', 'Рекомендация'))}
+      ${select('Ответственный', 'actionAgentId', recordOptions(agents, '', 'Без назначения', nameFor))}</div></details>` +
+    (outcome.decisions?.length || outcome.actionItems?.length ? `<details class="advanced"><summary>Предложения директора</summary>
+      ${textarea('Решения (JSON)', 'proposedDecisions', JSON.stringify(outcome.decisions ?? [], null, 2))}
+      ${textarea('Действия (JSON)', 'proposedActions', JSON.stringify(outcome.actionItems ?? [], null, 2))}</details>` : ''),
+    'Подтвердить итог', values => {
+      const decisions = listJson(values.proposedDecisions, 'Решения');
+      const actionItems = listJson(values.proposedActions, 'Действия');
+      if (values.decisionText) decisions.push({ text: values.decisionText, rationale: values.rationale, verification: values.verification });
+      if (values.actionTitle) actionItems.push({ kind: values.actionKind, title: values.actionTitle, prompt: values.actionPrompt, criteria: values.actionCriteria,
+        ...(values.actionAgentId ? { agentId: values.actionAgentId } : {}) });
+      return bridge.request('resolveMeeting', { meetingId: meeting.id, version: meeting.version, summary: values.summary, decisions, actionItems });
+    }, { adjustable: true });
+}
+
+function replaceParticipantEditor(meeting) {
+  const agents = activeRoster(studio());
+  const from = agents.filter(agent => meeting.participants.includes(agent.id));
+  const to = agents.filter(agent => !meeting.participants.includes(agent.id));
+  dialogTo('Заменить участника', select('Текущий участник', 'agentId', recordOptions(from, from[0]?.id, '', nameFor)) +
+    select('Новый участник', 'replacementAgentId', recordOptions(to, to[0]?.id, '', nameFor)), 'Заменить', values => {
+      if (!values.agentId || !values.replacementAgentId) throw new Error('Выберите обоих участников.');
+      return bridge.request('replaceParticipant', { meetingId: meeting.id, ...values });
+    });
+}
+
+const rosterKinds = { hire: 'Найм', retire: 'Вывод роли', return: 'Возврат роли', update: 'Изменение роли', rollback: 'Откат роли' };
+const rosterStages = { pending: 'Ждёт решения', approved: 'Принято', rejected: 'Отклонено' };
+const staffingReasons = { headcount: 'Превышен лимит участников', budget: 'Превышен бюджет', 'budget-unverified': 'Бюджет не подтверждён' };
+
+function staffingEditor() {
+  const current = studio();
+  const rules = current.staffing ?? {};
+  dialogTo('Лимиты состава', input('Число рабочих ролей', 'maxAgents', rules.maxAgents, 'type="number" min="0" placeholder="Без лимита"') +
+    input('Бюджет команды', 'maxBudget', rules.maxBudget, 'type="number" min="0" step="any" placeholder="Без лимита"') +
+    textarea('Разрешения, по одному на строку', 'permissions', rules.permissions?.join('\n')),
+    'Сохранить', values => bridge.request('updateStudio', { studioId: current.id, staffing: {
+      maxAgents: values.maxAgents ? Number(values.maxAgents) : null, maxBudget: values.maxBudget ? Number(values.maxBudget) : null,
+      permissions: lines(values.permissions),
+    } }));
+}
+
+function rosterProposalEditor({ agent, kind = 'hire', rollbackProposalId } = {}) {
+  const current = studio();
+  const op = operationId();
+  const firstRequired = ['hire', 'return'].includes(kind);
+  dialogTo(rosterKinds[kind], (agent ? plain(nameFor(agent)) : '') +
+    (kind === 'hire' ? input('Название роли', 'roleTitle', '', 'required') + input('Имя агента', 'name') +
+      textarea('Инструкции для роли', 'description') + input('Темы обучения', 'topics', '', 'placeholder="Через запятую"') : '') +
+    textarea('Причина изменения состава', 'reason', '', 'required') +
+    (firstRequired ? textarea('Первый результат роли', 'firstResult', '', 'required') +
+      input('Оценка бюджета роли', 'estimatedBudget', '', 'type="number" min="0" step="any"') : ''),
+    'Создать предложение', async values => {
+      const proposal = await bridge.request('proposeRosterChange', { studioId: current.id, kind, reason: values.reason, operationId: op,
+        ...(agent ? { agentId: agent.id } : {}), ...(firstRequired ? { firstResult: values.firstResult, ...(values.estimatedBudget ? { estimatedBudget: Number(values.estimatedBudget) } : {}) } : {}),
+        ...(kind === 'hire' ? { agent: { name: values.name, roleTitle: values.roleTitle, description: values.description, mode: 'inherit' }, topics: parseSkillTopics(values.topics) } : {}),
+        ...(rollbackProposalId ? { rollbackProposalId } : {}),
+      });
+      await refresh();
+      rosterDecisionEditor(proposal);
+      return false;
+    }, { adjustable: true });
+}
+
+function rosterHistory() {
+  const current = studio();
+  const proposals = studioRows('rosterProposals').toReversed();
+  const display = row => row.settings?.roleTitle ?? current.agents?.find(agent => agent.id === row.agentId)?.roleTitle ?? '';
+  dialogTo('Предложения и история ролей', proposals.length ? `<ul class="legacy-list">${proposals.map(row =>
+    `<li><div class="row"><strong>${safe([rosterKinds[row.kind], display(row)].filter(Boolean).join(' · '))}</strong>${badge(rosterStages[row.status] ?? row.status)}</div>
+      ${plain(row.reason)}${row.initiator ? plain(`${row.initiator === 'owner' ? 'Владелец' : 'Директор'} · Версия ${row.version}`, 'muted') : ''}
+      ${actionFor(row.status === 'pending' ? 'Рассмотреть' : 'Подробности', 'roster-decision', row.id)}</li>`).join('')}</ul>`
+    : '<p class="muted">Здесь появятся предложения директора и владельца.</p>', undefined, undefined, { adjustable: true });
+}
+
+function rosterDecisionEditor(row) {
+  const current = studio();
+  const agent = current.agents?.find(agent => agent.id === row.agentId);
+  const limits = row.limitReasons ?? [];
+  const pending = row.status === 'pending';
+  const destinations = activeRoster(current).filter(agent => agent.id !== row.agentId && agent.systemRole !== 'coach');
+  dialogTo(rosterKinds[row.kind] ?? 'Изменение состава',
+    `<div>${badge(rosterStages[row.status] ?? row.status, pending ? 'warn' : '')}</div>` +
+    plain(row.settings?.roleTitle ?? (agent ? nameFor(agent) : '')) + plain(row.reason) +
+    (row.firstResult ? `<section class="inline-result"><h3>Первый результат</h3>${plain(row.firstResult)}</section>` : '') +
+    (row.settings ? `<p class="muted">${safe([modeNames[row.settings.mode], configText(row.settings)].filter(Boolean).join(' · '))}</p>` : '') +
+    (limits.length ? plain(limits.map(reason => staffingReasons[reason] ?? reason).join(' · '), 'error') : '') +
+    (pending ? select('Решение', 'decision', option('approve', 'Принять') + option('reject', 'Отклонить')) +
+      (row.kind === 'retire' ? select('Передать незавершённое', 'transferAgentId', recordOptions(destinations, '', 'Без передачи', nameFor)) : '') +
+      (limits.length ? checkbox('Подтверждаю превышение лимитов', 'overrideLimits') : '') : '') +
+    (!pending && row.status === 'approved' && row.kind === 'update' && agent?.rosterStatus !== 'retired' ? actionFor('Предложить откат', 'roster-rollback', row.id) : ''),
+    pending ? 'Сохранить решение' : undefined,
+    pending ? values => bridge.request('decideRosterChange', { proposalId: row.id, expectedVersion: row.version,
+      decision: values.decision, ...(values.transferAgentId ? { transferAgentId: values.transferAgentId } : {}), ...(values.overrideLimits ? { overrideLimits: true } : {}),
+    }) : undefined, { adjustable: true });
+}
+
+const libraryLayers = { reference: 'Общая справка', decision: 'Решение студии', memory: 'Рабочая память', role: 'База роли' };
+const libraryKey = row => row.key ?? 'role-notes';
+const libraryScope = (row, kind) => JSON.stringify([kind, row.layer ?? 'role', row.agentId ?? null, libraryKey(row)]);
+
+function publishLibraryEditor() {
+  const current = studio();
+  const agents = current.agents ?? [];
+  const op = operationId();
+  dialogTo('Добавить запись в библиотеку',
+    select('Слой', 'layer', ['reference', 'decision', 'memory'].map(layer => option(layer, libraryLayers[layer])).join('')) +
+    select('Роль для рабочей памяти', 'agentId', recordOptions(agents, '', 'Общая запись', nameFor)) +
+    input('Ключ записи', 'key', '', 'required maxlength="80" placeholder="Например, project-checklist"') +
+    textarea('Текст записи', 'notes', '', 'required maxlength="3000"') + input('Причина публикации', 'reason', '', 'required maxlength="500"'),
+    'Опубликовать', ({ layer, agentId, key, notes, reason }) => {
+      if (layer === 'memory' && !agentId) throw new Error('Выберите роль для рабочей памяти.');
+      if (layer !== 'memory' && agentId) throw new Error('Общая запись не привязывается к роли.');
+      return bridge.request('publishLibraryEntry', { studioId: current.id, layer, ...(agentId ? { agentId } : {}),
+        key, notes, reason, operationId: op });
+    }, { adjustable: true });
+}
+
+function libraryHistory() {
+  const current = studio();
+  const notes = studioRows('knowledge');
+  const skills = studioRows('customSkills');
+  const events = studioRows('knowledgeEvents').toReversed();
+  const records = [...notes.map(entry => ({ ...entry, kind: 'knowledge' })), ...skills.map(entry => ({ ...entry, kind: 'customSkill' }))];
+  const statuses = { publish: 'Опубликовано', rollback: 'Откат версии', revoke: 'Отозвано' };
+  const groups = Map.groupBy(records, row => libraryScope(row, row.kind));
+  const body = [...groups.values()].map(group => {
+    const ordered = group.toSorted((a, b) => (b.version ?? 1) - (a.version ?? 1));
+    const row = ordered[0];
+    const history = events.filter(event => libraryScope(event, event.kind) === libraryScope(row, row.kind));
+    const active = history.length ? ordered.find(entry => entry.id === history[0].versionId) : row;
+    const role = current.agents?.find(agent => agent.id === row.agentId);
+    return `<section class="inline-result stack compact"><h3>${safe([libraryLayers[row.layer ?? 'role'], role && nameFor(role), row.title ?? libraryKey(row)].filter(Boolean).join(' · '))}</h3>
+      <ul class="legacy-list">${ordered.map(version => `<li><div class="row"><strong>Версия ${safe(version.version ?? 1)}</strong>
+        ${active?.id === version.id ? badge('Текущая', 'good') : ''}</div>
+        ${plain(version.notes ?? version.content, 'long-text')}
+        ${actionFor(active?.id === version.id ? 'Отозвать' : 'Вернуть эту версию', 'change-knowledge', version.id)}</li>`).join('')}</ul>
+      ${history.length ? `<details><summary>Изменения</summary><ul class="legacy-list">${history.map(event =>
+        `<li>${safe(statuses[event.action] ?? event.action)} · ${safe(studioDate(event.createdAt))}
+          ${plain(event.reason, 'muted')}</li>`).join('')}</ul></details>` : ''}</section>`;
+  }).join('');
+  dialogTo('Версии и история библиотеки', body || '<p class="muted">Записей пока нет.</p>', undefined, undefined, { adjustable: true });
+}
+
+function changeKnowledgeEditor(id) {
+  const current = studio();
+  const note = studioRows('knowledge').find(row => row.id === id);
+  const record = note ?? studioRows('customSkills').find(row => row.id === id);
+  if (!record) return;
+  const kind = note ? 'knowledge' : 'customSkill';
+  const group = studioRows(note ? 'knowledge' : 'customSkills').filter(row => libraryScope(row, kind) === libraryScope(record, kind))
+    .toSorted((a, b) => (b.version ?? 1) - (a.version ?? 1));
+  const event = studioRows('knowledgeEvents').findLast(row => libraryScope(row, row.kind) === libraryScope(record, kind));
+  const active = event ? group.find(row => row.id === event.versionId) : group[0];
+  const action = active?.id === record.id ? 'revoke' : 'rollback';
+  const op = operationId();
+  const title = action === 'revoke' ? 'Отозвать запись' : 'Вернуть версию записи';
+  dialogTo(title, plain(`${record.title ?? libraryKey(record)} · Версия ${record.version ?? 1}`) +
+    textarea('Причина изменения', 'reason', '', 'required maxlength="500"'), title, ({ reason }) =>
+    bridge.request('changeKnowledge', { studioId: current.id, ...(record.agentId ? { agentId: record.agentId } : {}),
+      layer: record.layer ?? 'role', kind, key: libraryKey(record), action, reason, operationId: op,
+      expectedVersion: active ? active.version ?? 1 : 0, ...(action === 'rollback' ? { versionId: record.id } : {}),
+    }));
 }
 
 function scheduleEditor() {
@@ -645,16 +1349,23 @@ function moveWizard(direction) {
 
 function taskEditor(agentId = '') {
   const current = studio();
-  const agents = (current.agents ?? []).filter(agent => agent.systemRole !== 'coach');
+  const agents = activeRoster(current).filter(agent => agent.systemRole !== 'coach');
   const choices = [option('', 'Директор', agentId), ...agents.map(agent => option(String(agent.id), nameFor(agent), agentId))].join('');
   dialogTo('Новая задача', input('Название', 'title', '', 'required maxlength="160"') +
     textarea('Что нужно сделать', 'prompt', '', 'required') + select('Исполнитель', 'agentId', choices) +
-    '<label class="checkbox-field"><input type="checkbox" name="debt"> <span>Задача по техдолгу</span></label>',
-    'Создать и запустить', async ({ agentId: raw, debt, ...values }) => {
+    checkbox('Задача по техдолгу', 'debt') + checkbox('Запустить задачу после создания', 'startImmediately', true) +
+    (current.projectGit?.enabled ? select('Доставка результата', 'deliveryMode', option('', 'Текстовый результат или файл') + option('git', 'Изменения в Git')) +
+      select('Независимое ревью для Git', 'reviewerId', option('', 'Выбирает студия') + agents.map(agent => option(String(agent.id), nameFor(agent))).join('')) : ''),
+    'Создать задачу', async ({ agentId: raw, debt, deliveryMode, reviewerId, startImmediately, ...values }) => {
       const agent = agents.find(item => same(item.id, raw));
+      const reviewer = deliveryMode === 'git' && agents.find(item => same(item.id, reviewerId));
+      if (deliveryMode === 'git' && !agent) throw new Error('Выберите исполнителя из команды для задачи Git.');
+      if (reviewer && reviewer.id === agent?.id) throw new Error('Выберите рецензента, который не выполняет задачу.');
       const task = await bridge.request('createTask', {
         studioId: current.id, ...values, ...(agent ? { agentId: agent.id } : {}), ...(debt ? { kind: 'debt' } : {}),
+        ...(deliveryMode === 'git' ? { deliveryMode, ...(reviewer ? { reviewerId: reviewer.id } : {}) } : {}),
       });
+      if (!startImmediately) return;
       try {
         const queued = await bridge.request('startTask', { taskId: task.id });
         if (pendingDependencies(queued, new Map(tasks().map(item => [item.id, item]))).length) {
@@ -674,14 +1385,19 @@ function taskEditor(agentId = '') {
 function openTask(task) {
   const latest = tasks().find(entry => entry.id === task.id) ?? task;
   const entry = entries().find(item => item.taskId === latest.id && item.status === 'open' && ['question', 'acceptance'].includes(item.kind));
-  const canCancel = !latest.workflowManaged && !latest.legacyWorktreeReview && ['running', 'waiting', 'queued'].includes(latest.status);
   const allTasks = tasks();
   const dependencies = pendingDependencies(latest, new Map(allTasks.map(item => [item.id, item])));
   const current = studio();
+  const parallelManaged = latest.workflowManaged && current.wipLimit > 1;
+  const canCancel = !latest.legacyWorktreeReview && (parallelManaged && latest.status === 'running' ||
+    !latest.workflowManaged && ['running', 'waiting', 'queued'].includes(latest.status));
+  const canEditBacklog = !latest.sprintId && latest.kind !== 'train' && latest.status !== 'running' &&
+    ['backlog', 'ready'].includes(latest.stage);
   const canStartTraining = latest.kind === 'train' && !latest.sprintId && latest.status === 'queued' &&
     !current.manualPaused && !allTasks.some(task => task.status === 'running') && ['draft', 'idle', 'active'].includes(current.lifecycle);
   const canRun = dependencies.every(task => task.kind === 'train') &&
-    (canStartTraining || !latest.workflowManaged && ['failed', 'interrupted', 'queued'].includes(latest.status));
+    (canStartTraining || parallelManaged && latest.status === 'failed' ||
+      !latest.workflowManaged && ['failed', 'interrupted', 'queued'].includes(latest.status));
   const startLabel = latest.kind === 'train' ? 'Запустить обучение' : dependencies.length ? 'Запустить после обучения'
     : latest.status === 'queued' ? 'Запустить' : 'Запустить снова';
   const needsWorktreeReview = latest.legacyWorktreeReview === true;
@@ -692,21 +1408,49 @@ function openTask(task) {
   const previousScroll = $('#dialog-body').scrollTop;
   const epic = taskEpic(latest);
   const attempts = (state.attempts ?? []).filter(attempt => attempt.taskId === latest.id).slice(-10).reverse();
+  const git = latest.gitDelivery;
+  const importedGitCheck = latest.importedGitCheck;
+  const links = (latest.links ?? []).filter(row => row.type !== 'blocks');
+  const related = (id, label) => {
+    const record = allTasks.find(row => row.id === id);
+    return record ? `<li><span>${label}</span>${actionFor(record.title, 'task', id)}</li>` : '';
+  };
   const purposes = { task: 'Исполнение', review: 'Ревью', director: 'Решение директора', publish: 'Запись файла', 'training-exercise': 'Упражнение' };
   const previousFocus = dialog.contains(document.activeElement) ? Object.entries(document.activeElement.dataset)[0]?.[0] : '';
   dialogTo(latest.title, `<div class="row"><div class="actions">${needsWorktreeReview ? badge('Ждёт сверки рабочего дерева', 'warn') : status(latest)}
     ${latest.kind === 'debt' ? badge('Техдолг') : ''}</div><span class="muted">${safe(nameFor(taskAgent(latest)))}</span></div>` +
     (epic ? `<div class="actions">${actionFor('К эпику', 'epic-link', epic.id)}<span class="muted">${safe(epic.title)}</span></div>` : '') +
     renderTrainingDetails(latest, studio(), allTasks) +
+    prerequisiteBlock('task', latest.id) +
+    (latest.replacedBy || links.length ? `<section class="inline-result"><h3>Связанные задачи</h3><ul class="legacy-list">
+      ${latest.replacedBy ? related(latest.replacedBy, 'Заменена задачей') : ''}
+      ${links.map(row => related(row.taskId, { origin: 'Источник', debt: 'Связанный техдолг', replaces: 'Заменяет' }[row.type] ?? 'Связь')).join('')}</ul></section>` : '') +
+    (latest.carryoverHistory?.length ? `<details class="advanced"><summary>История переноса</summary><ul class="legacy-list">${latest.carryoverHistory.map(row =>
+      `<li>${safe(studioRows('sprints').find(sprint => sprint.id === row.fromSprintId)?.title ?? row.fromSprintId)} · ${safe(row.reason)}</li>`).join('')}</ul></details>` : '') +
+    (importedGitCheck ? `<section class="inline-result"><h3>Сверка импортированной истории Git</h3>
+      <p class="muted">${safe(studioDate(importedGitCheck.checkedAt))}</p>
+      <p>${importedGitCheck.targetStillMatches ? 'Версия целевой ветки совпадает.' : 'Целевая ветка изменилась или недоступна.'}</p>
+      ${importedGitCheck.missing?.length ? `<p>В репозитории недостаёт версий:</p><ul class="legacy-list">${importedGitCheck.missing.map(row =>
+        `<li>${safe(row.oid ?? row.id ?? row)}</li>`).join('')}</ul>` : '<p>Версии результата найдены.</p>'}</section>` : '') +
     block('Постановка задачи', latest.prompt) + block('Критерии', listText(latest.criteria)) + block('Ошибка', latest.error) +
     (latest.summary && latest.summary !== artifact ? block('Краткий отчёт', latest.summary) : '') +
     block('Ревью', latest.review) + block('Решение директора', latest.directorDecision) +
     block('Результат', artifact) +
+    renderDelivery({
+      checks: git?.checks ?? [],
+      worktree: studioRows('worktrees').find(row => row.id === git?.worktreeId) ?? (git?.worktreeId ? { branchRef: git.branchRef ?? git.worktreeId, revision: git.revision } : null),
+      delivery: git,
+      receipts: git?.receipt ? [git.receipt] : [],
+      evidence: studioRows('evidence').filter(item => item.taskId === latest.id && item.kind !== 'attachment'),
+    }) +
     (attempts.length ? `<details class="advanced"><summary>Попытки запуска</summary><ul class="plan-list">${attempts.map(attempt => `<li>
       <div class="row"><strong>${safe(purposes[attempt.purpose] || 'Запуск')}</strong>${status(attempt)}</div>
       ${attempt.startedAt ? `<small class="muted">${safe(new Date(attempt.startedAt).toLocaleString('ru-RU'))}</small>` : ''}
       ${attempt.error ? plain(attempt.error) : ''}</li>`).join('')}</ul></details>` : '') +
     `<div class="actions">
+      ${actionFor('Связь по задаче', 'message-task', latest.id)}
+      ${canEditBacklog ? actionFor('Изменить в бэклоге', 'backlog-edit', latest.id) : ''}
+      ${latest.kind !== 'train' && latest.status === 'queued' && trainingForTask(latest).length ? actionFor('Добавить учебный допуск', 'task-prerequisite', latest.id) : ''}
       ${latest.artifactPath ? actionFor('Открыть файл', 'artifact', latest.id, false) : ''}
       ${entry ? actionFor(entry.kind === 'acceptance' ? 'Открыть приёмку' : 'Ответить на вопрос', 'inbox', entry.id, false) : ''}
       ${canRun ? needsWorktreeReview ? actionFor('Сверить рабочее дерево', 'review-worktree', latest.id, false)
@@ -732,6 +1476,21 @@ function confirmWorktreeReview(task) {
 }
 
 function openInbox(item) {
+  if (item.kind === 'meeting') {
+    const meeting = studioRows('meetings').find(entry => entry.id === item.meetingId);
+    if (meeting) meetingDetail(meeting);
+    return;
+  }
+  if (item.kind === 'reconcile' && item.attemptId) {
+    const attempt = studioRows('attempts').find(row => row.id === item.attemptId);
+    dialogTo(item.title, plain(item.body) + (item.status === 'open'
+      ? select('Результат сверки', 'decision', option('retry', 'Повторить шаг') + option('complete', 'Подтвердить выполненный шаг') + option('discard', 'Отказаться от шага')) +
+        textarea('Что подтверждает решение', 'reason', '', 'required')
+      : item.answer ? plain(item.answer) : ''), item.status === 'open' && !attempt?.processActive ? 'Сохранить сверку' : undefined,
+      item.status === 'open' && !attempt?.processActive ? values => bridge.request('resolveReconciliation', { attemptId: item.attemptId, ...values }) : undefined,
+      { adjustable: true });
+    return;
+  }
   if (item.kind === 'plan') {
     const plan = planById(String(item.planId));
     if (plan) openPlan(plan);
@@ -739,7 +1498,11 @@ function openInbox(item) {
   }
   const question = item.kind === 'question';
   const open = item.status === 'open';
+  const op = operationId();
+  const selectedAttachments = [];
+  const choices = questionOptions(item);
   const body = `<div>${badge(question ? 'Вопрос' : 'Ошибка', question ? 'warn' : 'attention')}</div>` + plain(item.body) +
+    (question ? renderQuestionDetails(item) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
     (item.answer ? `<section class="inline-result"><h3>Ответ</h3>${plain(item.answer)}</section>` : '');
   inboxScope = open ? 'open' : 'resolved';
   if (view !== 'inbox') route('inbox');
@@ -748,11 +1511,16 @@ function openInbox(item) {
     return;
   }
   dialogTo(item.title, body + (open && question
-    ? textarea('Ваш ответ', 'answer', '', 'required')
+    ? (choices.length ? select('Выберите вариант', 'choiceId', option('', 'Свой ответ') + choices.map(choice => option(String(choice.id), choice.label ?? choice.title ?? choice.text ?? choice.id)).join('')) : '') +
+      textarea('Ваш ответ', 'answer') + attachmentFields()
     : item.taskId ? actionFor('Открыть задачу', 'task', item.taskId) : ''),
-    question ? 'Отправить ответ' : 'Отметить просмотренной', open ? ({ answer }) => bridge.request('answerInbox', {
-      inboxId: item.id, answer: question ? answer : '',
-    }) : undefined, { adjustable: question || (item.body?.length ?? 0) > 240 });
+    question ? 'Отправить ответ' : 'Отметить просмотренной', open ? ({ answer, choiceId }) => {
+      if (question && !answer && !choiceId && !selectedAttachments.length) throw new Error('Выберите вариант, напишите ответ или приложите файл.');
+      return bridge.request('answerInbox', answerPayload(item, {
+        answer, choiceId, attachmentIds: selectedAttachments.map(row => row.id), operationId: op,
+      }));
+    } : undefined, { adjustable: question || (item.body?.length ?? 0) > 240 });
+  if (open && question) dialogAttachments = selectedAttachments;
 }
 
 function openAcceptance(item, revise = false) {
@@ -761,6 +1529,8 @@ function openAcceptance(item, revise = false) {
   const send = (decision, answer) => bridge.request('answerInbox', { inboxId: item.id, decision, answer });
   dialogTo(item.title, `<div>${badge(pending ? 'Приёмка результата' : 'Решение сохранено', pending ? 'warn' : 'good')}</div>` +
     plain(item.body) + (task?.artifactPath ? actionFor('Открыть файл', 'artifact', task.id) : '') +
+    (task?.gitDelivery ? renderDelivery({ checks: task.gitDelivery.checks, delivery: task.gitDelivery, receipts: task.gitDelivery.receipt ? [task.gitDelivery.receipt] : [],
+      evidence: studioRows('evidence').filter(row => row.taskId === task.id && row.kind !== 'attachment') }) : '') +
     (item.answer ? `<section class="inline-result"><h3>Решение</h3>${plain(item.answer)}</section>` : '') +
     (pending ? revise ? textarea('Что нужно исправить?', 'answer', '', 'required')
       : actionFor('Вернуть на доработку', 'revise-result', item.id) : ''),
@@ -974,9 +1744,9 @@ function debtPolicyEditor() {
     input(label, name, policy[name], `type="number" min="${min}" max="${max}" step="1" required`)).join('');
   dialogTo('Спринты техдолга',
     `<label class="checkbox-field"><input type="checkbox" name="enabled"${policy.enabled ? ' checked' : ''}> <span>Планировать спринты техдолга</span></label>
-      <p class="muted">${debtPolicyHint}</p>${fields}`,
+      <p class="muted">${debtPolicyHint}</p>${select('Единица измерения доли', 'measure', option('taskCount', 'Число задач', policy.measure) + option('points', 'Баллы', policy.measure))}${fields}`,
     'Сохранить', values => {
-      const debtPolicy = { enabled: Boolean(values.enabled) };
+      const debtPolicy = { enabled: Boolean(values.enabled), measure: values.measure };
       for (const { name, label, min, max } of debtPolicyFields) {
         const value = Number(values[name]);
         if (!Number.isInteger(value) || value < min || value > max) {
@@ -1112,6 +1882,8 @@ function maybePromptModelPolicy() {
 function agentEditor(agent) {
   const current = studio();
   const isCoach = agent?.systemRole === 'coach';
+  const proposalRequired = agent && !agent.systemRole;
+  const op = operationId();
   const mode = agent?.mode ?? 'dynamic';
   const role = agent?.role === 'director' ? 'other' : agent?.role ?? 'other';
   const restricted = state.modelPolicy?.configured === true || studioPolicyMode(current) === 'studio';
@@ -1132,10 +1904,11 @@ function agentEditor(agent) {
     `<p id="role-guide" class="muted">${safe(roleDetails[role])}</p>` + textarea('Назначение роли', 'description', agent?.description);
   dialogTo(isCoach ? coachTitle : agent ? 'Настроить агента' : 'Новый агент', roleFields +
     (agent ? '' : input('Темы обучения на GitHub (необязательно)', 'trainingTopics', '', 'placeholder="Через запятую"')) +
+    (proposalRequired ? textarea('Причина изменения роли', 'changeReason', '', 'required') : '') +
     select('Выбор модели', 'mode', Object.entries(modeNames).map(([id, name]) => option(id, name, mode)).join('')) +
     `<div class="form-body" id="fixed-options"${mode === 'fixed' ? '' : ' hidden'}>${fixedOptions}</div>
       <p class="muted" id="dynamic-options"${mode === 'dynamic' ? '' : ' hidden'}>Директор выбирает модель и усилие для задачи из разрешённого списка студии. Если список пуст, действуют настройки директора.</p>`,
-    'Сохранить агента', ({ name, roleTitle, role, mode, description, trainingTopics, ...config }) => {
+    proposalRequired ? 'Предложить изменение' : 'Сохранить агента', async ({ name, roleTitle, role, mode, description, trainingTopics, changeReason, ...config }) => {
       let fixed = {};
       if (mode === 'fixed' && restricted) {
         const choice = fixedModelChoices(studioAllowed(studio())).find(item => modelKey(item) === config['agent-model']);
@@ -1147,6 +1920,13 @@ function agentEditor(agent) {
         fixed = modelConfig(config);
       }
       const payload = { studioId: current.id, ...(!isCoach && { name, roleTitle, role, description }), mode, ...fixed };
+      if (proposalRequired) {
+        const { studioId, ...settings } = payload;
+        const proposal = await bridge.request('proposeRosterChange', { studioId, agentId: agent.id, kind: 'update', reason: changeReason, agent: settings, operationId: op });
+        await refresh();
+        rosterDecisionEditor(proposal);
+        return false;
+      }
       return bridge.request(agent ? 'updateAgent' : 'addAgent', agent ? { ...payload, agentId: agent.id }
         : { ...payload, trainingTopics: parseSkillTopics(trainingTopics) });
     });
@@ -1160,13 +1940,18 @@ async function importPreview() {
     dialogTo('Предварительный импорт', '<p role="status">Проверяем структуру папки…</p>');
     setDialogBusy(true);
     const result = await bridge.request('previewImport', { root });
+    legacyPreviews.set(root, result);
     const fields = { tasks: 'Задачи', archivedTasks: 'Архивные задачи', roles: 'Роли', openQuestions: 'Открытые вопросы', worktrees: 'Рабочие деревья', artifacts: 'Артефакты' };
     const items = values => `<ul>${values.map(value => `<li>${safe(value)}</li>`).join('')}</ul>`;
     const size = result.artifactBytes == null ? '' : new Intl.NumberFormat('ru', { style: 'unit', unit: 'byte' }).format(result.artifactBytes);
     dialogTo('Предварительный импорт', `<div>${badge(result.valid ? 'Структура распознана' : 'Структура требует проверки', result.valid ? 'good' : 'warn')}</div>` +
       plain(result.root || root) + `<dl class="studio-meta">${Object.entries(fields).filter(([key]) => result.counts?.[key] != null)
         .map(([key, name]) => `<dt>${name}</dt><dd>${safe(result.counts[key])}</dd>`).join('')}${size ? `<dt>Объём артефактов</dt><dd>${safe(size)}</dd>` : ''}</dl>` +
+      (result.ownerLanguage ? `<p>Язык отчётов: <strong>${safe(result.ownerLanguage)}</strong>
+        ${result.ownerLanguageSource === 'fallback' ? '· запасной вариант' : '· из настроек старой студии'}</p>` : '') +
       (result.projectCandidates?.length ? `<section><h3>Папки проектов</h3>${items(result.projectCandidates)}</section>` : '') +
+      (result.unresolvedReferences?.length ? `<section><h3>Ссылки, которые требуют проверки</h3>${items(result.unresolvedReferences.map(row =>
+        `${row.sourceId} → ${row.targetId} (${row.kind})`))}</section>` : '') +
       (result.warnings?.length ? `<section><h3>Замечания</h3>${items(result.warnings)}</section>` : '') +
       (result.valid ? actionFor('Импортировать в отдельную студию', 'import-legacy', root, false) : ''));
   } catch (error) {
@@ -1262,17 +2047,19 @@ async function openArtifact(payload) {
 
 function importEditor(source) {
   const legacy = Boolean(source);
+  const preview = legacyPreviews.get(source);
   dialogTo(legacy ? 'Импорт старой студии' : 'Импорт файла Hearth',
     (legacy ? `<div class="muted">Источник${plain(source)}</div>` : '<p class="muted">После выбора рабочей папки откроется окно выбора файла экспорта.</p>') +
     input('Название новой студии (необязательно)', 'name', '', 'maxlength="120"') +
     pathField('', { label: 'Рабочая папка новой студии' }) +
+    (legacy ? languageField('Язык отчётов', 'language', preview?.ownerLanguage ?? 'Русский') : '') +
     (legacy ? textarea('Артефакты для копирования (необязательно)', 'artifactPaths', '', 'placeholder="studio/artifacts/имя-файла.md"') +
       '<p class="muted">Укажите по одному относительному пути на строку.</p>' : ''),
-    'Импортировать', async ({ root, name, artifactPaths = '' }) => {
+    'Импортировать', async ({ root, name, language, artifactPaths = '' }) => {
       if (!root) throw new Error('Выберите рабочую папку для новой студии.');
       const paths = [...new Set(artifactPaths.split('\n').map(path => path.trim()).filter(Boolean))];
       const imported = await bridge.request(legacy ? 'importLegacy' : 'importBundle', {
-        root, ...(name && { name }), ...(legacy && { source, artifactPaths: paths }),
+        root, ...(name && { name }), ...(legacy && { source, artifactPaths: paths, language }),
       });
       const id = imported?.studio?.id ?? imported?.id;
       if (id) {
@@ -1295,12 +2082,16 @@ function exportEditor(mode) {
   const files = paths.length ? `<fieldset class="stack compact export-files"><legend>Файлы для экспорта</legend>
     ${paths.map((path, index) => `<label class="checkbox-field"><input type="checkbox" name="artifact-${index}"><span>${safe(path)}</span></label>`).join('')}
   </fieldset>` : '';
+  const evidence = studioRows('evidence');
+  const evidenceFiles = checkList('Сохранённые доказательства и вложения', evidence, 'evidence-export', [],
+    row => row.name ?? row.filename ?? row.sourcePath ?? row.id);
   dialogTo(snapshot ? 'Экспорт снимка' : 'Экспорт шаблона',
-    snapshot ? '<p>Снимок включает состав студии, планы, задачи и решения.</p>' + files
+    snapshot ? '<p>Снимок включает состав студии, планы, задачи и решения. Отметьте файлы, которые нужно включить.</p>' + files + evidenceFiles
       : '<p>Шаблон сохраняет настройки и роли студии для нового проекта.</p>',
     'Сохранить файл', async values => {
       const artifactPaths = snapshot ? paths.filter((_, index) => values[`artifact-${index}`]) : [];
-      const result = await bridge.request('exportStudio', { studioId: current.id, mode, includeArtifacts: artifactPaths.length > 0, artifactPaths });
+      const evidenceIds = snapshot ? checkedIds(evidence, values, 'evidence-export') : [];
+      const result = await bridge.request('exportStudio', { studioId: current.id, mode, includeArtifacts: artifactPaths.length > 0, artifactPaths, evidenceIds });
       if (result) notice('Файл экспорта сохранён.');
     });
 }
@@ -1320,7 +2111,97 @@ const commands = {
   agent: () => agentEditor(),
   import: importPreview,
   'import-bundle': () => importEditor(),
+  dispatch: dispatchEditor,
+  'grooming-settings': groomingEditor,
+  'request-grooming': () => void workCommand('requestGrooming', { studioId: studio().id }, 'Груминг начат.'),
+  'next-sprint': () => void workCommand('startNextSprint', { studioId: studio().id }, 'Директор готовит план следующего спринта.'),
+  'project-git': projectGitEditor,
+  cleanup: cleanupEditor,
+  usage: usageDialog,
+  'usage-tariff': usageTariffEditor,
+  diagnosis: diagnosisDialog,
+  'restart-app': restartAppEditor,
+  notifications: notificationsEditor,
+  messages: conversationsDialog,
+  'backlog-task': () => backlogEditor(),
+  phase: () => phaseEditor(),
+  meeting: meetingEditor,
+  'roster-hire': () => rosterProposalEditor(),
+  'roster-history': rosterHistory,
+  staffing: staffingEditor,
+  'publish-library': publishLibraryEditor,
+  'library-history': libraryHistory,
 };
+
+function legacyAction(data, target) {
+  const withRow = (rows, id, handle) => {
+    const row = rows.find(value => same(value.id, id));
+    if (row) handle(row);
+  };
+  const showMeeting = (id, handle) => withRow(studioRows('meetings'), id, handle);
+  const showRoster = (id, handle) => withRow(studioRows('rosterProposals'), id, handle);
+  if (data.saveDiagnostics !== undefined) {
+    target.disabled = true;
+    void bridge.request('saveDiagnostics', { studioId: studio().id })
+      .then(saved => { if (saved) { dialog.close(); notice('Диагностика сохранена.'); } })
+      .catch(error => dialogError(error.message || 'Не удалось сохранить диагностику.'))
+      .finally(() => { target.disabled = false; });
+  } else if (data.addProjectCheck !== undefined) {
+    const rows = $('[data-project-checks]');
+    rows.insertAdjacentHTML('beforeend', projectCheckFields());
+    rows.lastElementChild.querySelector('input')?.focus();
+  } else if (data.removeProjectCheck !== undefined) {
+    target.closest('[data-project-check]')?.remove();
+    $('[data-add-project-check]')?.focus();
+  } else if (data.pickAttachment !== undefined) void addAttachment(target);
+  else if (data.removeAttachment !== undefined) {
+    dialogAttachments?.splice(Number(data.removeAttachment), 1);
+    renderAttachmentFields();
+  } else if (data.evidence !== undefined || data.saveEvidence !== undefined) {
+    const evidenceId = data.evidence ?? data.saveEvidence;
+    if (studioRows('evidence').some(row => same(row.id, evidenceId))) void openLegacyFile(data.saveEvidence !== undefined ? 'saveEvidence' : 'openEvidence', evidenceId);
+  } else if (data.conversation !== undefined) withRow(studioRows('conversations'), data.conversation, conversation => messageEditor({ conversation }));
+  else if (data.message !== undefined) messageEditor({ agentId: data.message });
+  else if (data.messageNote !== undefined) messageEditor({ kind: 'note' });
+  else if (data.messagePriority !== undefined) void workCommand('applyConversationProposal', { studioId: studio().id, messageId: data.messagePriority }, 'Приоритет изменён.');
+  else if (data.messageTask !== undefined) withRow(tasks(), data.messageTask, task => messageEditor({ taskId: task.id, agentId: task.agentId }));
+  else if (data.agentHistory !== undefined) agentHistory(data.agentHistory);
+  else if (data.backlogEdit !== undefined) withRow(tasks(), data.backlogEdit, backlogEditor);
+  else if (data.backlogReplace !== undefined) withRow(tasks(), data.backlogReplace, replaceBacklogEditor);
+  else if (data.epicPriority !== undefined) withRow(studioRows('epics'), data.epicPriority, epic =>
+    dialogTo('Приоритет эпика', input('Приоритет от 0 до 100', 'priority', epic.priority ?? 0, 'type="number" min="0" max="100" required'),
+      'Сохранить', values => bridge.request('setEpicPriority', { studioId: studio().id, epicId: epic.id, priority: Number(values.priority) })));
+  else if (data.closeSprint !== undefined) withRow(studioRows('sprints'), data.closeSprint, closeSprintEditor);
+  else if (data.phaseEdit !== undefined) withRow(studioRows('phases'), data.phaseEdit, phaseEditor);
+  else if (data.phaseTransition !== undefined) withRow(studioRows('phases'), data.phaseTransition, phaseTransitionEditor);
+  else if (data.resolveGrooming !== undefined) void workCommand('resolveGrooming', { studioId: studio().id, groomingId: data.resolveGrooming }, 'Груминг завершён.');
+  else if (data.meetingDetail !== undefined) showMeeting(data.meetingDetail, meetingDetail);
+  else if (data.meetingResume !== undefined) {
+    dialog.close();
+    void workCommand('resumeMeeting', { meetingId: data.meetingResume }, 'Встреча возобновлена.');
+  } else if (data.meetingResolve !== undefined) showMeeting(data.meetingResolve, resolveMeetingEditor);
+  else if (data.meetingReplace !== undefined) showMeeting(data.meetingReplace, replaceParticipantEditor);
+  else if (data.waivePrerequisite !== undefined) withRow(studioRows('prerequisites'), data.waivePrerequisite, waivePrerequisiteEditor);
+  else if (data.taskPrerequisite !== undefined) withRow(tasks(), data.taskPrerequisite, taskPrerequisiteEditor);
+  else if (data.rosterAgent !== undefined) withRow(studio().agents, data.rosterAgent, agent =>
+    rosterProposalEditor({ agent, kind: agent.rosterStatus === 'retired' ? 'return' : 'retire' }));
+  else if (data.rosterDecision !== undefined) showRoster(data.rosterDecision, rosterDecisionEditor);
+  else if (data.rosterRollback !== undefined) showRoster(data.rosterRollback, row =>
+    withRow(studio().agents, String(row.agentId), agent => rosterProposalEditor({ agent, kind: 'rollback', rollbackProposalId: row.id })));
+  else if (data.changeKnowledge !== undefined) changeKnowledgeEditor(data.changeKnowledge);
+  else return false;
+  return true;
+}
+
+async function openLegacyFile(command, evidenceId) {
+  try {
+    await bridge.request(command, { studioId: studio().id, evidenceId });
+  } catch (error) {
+    const message = error.message || 'Не удалось открыть файл.';
+    if (dialog.open) dialogError(message);
+    else notice(message, true);
+  }
+}
 
 document.addEventListener('click', event => {
   const target = event.target.closest('button');
@@ -1328,6 +2209,7 @@ document.addEventListener('click', event => {
   const data = target.dataset;
   if (data.close !== undefined) dialog.close();
   else if (!bridge || dialogBusy) return;
+  else if (legacyAction(data, target)) return;
   else if (data.reload !== undefined) void refresh();
   else if (data.folder !== undefined) void pickFolder(form.elements[data.folder || 'root']);
   else if (data.policyAdd !== undefined) {
@@ -1355,7 +2237,10 @@ document.addEventListener('click', event => {
   } else if (data.open) commands[data.open]?.();
   else if (data.assessDebt !== undefined) void assessDebt();
   else if (data.initialize !== undefined) void workCommand('initializeStudio', { studioId: studio().id });
-  else if (data.runAction) void workCommand('setStudioRunning', { studioId: studio().id, action: data.runAction });
+  else if (data.runAction) {
+    if (dialog.open) dialog.close();
+    void workCommand('setStudioRunning', { studioId: studio().id, action: data.runAction });
+  }
   else if (data.editPlanTeam !== undefined) {
     const plan = planById(data.editPlanTeam);
     if (plan) planTeamEditor(plan);
@@ -1434,6 +2319,11 @@ form.addEventListener('submit', async event => {
 });
 
 form.addEventListener('change', ({ target }) => {
+  if (target.name === 'chooseParticipants') {
+    for (const region of form.querySelectorAll('[data-manual-participants], [data-manual-prerequisites]')) {
+      region.hidden = target.checked;
+    }
+  }
   if (target.name === 'allowedMode') syncPolicyEditor();
   if (target.name.startsWith('policy-runtime-')) {
     const row = target.closest('[data-policy-row]');

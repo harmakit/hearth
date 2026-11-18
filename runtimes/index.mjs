@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path';
 import { capture } from './process.mjs';
 import { inspectCodex, runCodex } from './codex.mjs';
 import { inspectClaude, runClaude } from './claude.mjs';
+import { executionScope, scopedCommand } from './scope.mjs';
 
 const providers = {
   codex: {
@@ -62,7 +63,9 @@ function decodeSession(sessionId, runtime, cwd) {
   throw new Error('Сессия относится к другому подключению или рабочей папке.');
 }
 
-export function createRuntimes({ binaries = {}, env: sourceEnv = process.env, timeoutMs = 240_000, inspectTimeoutMs = 8000 } = {}) {
+export function createRuntimes({
+  binaries = {}, env: sourceEnv = process.env, timeoutMs = 240_000, inspectTimeoutMs = 8000, isolateCommand = scopedCommand,
+} = {}) {
   const cwd = homedir();
 
   async function locate(runtime, env) {
@@ -104,14 +107,18 @@ export function createRuntimes({ binaries = {}, env: sourceEnv = process.env, ti
     }
   }
 
-  async function run({ runtime, projectRoot, prompt, model, effort, signal, onEvent, sessionId }) {
+  async function run({ runtime, projectRoot, scope: requestedScope, prompt, model, effort, signal, onEvent, sessionId }) {
     const provider = providerFor(runtime);
     const emit = (type, fields = {}) => onEvent?.({ runtime, type, ...fields });
     try {
       signal?.throwIfAborted();
       if (typeof projectRoot !== 'string' || !isAbsolute(projectRoot)) throw new Error('Нужен абсолютный путь к рабочей папке.');
-      const root = await realpath(projectRoot);
-      if (!(await stat(root)).isDirectory()) throw new Error('Рабочий путь должен вести к папке.');
+      const source = await realpath(projectRoot);
+      if (!(await stat(source)).isDirectory()) throw new Error('Рабочий путь должен вести к папке.');
+      const scope = executionScope(requestedScope === undefined ? { root: source, access: 'read' } : requestedScope, {
+        projectRoot: source, requireScratch: false,
+      });
+      const { root } = scope;
       if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('Запрос для подключения пуст.');
       if (model != null && (typeof model !== 'string' || !/^[a-z\d][a-z\d._:/-]*$/i.test(model))) {
         throw new Error(`Некорректная модель ${provider.label}.`);
@@ -123,11 +130,12 @@ export function createRuntimes({ binaries = {}, env: sourceEnv = process.env, ti
       if (runtime === 'codex' && nativeId) {
         throw new Error('Hearth не возобновляет сохранённые сессии Codex. Продолжите задачу из истории Hearth.');
       }
+      if (scope.scratch && nativeId) throw new Error('Рабочая копия запускается из истории Hearth без сохранённой сессии провайдера.');
       const env = electronEnvironment(sourceEnv, runtime);
       const binary = await locate(runtime, env);
       await checkVersion(binary, provider, { cwd, env, timeoutMs: inspectTimeoutMs, signal });
       signal?.throwIfAborted();
-      const result = await provider.run(binary, { cwd: root, env, timeoutMs, prompt, model, effort, nativeId, signal, emit });
+      const result = await provider.run(binary, { cwd: root, env, timeoutMs, prompt, model, effort, nativeId, signal, emit, scope, isolateCommand });
       const text = typeof result.text === 'string' ? result.text.trim() : '';
       if (!text) throw new Error(`${provider.label} вернул пустой ответ.`);
       emit('completed');

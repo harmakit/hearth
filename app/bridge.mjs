@@ -4,7 +4,12 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "assessDebtPolicy", "addAgent", "updateAgent", "createTask",
   "startTask", "cancelTask", "answerInbox",
-  "initializeStudio", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
+  "initializeStudio", "startNextSprint", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
+  "configureProject", "previewCleanup", "applyCleanup", "reviseBacklog", "closeSprint", "createPhase", "updatePhase",
+  "proposePhaseTransition", "decidePhaseTransition", "updateGrooming", "requestGrooming", "resolveGrooming",
+  "openMeeting", "resumeMeeting", "resolveMeeting", "replaceParticipant", "addPrerequisite", "waivePrerequisite",
+  "proposeRosterChange", "decideRosterChange", "retirementPlan", "changeKnowledge", "publishLibraryEntry",
+  "postStudioMessage", "applyConversationProposal", "studioUsage", "updateUsageTariff", "setEpicPriority", "diagnoseStudio", "updateNotifications", "resolveReconciliation",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 
@@ -59,10 +64,25 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, openProject, findSkills, transfer, protectedRoots = [] }) {
+export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, openProject,
+  openEvidence, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, protectedRoots = [] }) {
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
+    if (command === "openEvidence" || command === "saveEvidence") {
+      const record = service.findEvidence(payload);
+      return (command === "openEvidence" ? openEvidence : saveEvidence)(record);
+    }
+    if (command === "pickAttachment") {
+      const studio = service.snapshot().studios.find(({ id }) => id === payload.studioId);
+      if (!studio) throw new Error("Студия не найдена.");
+      const task = payload.taskId && service.snapshot().tasks.find(({ id }) => id === payload.taskId);
+      if (payload.taskId && task?.studioId !== studio.id) throw new Error("Задача не найдена в студии.");
+      const record = await pickAttachment({ studioId: studio.id, taskId: task?.id ?? studio.id });
+      return record && service.recordEvidence(record);
+    }
+    if (command === "restartApp") return restart();
+    if (command === "saveDiagnostics") return saveDiagnostics(service.diagnoseStudio(payload));
     if (command === "inspect") {
       if (!runtimeIds.has(payload.runtime)) throw new Error("Неизвестное подключение.");
       return inspect({ runtime: payload.runtime });

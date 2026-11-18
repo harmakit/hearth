@@ -6,19 +6,26 @@ export async function inspectClaude(binary, options) {
   return typeof loggedIn === 'boolean' ? { authenticated: loggedIn } : {};
 }
 
-export function runClaude(binary, { model, effort, prompt, nativeId, emit, signal, ...options }) {
+export function runClaude(binary, { model, effort, prompt, nativeId, emit, signal, scope, isolateCommand, ...options }) {
+  const scoped = Boolean(scope.scratch);
+  const tools = !scoped ? '' : scope.access === 'worktree-write' ? 'Read,Glob,Grep,Edit,Write' : 'Read,Glob,Grep';
   const args = [
     '--print', '--input-format', 'text', '--output-format', 'stream-json', '--verbose',
-    '--safe-mode', '--restricted', '--tools', '', '--disable-slash-commands',
-    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'dontAsk',
+    '--safe-mode', '--restricted', '--tools', tools, '--disable-slash-commands',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '--permission-mode', scope.access === 'worktree-write' ? 'acceptEdits' : 'dontAsk',
     '--settings', '{"disableAllHooks":true}',
   ];
+  if (scoped) args.push('--no-session-persistence', '--permission-prompts', 'none', '--no-chrome');
   if (model) args.push(`--model=${model}`);
   if (effort) args.push(`--effort=${effort}`);
   if (nativeId) args.push(`--resume=${nativeId}`);
 
   return new Promise((resolve, reject) => {
-    const child = launch(binary, args, options);
+    const invocation = scoped ? isolateCommand(binary.command, [...(binary.args ?? []), ...args], {
+      ...scope, network: true, env: { ...options.env, DISABLE_AUTOUPDATER: '1' },
+    }) : { command: binary.command, args: [...(binary.args ?? []), ...args], env: options.env };
+    const child = launch({ command: invocation.command }, invocation.args, { ...options, env: invocation.env });
     let result;
     let started = false;
     let settled = false;
@@ -29,7 +36,7 @@ export function runClaude(binary, { model, effort, prompt, nativeId, emit, signa
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       reader.close();
-      stop(child, { graceful: !error }).then(() => {
+      stop(child, { graceful: !error, cleanupGroup: scoped }).then(() => {
         if (error) reject(error);
         else resolve(value);
       }, reject);
@@ -52,6 +59,13 @@ export function runClaude(binary, { model, effort, prompt, nativeId, emit, signa
     child.on('error', finish);
     child.stdin.on('error', () => {});
     child.on('close', code => {
+      const measured = claudeUsage(result?.usage);
+      try {
+        if (measured) emit('usage', { usage: measured });
+      } catch (error) {
+        finish(error);
+        return;
+      }
       if (!result) {
         finish(new Error(`Claude Code завершился без результата (код ${code ?? 'сигнал'}). Проверьте установку и вход в Claude Code.`));
       } else if (code !== 0 || result.is_error || result.subtype !== 'success') {
@@ -59,11 +73,28 @@ export function runClaude(binary, { model, effort, prompt, nativeId, emit, signa
       } else if (nativeId && nativeId !== result.session_id) {
         finish(new Error('Claude Code вернул другую сессию.'));
       } else {
-        finish(null, { text: result.result, nativeId: result.session_id });
+        finish(null, { text: result.result, nativeId: scoped ? undefined : result.session_id });
       }
     });
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     else child.stdin.end(prompt);
   });
+}
+
+function claudeUsage(usage) {
+  const validCount = value => Number.isSafeInteger(value) && value >= 0;
+  const input = usage?.input_tokens;
+  const output = usage?.output_tokens;
+  const reads = usage?.cache_read_input_tokens;
+  const writes = usage?.cache_creation_input_tokens;
+  const tokens = {};
+  if (validCount(input)) {
+    const total = input + (validCount(reads) ? reads : 0) + (validCount(writes) ? writes : 0);
+    if (validCount(total)) tokens.inputTokens = total;
+  }
+  if (validCount(output)) tokens.outputTokens = output;
+  if (validCount(reads)) tokens.cacheReadTokens = reads;
+  if (validCount(writes)) tokens.cacheWriteTokens = writes;
+  return Object.keys(tokens).length ? tokens : undefined;
 }

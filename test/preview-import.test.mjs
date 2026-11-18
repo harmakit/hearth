@@ -51,12 +51,34 @@ test('summarizes the legacy layout without copying content or creating files', a
     valid: true,
     counts: { tasks: 3, archivedTasks: 1, roles: 1, openQuestions: 1, worktrees: 1, artifacts: 2 },
     artifactBytes: 8,
+    ownerLanguage: 'Русский',
+    ownerLanguageSource: 'fallback',
+    unresolvedReferences: [],
     projectCandidates: [join(await realpath(root), 'game')],
     worktreeStatus: { existing: 1, missing: 0, external: 0, unverified: 0 },
     warnings: [],
   });
   assert.deepEqual((await readdir(root, { recursive: true })).sort(), filesBefore.sort());
   assert.equal(await readFile(join(root, 'studio/board.json'), 'utf8'), boardBefore);
+});
+
+test('reports the configured owner language and unresolved typed links without exposing unrelated config', async t => {
+  const { root, put } = await fixture(t);
+  await put('studio/config.json', { owner_language: 'English', project_language: 'Français', apiKey: 'private-key' });
+  await put('studio/board.json', { tasks: [{ id: 'T-1', assignee: 'missing', dependencies: [{ type: 'task', id: 'T-2' },
+    { type: 'story', id: 'S-9' }], outputs: ['studio/artifacts/absent.mp4'] }] });
+  const report = await preview(root);
+  assert.equal(report.ownerLanguage, 'English');
+  assert.equal(report.ownerLanguageSource, 'config');
+  assert.deepEqual(report.unresolvedReferences, [
+    { sourceId: 'T-1', kind: 'agent', targetId: 'missing' },
+    { sourceId: 'T-1', kind: 'task', targetId: 'T-2' },
+    { sourceId: 'T-1', kind: 'story', targetId: 'S-9' },
+    { sourceId: 'T-1', kind: 'artifact', targetId: 'studio/artifacts/absent.mp4' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(report), /private-key|Français/);
+  await put('studio/config.json', { owner_language: '/private/directory' });
+  assert.equal((await preview(root)).ownerLanguage, 'Русский');
 });
 
 test('accepts a schema-1 board and identifies unrecognized source folders', async t => {

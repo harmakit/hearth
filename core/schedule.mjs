@@ -27,3 +27,27 @@ export function withinSchedule({ enabled, days, start, end }, date) {
   if (from < to) return days.includes(day) && time >= from && time < to;
   return (days.includes(day) && time >= from) || (days.includes((day + 6) % 7) && time < to);
 }
+
+export function nextScheduleWindow(schedule, date = new Date()) {
+  if (!schedule.enabled) return null;
+  if (withinSchedule(schedule, date)) return new Date(date);
+  const { days, start } = schedule;
+  const opening = minutes(start);
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset);
+    const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset + 1);
+    if (endOfDay - midnight === 24 * 60 * 60_000) {
+      if (!days.includes(midnight.getDay())) continue;
+      const nominal = new Date(midnight);
+      nominal.setHours(Math.floor(opening / 60), opening % 60);
+      if (nominal > date) return nominal;
+      continue;
+    }
+    // Daylight-saving changes can move or repeat a local opening time.
+    for (let time = midnight.getTime(); time < endOfDay.getTime(); time += 60_000) {
+      const candidate = new Date(time);
+      if (candidate > date && withinSchedule(schedule, candidate)) return candidate;
+    }
+  }
+  return null;
+}

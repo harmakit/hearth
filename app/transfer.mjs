@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { makeStudioBundle, prepareBundleImport, prepareLegacyImport } from "../migration/transfer.mjs";
+import { makeStudioBundle, maxEvidenceBytes, prepareBundleImport, prepareLegacyImport } from "../migration/transfer.mjs";
 
 const bundleLimit = 32 * 1024 * 1024;
 const journalEntry = /^([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})\.(json|pending)$/;
@@ -32,12 +32,15 @@ async function removeJournal(path) {
   });
 }
 
-export function createTransferController({ service, artifacts, pickBundle, saveBundle, journalDir }) {
+export function createTransferController({ service, artifacts, evidenceStore, pickBundle, saveBundle, journalDir }) {
   async function clearImport(path, journal) {
     const committed = service.wasStudioDeleted?.(journal.studioId) ||
       service.snapshot().studios.some(studio => studio.id === journal.studioId);
     if (!committed) {
-      const results = await Promise.allSettled(journal.artifacts.map(artifact => artifacts.discard(operationFor(journal, artifact))));
+      const results = await Promise.allSettled([
+        ...journal.artifacts.map(artifact => artifacts.discard(operationFor(journal, artifact))),
+        ...(journal.evidence ?? []).map(async entry => evidenceStore.discardImportedEvidence(entry)),
+      ]);
       const failure = results.find(result => result.status === "rejected");
       if (failure) throw failure.reason;
     }
@@ -59,6 +62,11 @@ export function createTransferController({ service, artifacts, pickBundle, saveB
           typeof artifact.digest !== "string" || !/^[\da-f]{64}$/.test(artifact.digest))) {
         throw new Error("Журнал импорта студии повреждён.");
       }
+      if (journal.evidence !== undefined && (!Array.isArray(journal.evidence) || journal.evidence.some(entry =>
+        entry?.studioId !== journal.studioId || typeof entry.id !== "string" || typeof entry.sourcePath !== "string" ||
+        !Number.isSafeInteger(entry.size) || entry.size < 0 || typeof entry.digest !== "string" || !/^[\da-f]{64}$/.test(entry.digest)))) {
+        throw new Error("Журнал импорта доказательств повреждён.");
+      }
       await clearImport(path, journal);
     }));
     return results.filter(result => result.status === "rejected").map(result => result.reason);
@@ -66,14 +74,20 @@ export function createTransferController({ service, artifacts, pickBundle, saveB
 
   async function apply(payload) {
     const files = payload.artifacts ?? [];
-    const result = studio => ({ ...studio, warnings: payload.warnings ?? [], artifactCount: files.length });
-    if (!files.length) return result(await service.importStudio(payload));
+    const evidence = payload.evidence ?? [];
+    const result = studio => ({ ...studio, warnings: payload.warnings ?? [], artifactCount: files.length,
+      ...(evidence.length && { evidenceCount: evidence.length }) });
+    if (!files.length && !evidence.length) return result(await service.importStudio(payload));
+    if (evidence.length && (!evidenceStore?.importEvidence || !evidenceStore?.discardImportedEvidence)) {
+      throw new Error("Хранилище доказательств недоступно для импорта.");
+    }
 
     const journal = {
       importId: randomUUID(),
       studioId: payload.studio.id,
       root: payload.studio.root,
       artifacts: files.map(({ path, content }) => ({ path, digest: createHash("sha256").update(content).digest("hex") })),
+      evidence: evidence.map(({ id, studioId, sourcePath, size, digest }) => ({ id, studioId, sourcePath, size, digest })),
     };
     await mkdir(journalDir, { recursive: true, mode: 0o700 });
     const path = join(journalDir, journal.importId + ".json");
@@ -88,7 +102,11 @@ export function createTransferController({ service, artifacts, pickBundle, saveB
     let studio;
     try {
       for (const artifact of files) await artifacts.write(operationFor(journal, artifact));
-      studio = await service.importStudio(payload);
+      const restoredEvidence = [];
+      for (const { content, ...record } of evidence) {
+        restoredEvidence.push(await evidenceStore.importEvidence(record, Buffer.from(content, "base64")));
+      }
+      studio = await service.importStudio({ ...payload, evidence: restoredEvidence });
     } catch (error) {
       await clearImport(path, journal).catch(() => {});
       throw error;
@@ -97,7 +115,7 @@ export function createTransferController({ service, artifacts, pickBundle, saveB
     return result(studio);
   }
 
-  async function exportStudio(snapshot, { studioId, mode, includeArtifacts = false, artifactPaths }) {
+  async function exportStudio(snapshot, { studioId, mode, includeArtifacts = false, artifactPaths, evidenceIds }) {
     const studio = snapshot.studios.find(entry => entry.id === studioId);
     if (!studio) throw new Error("Студия не найдена.");
     const selectedFiles = [];
@@ -116,13 +134,28 @@ export function createTransferController({ service, artifacts, pickBundle, saveB
         selectedFiles.push({ path, content });
       }
     }
-    const bundle = makeStudioBundle(snapshot, { studioId, mode, artifacts: selectedFiles });
+    const evidenceFiles = [];
+    if (mode === "snapshot" && evidenceIds !== undefined) {
+      if (!Array.isArray(evidenceIds) || evidenceIds.length > 50 || new Set(evidenceIds).size !== evidenceIds.length) {
+        throw new Error("Выберите до 50 отдельных доказательств.");
+      }
+      const available = new Map((snapshot.evidence ?? []).filter(record => record.studioId === studioId).map(record => [record.id, record]));
+      let total = 0;
+      for (const id of evidenceIds) {
+        const record = available.get(id);
+        if (!record || !evidenceStore?.readEvidence) throw new Error("Выбранное доказательство недоступно для экспорта.");
+        total += record.size;
+        if (total > maxEvidenceBytes) throw new Error("Превышен допустимый размер выбранных доказательств.");
+        evidenceFiles.push({ id, bytes: await evidenceStore.readEvidence(record) });
+      }
+    }
+    const bundle = makeStudioBundle(snapshot, { studioId, mode, artifacts: selectedFiles, evidenceFiles });
     const encoded = JSON.stringify(bundle, null, 2);
     if (Buffer.byteLength(encoded) > bundleLimit) throw new Error("Размер снимка превышает 32 МБ.");
     const path = await saveBundle(studio.name, mode);
     if (!path) return null;
     await writeFile(path, encoded, { flag: "wx", mode: 0o600 });
-    return { path, mode, artifactCount: selectedFiles.length };
+    return { path, mode, artifactCount: selectedFiles.length, ...(evidenceFiles.length && { evidenceCount: evidenceFiles.length }) };
   }
 
   async function importBundle(input) {

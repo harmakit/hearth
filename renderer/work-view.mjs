@@ -1,8 +1,9 @@
 import { roleNames } from './workshop.mjs';
 import { coachTitle, renderBoardTraining } from './coach-view.mjs';
+import { renderEvidence, renderRetrospective } from './legacy-view.mjs';
 
 const tabs = {
-  board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи', artifacts: 'Артефакты',
+  board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи', artifacts: 'Артефакты', planning: 'Планирование',
 };
 const stages = {
   backlog: 'Бэклог', ready: 'Готова к работе', in_progress: 'В работе', review: 'Ревью',
@@ -21,8 +22,9 @@ const planStatuses = {
 };
 const sprintStatuses = { active: 'В работе', completed: 'Завершён' };
 const meetingKinds = {
-  planning: 'Планирование', retrospective: 'Ретроспектива', review: 'Обзор результатов',
+  planning: 'Планирование', retrospective: 'Ретроспектива', review: 'Обзор результатов', grooming: 'Груминг', topic: 'Обсуждение',
 };
+const meetingStages = { positions: 'Позиции участников', facilitation: 'Обсуждение', objections: 'Возражения', owner_review: 'Ждёт решения владельца', resolved: 'Решение сохранено', held: 'Приостановлена' };
 const meetingDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' });
 const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const safe = value => String(value ?? '').replace(/[&<>"']/g, character => entities[character]);
@@ -31,6 +33,7 @@ const stageOf = task => lookup(stages, task.stage) ? task.stage : (lookup(legacy
 const listed = value => Array.isArray(value) ? value : (value ? [value] : []);
 const nameOf = (record, fallback) => record.title || record.name || fallback;
 const groupByField = (records, field) => Map.groupBy(records, record => record[field]);
+const action = (label, command, id = '') => `<button type="button" class="action secondary" data-${command}="${safe(id)}">${safe(label)}</button>`;
 
 function empty(title, message) {
   return `<article class="work-empty"><h2>${title}</h2><p>${message}</p></article>`;
@@ -74,8 +77,9 @@ function linkedTasks(tasks, byTask) {
 }
 
 function board(tasks, studio, byTask) {
+  const replaced = tasks.filter(task => task.stage === 'replaced');
   if (!tasks.length) return empty('На доске пока пусто', 'Задачи появятся здесь после согласования плана или создания вручную.');
-  const byStage = Map.groupBy(tasks, stageOf);
+  const byStage = Map.groupBy(tasks.filter(task => task.stage !== 'replaced'), stageOf);
   const agents = new Map((studio.agents ?? []).map(agent => [agent.id, agent]));
   return `<div class="work-board" role="region" aria-label="Доска задач" tabindex="0">
     ${Object.entries(stages).map(([stage, label]) => {
@@ -90,13 +94,15 @@ function board(tasks, studio, byTask) {
           return `<li class="work-task"${['train', 'debt'].includes(task.kind) ? ` data-task-kind="${task.kind}"` : ''}>
             ${taskLink(task, false)}
             ${owner ? `<p class="work-owner">${safe(owner)}</p>` : ''}
+            ${task.priority != null ? `<p class="work-owner">Приоритет: ${safe(task.priority)}</p>` : ''}
+            ${task.gitDelivery ? '<p class="work-owner">Git-доставка</p>' : ''}
             ${renderBoardTraining(task, agents, byTask)}
             ${attempt ? `<p class="work-attempt" data-attempt="${safe(task.status)}"><span>Попытка</span> ${safe(attempt)}</p>` : ''}
           </li>`;
         }).join('')}</ul>
       </section>`;
     }).join('')}
-  </div>`;
+  </div>${replaced.length ? `<details class="work-record"><summary>Заменённые задачи · ${replaced.length}</summary>${linkedTasks(replaced, byTask)}</details>` : ''}`;
 }
 
 function epicView(epics, stories, tasks, byTask, expandedEpics) {
@@ -119,7 +125,7 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
   </section>`).join('');
 
   return `<div class="work-records">
-    ${epics.map(epic => {
+    ${epics.toSorted((a, b) => (b.priority ?? 0) - (a.priority ?? 0)).map(epic => {
       const epicStories = storiesByEpic.get(epic.id) ?? [];
       const directTasks = (tasksByEpic.get(epic.id) ?? []).filter(task => !storyIds.has(task.storyId));
       const taskCount = epicStories.reduce((count, story) => count + (tasksByStory.get(story.id)?.length ?? 0), directTasks.length);
@@ -130,6 +136,8 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
         </summary>
         <div class="work-epic-body">
           ${textBlock('Цель', epic.goal || epic.description)}
+          <p class="work-muted">Приоритет · ${safe(epic.priority ?? 'не задан')}</p>
+          <div class="actions">${action('Изменить приоритет', 'epic-priority', epic.id)}</div>
           ${showStories(epicStories)}
           ${linkedTasks(directTasks, byTask)}
         </div>
@@ -145,7 +153,7 @@ function planButton(plan) {
   return `<button type="button" class="work-plan-button" data-plan="${safe(plan.id)}" aria-label="Открыть план «${title}»">Открыть план</button>`;
 }
 
-function sprintView(sprints, plans, tasks, byTask) {
+function sprintView(studio, sprints, plans, tasks, byTask) {
   const plansById = new Map(plans.map(plan => [plan.id, plan]));
   const plansBySprint = new Map(plans.filter(plan => plan.sprintId).map(plan => [plan.sprintId, plan]));
   const tasksBySprint = groupByField(tasks, 'sprintId');
@@ -177,12 +185,20 @@ function sprintView(sprints, plans, tasks, byTask) {
       </div>` : '<p class="work-muted">В спринте пока нет задач.</p>'}
       ${linkedTasks(members, byTask)}
       ${textBlock('Итоги', sprint.outcome || sprint.summary)}
-      ${plan ? planButton(plan) : ''}
+      ${renderRetrospective(sprint.retrospective)}
+      ${sprint.carryovers?.length ? `<div class="work-text"><strong>Переносы</strong><ul>${sprint.carryovers.map(row => `<li>
+        ${byTask.get(row.taskId) ? taskLink(byTask.get(row.taskId), false) : safe(row.taskId)} · ${safe(row.reason)}</li>`).join('')}</ul></div>` : ''}
+      <div class="actions">${plan ? planButton(plan) : ''}${sprint.status === 'active' ? action('Закрыть спринт', 'close-sprint', sprint.id) : ''}</div>
     </article>`;
   });
   const upcoming = plans.filter(plan => !attachedPlans.has(plan.id) && (plan.kind === 'sprint' || plan.status !== 'approved'));
   if (!entries.length && !upcoming.length) return empty('Спринтов пока нет', 'Здесь появятся планы спринтов, состав задач и результаты.');
+  const canPlanNext = sprints.some(sprint => sprint.status === 'completed') &&
+    !sprints.some(sprint => sprint.status === 'active') &&
+    !upcoming.some(plan => ['draft', 'pending'].includes(plan.status)) &&
+    !['draft', 'planning', 'awaiting-approval'].includes(studio.lifecycle);
   return `<div class="work-records">
+    ${canPlanNext ? `<div class="actions">${action('Запланировать следующий спринт', 'open', 'next-sprint')}</div>` : ''}
     ${upcoming.map(plan => `<article class="work-record">
       <header><h2>${safe(nameOf(plan, 'План спринта'))}</h2>
         <div class="work-record-statuses">
@@ -198,9 +214,10 @@ function sprintView(sprints, plans, tasks, byTask) {
 }
 
 function meetingsView(meetings, byTask, sprints) {
-  if (!meetings.length) return empty('Встреч пока не было', 'Здесь сохраняются решения встреч и задачи, которые по ним создала студия.');
+  const controls = `<div class="actions">${action('Назначить встречу', 'open', 'meeting')}</div>`;
+  if (!meetings.length) return controls + empty('Встреч пока не было', 'Здесь сохраняются позиции участников, решения и задачи по итогам встречи.');
   const bySprint = new Map(sprints.map(sprint => [sprint.id, sprint]));
-  return `<div class="work-records">${meetings.map(meeting => {
+  return controls + `<div class="work-records">${meetings.map(meeting => {
     const kind = lookup(meetingKinds, meeting.kind ?? meeting.type);
     const sprint = bySprint.get(meeting.sprintId);
     const date = new Date(meeting.createdAt);
@@ -212,10 +229,12 @@ function meetingsView(meetings, byTask, sprints) {
       <header><h2>${safe(nameOf(meeting, kind || 'Встреча'))}</h2>
         ${time ? `<span class="work-muted">${time}</span>` : ''}
       </header>
+      ${meeting.stage ? `<p class="work-muted">${safe(meetingStages[meeting.stage] ?? meeting.stage)} · Версия ${safe(meeting.version)}</p>` : ''}
       ${sprint ? `<p class="work-muted">${safe(nameOf(sprint, 'Спринт'))}</p>` : ''}
       ${textBlock('Итог', meeting.outcome || meeting.summary)}
-      ${bulletBlock('Решения', meeting.decisions)}
+      ${bulletBlock('Решения', listed(meeting.decisions).map(decision => decision.text ?? decision))}
       ${linkedTasks(related, byTask)}
+      ${meeting.id ? action('Открыть встречу', 'meeting-detail', meeting.id) : ''}
     </article>`;
   }).join('')}</div>`;
 }
@@ -224,15 +243,16 @@ export const publishedPaths = plan => (plan.publishedFiles ?? [])
   .map(file => typeof file === 'string' ? file : file?.path)
   .filter(path => typeof path === 'string' && path.length > 0);
 
-function artifactsView(tasks, plans) {
+function artifactsView(tasks, plans, evidence) {
   const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary);
   const planResults = plans.map(plan => ({ plan, paths: [...new Set(publishedPaths(plan))] }))
     .filter(({ paths }) => paths.length);
-  if (!taskResults.length && !planResults.length) {
+  if (!taskResults.length && !planResults.length && !evidence.length) {
     return empty('Артефактов пока нет', 'Здесь появятся файлы планов и результаты задач.');
   }
 
   return `<div class="work-records">
+    ${renderEvidence(evidence)}
     ${taskResults.length ? `<section class="work-record">
       <h2>Результаты задач</h2>
       <ul class="work-links">${taskResults.map(task => `<li>
@@ -252,15 +272,42 @@ function artifactsView(tasks, plans) {
   </div>`;
 }
 
-export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], tab = 'board', expandedEpics = new Set() } = {}) {
+function planningView(studio, phases, tasks) {
+  const grooming = studio.grooming;
+  const backlog = tasks.filter(task => !task.sprintId && task.kind !== 'train' && !['done', 'replaced'].includes(task.stage))
+    .toSorted((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  return `<div class="work-records">
+    <section class="work-record"><header><h2>Бэклог</h2>${action('Добавить в бэклог', 'open', 'backlog-task')}</header>
+      <p class="work-muted">Версия ${safe(studio.backlogVersion ?? 0)} · Задач: ${backlog.length}</p>
+      ${backlog.length ? `<ul class="work-links">${backlog.map(task => `<li>
+        ${taskLink(task)}
+        <p class="work-muted">Приоритет: ${safe(task.priority ?? 'не задан')}${task.points != null ? ` · Баллы: ${safe(task.points)}` : ''}</p>
+        ${task.status !== 'running' ? `<div class="actions">${action('Изменить', 'backlog-edit', task.id)}${backlog.length > 1 ? action('Заменить', 'backlog-replace', task.id) : ''}</div>` : ''}
+      </li>`).join('')}</ul>` : '<p class="work-muted">Здесь будут задачи вне спринта.</p>'}
+    </section>
+    <section class="work-record"><header><h2>Груминг</h2>${grooming?.status === 'open' ? action('Завершить груминг', 'resolve-grooming', grooming.id) : action('Начать груминг', 'open', 'request-grooming')}</header>
+      ${grooming ? `<p class="work-muted">${grooming.status === 'open' ? 'Открыт' : 'Завершён'} · Готовых задач: ${safe(grooming.readyTasks)} · Порог: ${safe(grooming.threshold)}</p>`
+        : '<p class="work-muted">Запустите груминг, чтобы проверить очередь к следующему спринту.</p>'}</section>
+    <section class="work-record"><header><h2>Фазы проекта</h2>${action('Добавить фазу', 'open', 'phase')}</header>
+      ${phases.length ? phases.map(phase => `<article class="work-story"><h3>${safe(phase.title)}</h3>
+        ${textBlock('Цель', phase.goal)}${bulletBlock('Условия завершения', (phase.criteria ?? []).map(row => row.description))}
+        <p class="work-muted">${phase.status === 'completed' ? 'Завершена' : phase.transition?.status === 'pending' ? 'Ждёт согласования' : 'В работе'}</p>
+        ${phase.status !== 'completed' ? `<div class="actions">${phase.transition?.status === 'pending' ? action('Решение о завершении', 'phase-transition', phase.id) :
+          action('Изменить', 'phase-edit', phase.id) + action('Предложить завершение', 'phase-transition', phase.id)}</div>` : ''}
+      </article>`).join('') : '<p class="work-muted">Фазы объединяют эпики и спринты вокруг одной цели.</p>'}</section>
+  </div>`;
+}
+
+export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set() } = {}) {
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
   const views = {
     board: () => board(tasks, studio, byTask),
     epics: () => epicView(epics, stories, tasks, byTask, expandedEpics),
-    sprints: () => sprintView(sprints, plans, tasks, byTask),
+    sprints: () => sprintView(studio, sprints, plans, tasks, byTask),
     meetings: () => meetingsView(meetings, byTask, sprints),
-    artifacts: () => artifactsView(tasks, plans),
+    artifacts: () => artifactsView(tasks, plans, evidence),
+    planning: () => planningView(studio, phases, tasks),
   };
   return `<section class="work-view" aria-label="Работа студии">
     <div class="work-tabs" role="group" aria-label="Разделы работы">

@@ -1,5 +1,8 @@
-const { app, BrowserWindow, dialog, ipcMain, net, Notification, powerMonitor, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, protocol, shell } = require("electron");
 const { existsSync, mkdirSync } = require("node:fs");
+const { access, writeFile } = require("node:fs/promises");
+const { X_OK } = require("node:fs").constants;
+const { randomUUID } = require("node:crypto");
 const { homedir } = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -42,6 +45,7 @@ let window;
 let service;
 let shuttingDown = false;
 let scheduleTimer;
+let power;
 const notifications = new Set();
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -56,6 +60,7 @@ else {
     event.preventDefault();
     shuttingDown = true;
     clearInterval(scheduleTimer);
+    power?.close();
     Promise.resolve().then(() => service.close()).catch(console.error).finally(() => app.quit());
   });
   for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -99,9 +104,11 @@ async function openWindow() {
   return next;
 }
 
-function broadcast() {
+function broadcast(snapshot = service?.snapshot()) {
+  if (!snapshot) return;
+  power?.refresh(snapshot.studios);
   if (window && !window.isDestroyed() && window.webContents.getURL() === appUrl) {
-    window.webContents.send("hearth:snapshot", service.snapshot());
+    window.webContents.send("hearth:snapshot", snapshot);
   }
 }
 
@@ -164,6 +171,14 @@ async function start() {
     { createTransferController },
     { createGitHubSkillFinder },
     { createMaterialFinder },
+    { createGitWorktrees, git },
+    { createGitDelivery },
+    { createProjectChecks },
+    { createProjectPipeline },
+    { createEvidenceStore },
+    { createWorktreeCleanup },
+    { scopedCommand },
+    { createPowerController },
   ] = await Promise.all([
     import("./bridge.mjs"),
     import("../core/service.mjs"),
@@ -173,6 +188,14 @@ async function start() {
     import("./transfer.mjs"),
     import("./github-skills.mjs"),
     import("./materials.mjs"),
+    import("./git-worktrees.mjs"),
+    import("./git-delivery.mjs"),
+    import("./project-checks.mjs"),
+    import("./project-pipeline.mjs"),
+    import("./evidence.mjs"),
+    import("./worktree-cleanup.mjs"),
+    import("../runtimes/scope.mjs"),
+    import("./power.mjs"),
   ]);
   protocol.handle("hearth", async ({ url }) => {
     try {
@@ -205,6 +228,42 @@ async function start() {
   }
   const validateRoot = root => validateProjectRoot(root, protectedRoots);
   const artifacts = createArtifactStore({ receipts: path.join(dataDir, "artifact-receipts"), validateRoot });
+  const evidence = createEvidenceStore({ storageDir: path.join(dataDir, "evidence") });
+  const worktrees = createGitWorktrees({ storageDir: path.join(dataDir, "worktrees"), validateRepository: validateRoot });
+  const delivery = createGitDelivery({ storageDir: path.join(dataDir, "candidates") });
+  const checks = createProjectChecks({
+    storageDir: path.join(dataDir, "check-logs"),
+    async prepareCommand({ command, args, root, scratch, network }) {
+      const directories = (process.env.PATH ?? "").split(path.delimiter).filter(directory => path.isAbsolute(directory));
+      for (const directory of directories) {
+        const executable = path.join(directory, command);
+        if (await access(executable, X_OK).then(() => true, () => false)) {
+          const env = { PATH: directories.join(path.delimiter), HOME: scratch, LANG: process.env.LANG ?? "en_US.UTF-8" };
+          return scopedCommand(executable, args, { root, scratch, access: "worktree-write", network, env });
+        }
+      }
+    },
+  });
+  const projectPipeline = createProjectPipeline({
+    storageDir: path.join(dataDir, "attempt-scratch"), worktrees, delivery, checks, evidence, git,
+    lookupEvidence: args => service.findEvidence(args),
+  });
+  const cleanup = createWorktreeCleanup({
+    git, worktrees, delivery, storageDir: path.join(dataDir, "cleanup-journal"),
+    async inspectUsage(worktree) {
+      const stored = service.snapshot();
+      const task = stored.tasks.find(({ id, studioId }) => id === worktree.taskId && studioId === worktree.studioId);
+      const activeLease = stored.attempts.some(({ taskId, status }) => taskId === worktree.taskId && ["running", "reconcile"].includes(status));
+      const evidenceIds = task?.gitDelivery?.checks?.flatMap(({ evidenceIds = [] }) => evidenceIds) ?? [];
+      const openTask = !task || task.stage !== "done";
+      const evidenceSaved = task?.gitDelivery?.status === "merged" && (await Promise.all(evidenceIds.map(async id => {
+        const record = stored.evidence.find(value => value.id === id && value.taskId === task.id);
+        return Boolean(record && await evidence.openEvidence(record).catch(() => null));
+      }))).every(Boolean);
+      return { activeLease, openTask, evidenceSaved };
+    },
+  });
+  power = createPowerController(powerSaveBlocker);
   const { findSkills } = createGitHubSkillFinder();
   service = createStudioService({
     dbPath: path.join(dataDir, "studio.sqlite3"),
@@ -212,17 +271,36 @@ async function start() {
     writeArtifact: artifacts.write,
     findSkills,
     findMaterials: createMaterialFinder(),
+    projectPipeline,
+    prepareTarget: worktrees.prepareTarget,
+    async verifyGitHistory({ repository, revision, targetOid }) {
+      const ids = [...new Set([revision.baseOid, revision.headOid, revision.targetOid, revision.candidateOid].filter(Boolean))];
+      const missing = (await Promise.all(ids.map(async oid => {
+        const valid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(oid);
+        const found = valid && await git(repository, ["cat-file", "-e", oid + "^{commit}"]).then(() => true, () => false);
+        return found ? null : oid;
+      }))).filter(Boolean);
+      return { checkedAt: new Date().toISOString(), targetStillMatches: revision.targetOid === targetOid, missing };
+    },
+    manageCleanup: { preview: cleanup.previewCleanup, apply: cleanup.applyCleanup },
+    async describeAttachment(record) {
+      if (record.size > 120_000 || !(/^(text\/|application\/json)/).test(record.contentType)) return undefined;
+      return (await evidence.readEvidence(record)).toString("utf8").slice(0, 8_000);
+    },
     onChange: broadcast,
     notify,
   });
   const transfer = createTransferController({
-    service, artifacts, pickBundle, saveBundle, journalDir: path.join(dataDir, "import-journal"),
+    service, artifacts, evidenceStore: evidence, pickBundle, saveBundle, journalDir: path.join(dataDir, "import-journal"),
   });
   const failedImports = await transfer.recover();
   if (failedImports.length) console.warn("Hearth Studio: часть импортов ожидает восстановления.", failedImports.length);
   function refreshSchedules() {
     if (shuttingDown) return;
-    try { service.refreshSchedules(); } catch (error) { console.error(error); }
+    try {
+      service.refreshSchedules();
+      power.refresh(service.snapshot().studios);
+    } catch (error) { console.error(error); }
   }
   refreshSchedules();
   scheduleTimer = setInterval(refreshSchedules, 15000);
@@ -230,6 +308,39 @@ async function start() {
   powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
     service, selectFolder: pickFolder, inspect, previewImport, findSkills, transfer, protectedRoots,
+    restart() {
+      app.relaunch();
+      app.quit();
+      return true;
+    },
+    async pickAttachment({ studioId, taskId }) {
+      const result = await dialog.showOpenDialog(window, { title: "Добавить вложение", properties: ["openFile"] });
+      if (result.canceled || !result.filePaths[0]) return null;
+      const chosen = result.filePaths[0];
+      const attemptId = randomUUID();
+      return evidence.recordEvidence({ studioId, taskId, attemptId, root: path.dirname(chosen), sourcePath: path.basename(chosen),
+        revision: { digest: attemptId }, kind: "attachment" });
+    },
+    async openEvidence(record) {
+      if (!/^(?:text\/|image\/(?:jpeg|png|webp|gif)$|video\/|audio\/|application\/(?:json|pdf)$)/.test(record.contentType)) {
+        throw new Error("Этот тип файла доступен через «Сохранить как».");
+      }
+      const error = await shell.openPath(await evidence.openEvidence(record));
+      if (error) throw new Error("Не удалось открыть файл.");
+      return true;
+    },
+    async saveEvidence(record) {
+      const result = await dialog.showSaveDialog(window, { title: "Сохранить доказательство", defaultPath: path.basename(record.sourcePath) });
+      if (result.canceled || !result.filePath) return false;
+      await writeFile(result.filePath, await evidence.readEvidence(record), { flag: "wx" });
+      return true;
+    },
+    async saveDiagnostics(report) {
+      const result = await dialog.showSaveDialog(window, { title: "Сохранить диагностику", defaultPath: "hearth-diagnostics.json" });
+      if (result.canceled || !result.filePath) return false;
+      await writeFile(result.filePath, JSON.stringify(report, null, 2), { flag: "wx" });
+      return true;
+    },
     async openProject(root) {
       const error = await shell.openPath(root);
       if (error) throw new Error("Не удалось открыть папку проекта: " + error);
