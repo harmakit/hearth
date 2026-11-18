@@ -1,0 +1,70 @@
+#dialog[data-adjustable] {
+  width: min(var(--dialog-width, 720px), calc(100vw - 28px));
+  height: var(--dialog-height, auto);
+  max-height: calc(100dvh - 28px);
+  overflow: hidden;
+}
+
+#dialog[data-adjustable][data-expanded] {
+  width: calc(100vw - 28px);
+  height: calc(100dvh - 28px);
+}
+
+#dialog[data-adjustable] form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: calc(100dvh - 30px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+#dialog[data-adjustable] #dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+  overflow-y: auto;
+  padding: 4px 6px 4px 0;
+  scroll-padding-block: 8px;
+}
+
+#dialog[data-adjustable] #dialog-actions {
+  border-top: 1px solid var(--line);
+  padding: 10px 16px 0 0;
+}
+
+#dialog .dialog-heading h2 { flex: 1 1 auto; }
+#dialog .dialog-heading button { flex: 0 0 auto; }
+
+.dialog-resize {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.dialog-resize::before,
+.dialog-resize::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 11px;
+  height: 11px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+}
+
+.dialog-resize::after { width: 6px; height: 6px; }
+.dialog-resize:hover { color: var(--accent); }
+.schedule-days { display: flex; flex-wrap: wrap; gap: 7px 14px; }
+.schedule-times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+[data-open="delete-studio"] { color: var(--accent); }

@@ -34,7 +34,9 @@ async function removeJournal(path) {
 
 export function createTransferController({ service, artifacts, pickBundle, saveBundle, journalDir }) {
   async function clearImport(path, journal) {
-    if (!service.snapshot().studios.some(studio => studio.id === journal.studioId)) {
+    const committed = service.wasStudioDeleted?.(journal.studioId) ||
+      service.snapshot().studios.some(studio => studio.id === journal.studioId);
+    if (!committed) {
       const results = await Promise.allSettled(journal.artifacts.map(artifact => artifacts.discard(operationFor(journal, artifact))));
       const failure = results.find(result => result.status === "rejected");
       if (failure) throw failure.reason;

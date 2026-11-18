@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, net, Notification, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, net, Notification, powerMonitor, protocol, shell } = require("electron");
 const { existsSync, mkdirSync } = require("node:fs");
 const { homedir } = require("node:os");
 const path = require("node:path");
@@ -41,6 +41,7 @@ if (profileOverride) {
 let window;
 let service;
 let shuttingDown = false;
+let scheduleTimer;
 const notifications = new Set();
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -54,6 +55,7 @@ else {
     if (!service || shuttingDown) return;
     event.preventDefault();
     shuttingDown = true;
+    clearInterval(scheduleTimer);
     Promise.resolve().then(() => service.close()).catch(console.error).finally(() => app.quit());
   });
   for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -211,8 +213,21 @@ async function start() {
   });
   const failedImports = await transfer.recover();
   if (failedImports.length) console.warn("Hearth Studio: часть импортов ожидает восстановления.", failedImports.length);
+  function refreshSchedules() {
+    if (shuttingDown) return;
+    try { service.refreshSchedules(); } catch (error) { console.error(error); }
+  }
+  refreshSchedules();
+  scheduleTimer = setInterval(refreshSchedules, 15000);
+  scheduleTimer.unref();
+  powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
     service, selectFolder: pickFolder, inspect, previewImport, transfer, protectedRoots,
+    async openProject(root) {
+      const error = await shell.openPath(root);
+      if (error) throw new Error("Не удалось открыть папку проекта: " + error);
+      return true;
+    },
     async openArtifact({ root, path }) {
       const error = await shell.openPath(await artifacts.openable(root, path));
       if (error) throw new Error("Не удалось открыть артефакт: " + error);

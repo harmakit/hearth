@@ -13,6 +13,7 @@ const bundles = await packager({
   dir: root,
   out: resolve(root, "dist", version),
   name: "Hearth Studio",
+  icon: resolve(root, "assets", "hearth.icns"),
   appBundleId: "local.hearth.studio",
   platform: "darwin",
   arch: process.arch,

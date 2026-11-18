@@ -201,6 +201,61 @@
   color: var(--muted);
 }
 
+.work-view .work-record.work-epic {
+  display: block;
+  padding: 0;
+}
+
+.work-view .work-epic > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-height: 48px;
+  padding: 8px clamp(12px, 2vw, 20px);
+  border-radius: var(--radius);
+  cursor: pointer;
+  list-style: none;
+}
+
+.work-view .work-epic > summary::-webkit-details-marker {
+  display: none;
+}
+
+.work-view .work-epic > summary::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border: solid currentColor;
+  border-width: 0 1px 1px 0;
+  transform: rotate(-45deg);
+}
+
+.work-view .work-epic[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.work-view .work-epic > summary:hover {
+  color: var(--accent);
+  background: var(--surface-raised);
+}
+
+.work-view .work-epic > summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.work-view .work-epic > summary .work-muted {
+  margin-inline-start: auto;
+}
+
+.work-view .work-epic-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 clamp(12px, 2vw, 20px) 12px;
+}
+
 .work-view .work-record > header,
 .work-view .work-record-statuses {
   display: flex;
@@ -246,6 +301,22 @@
 .work-view .work-file {
   color: var(--muted);
   font: 12px/1.5 ui-monospace, monospace;
+}
+
+.work-view .work-artifact-files {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.work-view .work-file-link {
+  min-height: 32px;
+  max-width: 100%;
+  font: 12px/1.5 ui-monospace, monospace;
+  overflow-wrap: anywhere;
+  text-align: start;
 }
 
 .work-view .work-dependencies {

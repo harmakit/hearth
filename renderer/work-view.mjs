@@ -1,7 +1,7 @@
 import { roleNames } from './workshop.mjs';
 
 const tabs = {
-  board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи',
+  board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи', artifacts: 'Артефакты',
 };
 const stages = {
   backlog: 'Бэклог', ready: 'Готова к работе', in_progress: 'В работе', review: 'Ревью',
@@ -96,7 +96,7 @@ function board(tasks, studio) {
   </div>`;
 }
 
-function epicView(epics, stories, tasks, byTask) {
+function epicView(epics, stories, tasks, byTask, expandedEpics) {
   const storiesByEpic = groupByField(stories, 'epicId');
   const tasksByStory = groupByField(tasks, 'storyId');
   const tasksByEpic = groupByField(tasks, 'epicId');
@@ -116,12 +116,22 @@ function epicView(epics, stories, tasks, byTask) {
   </section>`).join('');
 
   return `<div class="work-records">
-    ${epics.map(epic => `<article class="work-record">
-      <h2>${safe(nameOf(epic, 'Эпик без названия'))}</h2>
-      ${textBlock('Цель', epic.goal || epic.description)}
-      ${showStories(storiesByEpic.get(epic.id) ?? [])}
-      ${linkedTasks((tasksByEpic.get(epic.id) ?? []).filter(task => !storyIds.has(task.storyId)), byTask)}
-    </article>`).join('')}
+    ${epics.map(epic => {
+      const epicStories = storiesByEpic.get(epic.id) ?? [];
+      const directTasks = (tasksByEpic.get(epic.id) ?? []).filter(task => !storyIds.has(task.storyId));
+      const taskCount = epicStories.reduce((count, story) => count + (tasksByStory.get(story.id)?.length ?? 0), directTasks.length);
+      return `<details class="work-record work-epic" name="studio-epics" data-epic-section="${safe(epic.id)}"${expandedEpics.has(epic.id) ? ' open' : ''}>
+        <summary>
+          <strong>${safe(nameOf(epic, 'Эпик без названия'))}</strong>
+          <span class="work-muted">Историй: ${epicStories.length} · Задач: ${taskCount}</span>
+        </summary>
+        <div class="work-epic-body">
+          ${textBlock('Цель', epic.goal || epic.description)}
+          ${showStories(epicStories)}
+          ${linkedTasks(directTasks, byTask)}
+        </div>
+      </details>`;
+    }).join('')}
     ${orphanStories.length ? `<article class="work-record"><h2>Истории без эпика</h2>${showStories(orphanStories)}</article>` : ''}
     ${orphanTasks.length ? `<article class="work-record"><h2>Задачи без эпика и истории</h2>${linkedTasks(orphanTasks, byTask)}</article>` : ''}
   </div>`;
@@ -203,14 +213,47 @@ function meetingsView(meetings, byTask, sprints) {
   }).join('')}</div>`;
 }
 
-export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], tab = 'board' } = {}) {
+export const publishedPaths = plan => (plan.publishedFiles ?? [])
+  .map(file => typeof file === 'string' ? file : file?.path)
+  .filter(path => typeof path === 'string' && path.length > 0);
+
+function artifactsView(tasks, plans) {
+  const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary);
+  const planResults = plans.map(plan => ({ plan, paths: [...new Set(publishedPaths(plan))] }))
+    .filter(({ paths }) => paths.length);
+  if (!taskResults.length && !planResults.length) {
+    return empty('Артефактов пока нет', 'Здесь появятся файлы планов и результаты задач.');
+  }
+
+  return `<div class="work-records">
+    ${taskResults.length ? `<section class="work-record">
+      <h2>Результаты задач</h2>
+      <ul class="work-links">${taskResults.map(task => `<li>
+        ${taskLink(task, false)}
+        ${task.artifactPath ? `<button type="button" class="text-button work-file-link" data-artifact="${safe(task.id)}">${safe(task.artifactPath)}</button>` : '<span class="work-muted">Отчёт</span>'}
+      </li>`).join('')}</ul>
+    </section>` : ''}
+    ${planResults.length ? `<section class="work-record">
+      <h2>Файлы планов</h2>
+      ${planResults.map(({ plan, paths }) => `<section class="work-story">
+        <h3>${safe(nameOf(plan, 'План без названия'))}</h3>
+        <ul class="work-artifact-files">${paths.map(path => `<li>
+          <button type="button" class="text-button work-file-link" data-plan-file="${safe(path)}" data-plan-id="${safe(plan.id)}">${safe(path)}</button>
+        </li>`).join('')}</ul>
+      </section>`).join('')}
+    </section>` : ''}
+  </div>`;
+}
+
+export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], tab = 'board', expandedEpics = new Set() } = {}) {
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
   const views = {
     board: () => board(tasks, studio),
-    epics: () => epicView(epics, stories, tasks, byTask),
+    epics: () => epicView(epics, stories, tasks, byTask, expandedEpics),
     sprints: () => sprintView(sprints, plans, tasks, byTask),
     meetings: () => meetingsView(meetings, byTask, sprints),
+    artifacts: () => artifactsView(tasks, plans),
   };
   return `<section class="work-view" aria-label="Работа студии">
     <div class="work-tabs" role="group" aria-label="Разделы работы">

@@ -293,3 +293,88 @@ test('shutdown preserves an answer that was accepted while another task blocked 
   resumed.startTask({ taskId: work.id });
   await until(() => resumed.snapshot().tasks[0].status, (status) => status === 'completed');
 });
+
+test('normalizes overnight schedules and runs queued work only during the window', async (t) => {
+  const dbPath = database(t);
+  const onChange = [];
+  const active = Promise.withResolvers();
+  let date = new Date(2026, 10, 16, 21); // Monday
+  let runs = 0;
+  const options = { dbPath, now: () => date, onChange: (value) => onChange.push(value), run: async () => {
+    runs += 1;
+    if (runs === 1) await active.promise;
+    return { text: 'Готово' };
+  } };
+  let service = createStudioService(options);
+  t.after(() => service.close());
+  const first = studio(service);
+  assert.equal(first.schedule.enabled, false);
+  assert.throws(() => service.updateStudio({ studioId: first.id, schedule: { enabled: true, days: [7], start: '9:00', end: '02:00' } }), /расписан/i);
+  assert.deepEqual(service.updateStudio({ studioId: first.id, schedule: { enabled: true, days: [5, 1, 1], start: '22:00', end: '02:00' } }).schedule,
+    { enabled: true, days: [1, 5], start: '22:00', end: '02:00' });
+  const cancelled = task(service, first.id);
+  service.startTask({ taskId: cancelled.id });
+  assert.equal(service.cancelTask({ taskId: cancelled.id }).status, 'interrupted');
+  for (let i = 0; i < 2; i += 1) service.startTask({ taskId: task(service, first.id).id });
+  await delay(10);
+  assert.equal(runs, 0);
+  assert.equal(service.snapshot().studios[0].scheduleWaiting, true);
+  await service.close();
+  service = createStudioService(options);
+  assert.deepEqual(service.snapshot().tasks.map(({ status }) => status), ['interrupted', 'queued', 'queued']);
+  date = new Date(2026, 10, 17, 1); // Tuesday, inside Monday's window
+  service.refreshSchedules();
+  service.refreshSchedules();
+  await until(() => runs, (count) => count === 1);
+  assert.equal(service.snapshot().studios[0].scheduleWaiting, false);
+  date = new Date(2026, 10, 17, 2);
+  service.refreshSchedules();
+  active.resolve();
+  await until(() => onChange.at(-1), ({ studios, tasks }) => studios[0].scheduleWaiting && tasks[1].status === 'completed');
+  assert.equal(runs, 1);
+  const changes = onChange.length;
+  service.refreshSchedules();
+  assert.equal(onChange.length, changes);
+  service.setStudioRunning({ studioId: first.id, action: 'pause' });
+  assert.equal(service.snapshot().studios[0].manualPaused, true);
+  date = new Date(2026, 10, 20, 22); // Friday
+  service.refreshSchedules();
+  await delay(10);
+  assert.equal(runs, 1);
+  service.setStudioRunning({ studioId: first.id, action: 'resume' });
+  await until(service.snapshot, ({ tasks }) => tasks.slice(1).every(({ status }) => status === 'completed'));
+  assert.equal(service.snapshot().studios[0].manualPaused, false);
+  assert.equal(runs, 2);
+});
+
+test('requires the exact current name and removes only that studio while no attempt is active', async (t) => {
+  const active = Promise.withResolvers();
+  const dbPath = database(t);
+  const service = createStudioService({ dbPath, run: async () => { await active.promise; return { text: '{"question":"Нужно решение"}' }; } });
+  t.after(() => { active.resolve(); return service.close(); });
+  const first = studio(service);
+  const second = studio(service, 'Другая');
+  const otherTask = task(service, second.id);
+  const work = task(service, first.id);
+  service.startTask({ taskId: work.id });
+  await until(service.snapshot, ({ tasks }) => tasks.some(({ status }) => status === 'running'));
+  assert.throws(() => service.deleteStudio({ studioId: first.id, confirmation: first.name }), /выполняется/i);
+  active.resolve();
+  await until(service.snapshot, ({ inbox }) => inbox.length === 1);
+  service.updateStudio({ studioId: first.id, name: 'Словарь' });
+  assert.throws(() => service.deleteStudio({ studioId: first.id, confirmation: first.name }), /название/i);
+  assert.throws(() => service.deleteStudio({ studioId: first.id, confirmation: ' Словарь' }), /название/i);
+  service.startTask({ taskId: task(service, first.id).id });
+  assert.deepEqual(service.deleteStudio({ studioId: first.id, confirmation: 'Словарь' }), { studioId: first.id });
+  assert.equal(service.wasStudioDeleted(first.id), true);
+  assert.equal(service.wasStudioDeleted(second.id), false);
+  await delay(10);
+  assert.deepEqual(service.snapshot().studios.map(({ id }) => id), [second.id]);
+  assert.deepEqual(service.snapshot().tasks, [otherTask]);
+  assert.deepEqual(service.snapshot().inbox, []);
+  await service.close();
+  const restored = createStudioService({ dbPath, run: () => assert.fail('Unexpected run') });
+  t.after(() => restored.close());
+  assert.equal(restored.wasStudioDeleted(first.id), true);
+  assert.equal(restored.wasStudioDeleted(second.id), false);
+});

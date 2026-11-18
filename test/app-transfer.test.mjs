@@ -28,8 +28,9 @@ async function fixture(t, files) {
   return { root, artifacts, journalDir, pickBundle: async () => bundlePath };
 }
 
-for (const committed of [false, true]) {
-  test(`startup recovery ${committed ? "keeps committed" : "rolls back uncommitted"} imports`, async t => {
+for (const outcome of ["uncommitted", "committed", "deleted"]) {
+  test(`startup recovery handles a ${outcome} studio after interrupted import cleanup`, async t => {
+    const committed = outcome !== "uncommitted";
     const options = await fixture(t, [{ path: "artifact.md", content: "imported text" }]);
     const { root, journalDir, artifacts } = options;
     let imported;
@@ -44,7 +45,8 @@ for (const committed of [false, true]) {
         imported = payload.studio;
         return crash();
       },
-      snapshot: () => ({ studios: committed ? [imported] : [] }),
+      snapshot: () => ({ studios: outcome === "committed" ? [imported] : [] }),
+      wasStudioDeleted: id => outcome === "deleted" && id === imported?.id,
     };
     const interruptedArtifacts = committed ? artifacts : {
       ...artifacts,

@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createWorkflow } from './workflow.mjs';
 import { normalizeImport } from './import.mjs';
 import { parseResponse } from './protocol.mjs';
+import { normalizeSchedule, withinSchedule } from './schedule.mjs';
 
 const runtimes = ['codex', 'claude'];
 const modes = ['inherit', 'fixed', 'dynamic'];
@@ -13,7 +14,7 @@ const restartable = ['queued', 'failed', 'interrupted'];
 const now = () => new Date().toISOString();
 const domains = ['plans', 'epics', 'stories', 'sprints', 'meetings', 'attempts'];
 const stages = { queued: 'ready', scheduled: 'ready', running: 'in_progress', completed: 'done', waiting: 'blocked', failed: 'blocked', interrupted: 'blocked' };
-const visibleStudio = (studio) => ({ approveSprints: true, lifecycle: 'draft', projectLanguage: '', ...studio });
+const visibleStudio = (studio) => ({ approveSprints: true, lifecycle: 'draft', projectLanguage: '', ...studio, schedule: normalizeSchedule(studio.schedule) });
 
 function string(value, label, { required = false, fallback = '' } = {}) {
   if (value === undefined) value = fallback;
@@ -59,6 +60,7 @@ function studioSettings(input, current = { brief: '', director: defaultDirector,
     allowed: input.allowed === undefined ? current.allowed : allowlist(input.allowed),
     agents: current.agents,
     approveSprints,
+    schedule: normalizeSchedule(input.schedule === undefined ? current.schedule : input.schedule),
   };
 }
 
@@ -165,11 +167,12 @@ function visibleTask(task) {
   return { stage: stages[task.status], dependencies: [], ...task, status: task.status === 'scheduled' ? 'queued' : task.status };
 }
 
-export function createStudioService({ dbPath, run, onChange, notify, writeArtifact }) {
+export function createStudioService({ dbPath, run, onChange, notify, writeArtifact, now: clock = () => new Date() }) {
   const db = new DatabaseSync(dbPath);
   db.exec(`
     PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS studios (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS deleted_studios (id TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY, studio_id TEXT NOT NULL REFERENCES studios(id), data TEXT NOT NULL
     );
@@ -183,6 +186,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
 
   const active = new Map();
   const pending = new Map();
+  const publishedWaiting = new Map();
   let closed = false;
   let closing;
 
@@ -199,6 +203,27 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
       return table === 'tasks' ? visibleTask(record) : record;
     }
     throw new Error(`${label} не найдено.`);
+  }
+
+  function availableStudio(studioId) {
+    if (closed || active.has(studioId)) return;
+    const row = db.prepare('SELECT data FROM studios WHERE id = ?').get(studioId);
+    if (!row) return;
+    const studio = visibleStudio(JSON.parse(row.data));
+    if (!isPaused(studio) && withinSchedule(studio.schedule, clock())) return studio;
+  }
+
+  function isPaused(studio) {
+    return studio.manualPaused || studio.lifecycle === 'paused';
+  }
+
+  function hasWorkflowWork(studio) {
+    return studio.workflowJob && ['planning', 'active'].includes(studio.lifecycle);
+  }
+
+  function waitingForSchedule(studio, date) {
+    return !active.has(studio.id) && !isPaused(studio) && !withinSchedule(studio.schedule, date)
+      && Boolean(hasWorkflowWork(studio) || pending.get(studio.id)?.size);
   }
 
   function list(table) {
@@ -232,10 +257,12 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
 
   function snapshot() {
     assertOpen();
+    const date = clock();
     return {
       studios: list('studios').map((value) => {
-        const { workflowJob, manualPaused, resumeDraft, importedPaused, ...studio } = visibleStudio(value);
-        return studio;
+        const record = visibleStudio(value);
+        const { workflowJob, manualPaused, resumeDraft, importedPaused, ...studio } = record;
+        return { ...studio, manualPaused: Boolean(manualPaused), scheduleWaiting: waitingForSchedule(record, date) };
       }),
       tasks: list('tasks').map(visibleTask),
       inbox: [...list('inbox'), ...list('studio_inbox')].sort((left, right) => String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''))),
@@ -253,8 +280,28 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
   }
 
   function changed(value) {
-    if (!closed && onChange) publish(onChange, snapshot());
+    if (!closed && onChange) {
+      const state = snapshot();
+      for (const { id, scheduleWaiting } of state.studios) publishedWaiting.set(id, scheduleWaiting);
+      publish(onChange, state);
+    }
     return value;
+  }
+
+  function wake(studioId) {
+    queueMicrotask(() => { void drain(studioId); });
+  }
+
+  function refreshSchedules() {
+    assertOpen();
+    const date = clock();
+    let waitingChanged = false;
+    for (const studio of list('studios').map(visibleStudio)) {
+      if (waitingForSchedule(studio, date) !== (publishedWaiting.get(studio.id) ?? false)) waitingChanged = true;
+      if (!active.has(studio.id) && !isPaused(studio) && withinSchedule(studio.schedule, date)
+        && (hasWorkflowWork(studio) || pending.get(studio.id)?.size)) wake(studio.id);
+    }
+    if (waitingChanged) changed();
   }
 
   function createStudio(input) {
@@ -276,7 +323,32 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
         throw new Error('Папка проекта уже связана с текущей работой или опубликованными файлами.');
       }
     }
-    return changed(update('studios', { ...studio, ...settings }));
+    const result = changed(update('studios', { ...studio, ...settings }));
+    if (patch.schedule !== undefined && (hasWorkflowWork(result) || pending.get(studioId)?.size)) wake(studioId);
+    return result;
+  }
+
+  function deleteStudio({ studioId, confirmation }) {
+    const studio = read('studios', studioId, 'Студия');
+    if (confirmation !== studio.name) throw new Error('Введите точное название студии.');
+    if (active.has(studioId)) throw new Error('В студии выполняется работа. Дождитесь её завершения или остановите студию.');
+    transaction(() => {
+      db.prepare('DELETE FROM inbox WHERE task_id IN (SELECT id FROM tasks WHERE studio_id = ?)').run(studioId);
+      for (const table of ['studio_inbox', ...domains]) {
+        db.prepare(`DELETE FROM ${table} WHERE json_extract(data, '$.studioId') = ?`).run(studioId);
+      }
+      db.prepare('DELETE FROM tasks WHERE studio_id = ?').run(studioId);
+      db.prepare('DELETE FROM studios WHERE id = ?').run(studioId);
+      db.prepare('INSERT INTO deleted_studios (id) VALUES (?) ON CONFLICT (id) DO NOTHING').run(studioId);
+    });
+    pending.delete(studioId);
+    publishedWaiting.delete(studioId);
+    return changed({ studioId });
+  }
+
+  function wasStudioDeleted(studioId) {
+    assertOpen();
+    return typeof studioId === 'string' && Boolean(db.prepare('SELECT 1 FROM deleted_studios WHERE id = ?').get(studioId));
   }
 
   function getAgent(studio, agentId) {
@@ -343,11 +415,11 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     return insert('studio_inbox', { id: randomUUID(), studioId, taskId: null, kind, ...input, status: 'open', answer: '', createdAt: now() });
   }
 
-  function enqueue({ id, studioId }) {
+  function enqueue({ id, studioId }, { start = true } = {}) {
     const queue = pending.get(studioId) ?? new Set();
     queue.add(id);
     pending.set(studioId, queue);
-    queueMicrotask(() => { void drain(studioId); });
+    if (start) wake(studioId);
   }
 
   function startTask({ taskId, confirmLegacy }) {
@@ -355,7 +427,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     if (task.workflowManaged) {
       const studio = read('studios', task.studioId, 'Студия');
       if (studio.workflowJob?.taskId !== task.id || !['paused', 'error'].includes(studio.lifecycle)) throw new Error('Директор управляет запуском этой задачи.');
-      return workflow.setStudioRunning({ studioId: studio.id, action: 'resume' });
+      return setStudioRunning({ studioId: studio.id, action: 'resume' });
     }
     if (!restartable.includes(task.status)) throw new Error('Задача сейчас недоступна для запуска.');
     if (pending.get(task.studioId)?.has(taskId)) return task;
@@ -382,9 +454,9 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     if (task.workflowManaged) {
       const studio = read('studios', task.studioId, 'Студия');
       if (studio.workflowJob?.taskId !== task.id) throw new Error('Директор управляет остановкой этой задачи.');
-      return workflow.setStudioRunning({ studioId: studio.id, action: 'stop' });
+      return setStudioRunning({ studioId: studio.id, action: 'stop' });
     }
-    if (!['queued', 'running', 'waiting'].includes(task.status)) throw new Error('Задача сейчас недоступна для остановки.');
+    if (!['queued', 'scheduled', 'running', 'waiting'].includes(task.status)) throw new Error('Задача сейчас недоступна для остановки.');
     const cancelled = transaction(() => {
       resolveInbox(taskId);
       return taskState(task, 'interrupted');
@@ -422,10 +494,9 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
   }
 
   async function drain(studioId) {
-    if (closed || active.has(studioId)) return;
-    const studio = read('studios', studioId, 'Студия');
-    if (studio.manualPaused || studio.lifecycle === 'paused') return;
-    if (studio.workflowJob && ['planning', 'active'].includes(studio.lifecycle)) {
+    const studio = availableStudio(studioId);
+    if (!studio) return;
+    if (hasWorkflowWork(studio)) {
       workflow.queue(studioId);
       return;
     }
@@ -477,28 +548,43 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     } finally {
       active.delete(studioId);
       finished.resolve();
-      if (!closed) workflow.queue(studioId);
-      if (!closed && pending.get(studioId)?.size) queueMicrotask(() => { void drain(studioId); });
+      if (!closed) onAvailable(studioId);
     }
   }
 
-  function interruptUnfinishedAttempts() {
+  function interruptUnfinishedAttempts({ restore = false } = {}) {
     const date = now();
     transaction(() => {
+      const studios = list('studios').map(visibleStudio);
+      const scheduledStudios = new Set(studios.filter(({ schedule }) => schedule.enabled).map(({ id }) => id));
+      const runningWorkflow = new Set();
       for (const task of list('tasks')) {
+        if (task.status === 'scheduled' && scheduledStudios.has(task.studioId)) {
+          if (restore) enqueue(task, { start: false });
+          continue;
+        }
         if (['scheduled', 'running'].includes(task.status)) {
           update('tasks', { ...task, status: 'interrupted', stage: 'blocked', activeAgentId: undefined, updatedAt: date });
         }
       }
       for (const attempt of list('attempts')) {
-        if (attempt.status === 'running') update('attempts', { ...attempt, status: 'interrupted', finishedAt: date });
+        if (attempt.status === 'running') {
+          runningWorkflow.add(attempt.studioId);
+          update('attempts', { ...attempt, status: 'interrupted', finishedAt: date });
+        }
       }
-      for (const studio of list('studios')) {
-        if (studio.workflowJob && ['active', 'planning'].includes(studio.lifecycle)) {
+      for (const studio of studios) {
+        if (hasWorkflowWork(studio) && (!studio.schedule.enabled || runningWorkflow.has(studio.id))) {
           update('studios', { ...studio, lifecycle: 'paused', activity: 'Работа прервана. Продолжите после сверки результатов.' });
         }
       }
     });
+  }
+
+  function onAvailable(studioId) {
+    const studio = read('studios', studioId, 'Студия');
+    if (waitingForSchedule(studio, clock()) !== (publishedWaiting.get(studioId) ?? false)) changed();
+    if (hasWorkflowWork(studio) || pending.get(studioId)?.size) wake(studioId);
   }
 
   function close() {
@@ -534,10 +620,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
 
   const workflow = createWorkflow({
     read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
-    run, writeArtifact, taskControls, runPrompt, report, isClosed: () => closed, active,
-    onAvailable: (studioId) => {
-      if (pending.get(studioId)?.size) queueMicrotask(() => { void drain(studioId); });
-    },
+    run, writeArtifact, taskControls, runPrompt, report, isClosed: () => closed, active, availableStudio, onAvailable,
   });
 
   function setStudioRunning({ studioId, action, running }) {
@@ -558,7 +641,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     if (studio.lifecycle === 'awaiting-approval') {
       result = changed(update('studios', { ...studio, manualPaused: action !== 'resume' }));
     } else if (studio.lifecycle === 'draft' && action !== 'resume') {
-      result = changed(update('studios', { ...studio, lifecycle: 'paused', activity: 'Студия на паузе', resumeDraft: true }));
+      result = changed(update('studios', { ...studio, lifecycle: 'paused', activity: 'Студия на паузе', resumeDraft: true, manualPaused: true }));
     } else if (action === 'resume' && studio.resumeDraft) {
       result = changed(update('studios', { ...studio, lifecycle: 'draft', activity: '', resumeDraft: undefined, manualPaused: false }));
     } else {
@@ -567,7 +650,7 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
       }
       result = workflow.setStudioRunning({ studioId, action });
     }
-    if (action === 'resume' && pending.get(studioId)?.size) queueMicrotask(() => { void drain(studioId); });
+    if (action === 'resume' && pending.get(studioId)?.size) wake(studioId);
     return result;
   }
 
@@ -585,7 +668,8 @@ export function createStudioService({ dbPath, run, onChange, notify, writeArtifa
     return changed(studio);
   }
 
-  interruptUnfinishedAttempts();
+  interruptUnfinishedAttempts({ restore: true });
+  refreshSchedules();
   const { initializeStudio, decidePlan } = workflow;
-  return { snapshot, createStudio, updateStudio, addAgent, updateAgent, createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, setStudioRunning, importStudio, close };
+  return { snapshot, createStudio, updateStudio, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent, createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, setStudioRunning, importStudio, close };
 }

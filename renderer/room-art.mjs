@@ -93,43 +93,140 @@ function paintRoom(canvas) {
   });
 }
 
-function paintDesk(canvas) {
+function paintDesk(canvas, working = false) {
   const kind = canvas.dataset.desk;
   const [coat, accent] = deskPalette[kind];
   paint(canvas, rect => {
-    rect(4, 23, 31, 14, '#302522');
-    rect(3, 21, 31, 12, '#a3714d');
-    rect(3, 30, 31, 3, '#c58d5f');
-    rect(7, 33, 3, 5, '#4e352a');
-    rect(28, 33, 3, 5, '#4e352a');
-    rect(17, 17, 14, 9, coat);
-    rect(19, 8, 10, 10, '#deb08e');
-    rect(18, 6, 12, 4, '#483229');
-    rect(18, 10, 3, 5, '#483229');
-    rect(25, 12, 2, 1, '#4f352d');
+    rect(7, 31, 3, 6, '#4e352a');
+    rect(29, 31, 3, 6, '#4e352a');
+    rect(20, 18, 11, 8, coat);
+    rect(18, 20, 15, 5, coat);
+    rect(23, 17, 4, 3, '#b98a6f');
+    rect(20, 8, 10, 10, '#deb08e');
+    rect(21, 6, 8, 2, '#483229');
+    rect(20, 8, 11, 3, '#483229');
+    rect(28, 11, 3, 4, '#483229');
+    rect(21, 12, 1, 1, '#4f352d');
+    rect(24, 12, 1, 1, '#4f352d');
+    rect(4, 24, 31, 8, '#302522');
+    rect(4, 24, 30, 5, '#a3714d');
+    rect(4, 29, 30, 2, '#c58d5f');
+    rect(27, 22, 4, 5, coat);
+    rect(26, 26, 4, 2, '#deb08e');
     if (kind === 'terminal') {
       rect(5, 14, 11, 10, '#2e3833');
       rect(7, 16, 7, 5, accent);
+      rect(8, 17, 4, 1, '#3b725f');
+      rect(8, 19, working ? 4 : 2, 1, '#3b725f');
       rect(9, 24, 3, 3, '#4a554e');
+      rect(13, 27, 8, 1, '#4a554e');
+      rect(17, 22, 4, 3, coat);
+      rect(working ? 15 : 17, 25, 4, 2, '#deb08e');
     } else if (kind === 'easel') {
-      rect(5, 13, 10, 12, '#5a4034');
-      rect(6, 13, 8, 9, '#edd4b0');
+      rect(5, 13, 11, 12, '#5a4034');
+      rect(6, 13, 9, 9, '#edd4b0');
       rect(7, 17, 4, 3, accent);
-      rect(12, 15, 2, 3, '#b96e50');
+      rect(12, 15, 2, working ? 4 : 3, '#b96e50');
+      rect(17, 21, 4, 3, coat);
+      rect(16, working ? 19 : 23, 3, 3, '#deb08e');
+      rect(13, working ? 18 : 22, 5, 1, '#694735');
     } else if (kind === 'books') {
       rect(5, 22, 10, 4, '#996348');
-      rect(6, 18, 8, 4, accent);
-      rect(4, 15, 10, 3, '#846e85');
+      rect(6, 19, 8, 3, accent);
+      rect(9, 23, 12, 5, '#5d4b64');
+      rect(9, 22, 5, 4, '#eed7b3');
+      rect(15, 22, 5, 4, '#f5e0bd');
+      rect(13, 23, 1, 4, '#b99b7d');
+      if (working) {
+        rect(14, 20, 4, 3, '#f6e8cb');
+        rect(16, 19, 3, 1, '#f6e8cb');
+      }
+      rect(18, working ? 20 : 26, 3, 2, '#deb08e');
     } else {
-      rect(5, 23, 11, 4, accent);
-      rect(8, 24, 6, 1, '#987b65');
       if (kind === 'plan') rect(6, 20, 8, 2, '#80978a');
-      if (kind === 'paper') rect(10, 22, 5, 1, '#6b5477');
+      rect(7, 23, 11, 5, accent);
+      rect(8, 24, 6, 1, '#987b65');
+      rect(8, 26, working ? 6 : 3, 1, '#987b65');
+      rect(17, 22, 4, 3, coat);
+      rect(working ? 14 : 17, 24, 4, 2, '#deb08e');
+      rect(working ? 13 : 16, 26, 2, 1, '#4f352d');
     }
   });
 }
 
+const stopAnimations = new WeakMap();
+
+function animateDesks(root, desks) {
+  const document = root.ownerDocument;
+  const window = document.defaultView;
+  if (!desks.length || !window?.IntersectionObserver) return;
+
+  const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const inViewport = new Set();
+  let interval;
+  let phase = 0;
+  let stopped = false;
+  const visible = canvas => canvas.isConnected &&
+    (canvas.checkVisibility?.({ visibilityProperty: true, opacityProperty: true, contentVisibilityAuto: true }) ?? true);
+
+  const stop = () => {
+    stopped = true;
+    window.clearInterval(interval);
+    interval = undefined;
+    intersection.disconnect();
+    mutations.disconnect();
+    document.removeEventListener('visibilitychange', update);
+    motion.removeEventListener('change', update);
+    stopAnimations.delete(root);
+  };
+
+  const update = () => {
+    if (stopped) return;
+    if (!desks.some(canvas => canvas.isConnected)) {
+      stop();
+      return;
+    }
+    if (document.hidden || motion.matches || !Array.from(inViewport).some(visible)) {
+      if (interval !== undefined) {
+        window.clearInterval(interval);
+        interval = undefined;
+        phase = 0;
+        for (const canvas of desks) if (canvas.isConnected) paintDesk(canvas);
+      }
+    } else if (interval === undefined) {
+      interval = window.setInterval(() => {
+        phase = (phase + 1) % 6;
+        if (phase === 5 || phase === 0) return;
+        for (const canvas of inViewport) {
+          if (!visible(canvas) || (phase >= 3 && canvas.dataset.desk === 'books')) continue;
+          paintDesk(canvas, phase === 1 || phase === 3);
+        }
+      }, 680);
+    }
+  };
+
+  const intersection = new window.IntersectionObserver(entries => {
+    for (const { target, isIntersecting } of entries) {
+      if (isIntersecting) inViewport.add(target);
+      else inViewport.delete(target);
+    }
+    update();
+  });
+  const mutations = new window.MutationObserver(update);
+  stopAnimations.set(root, stop);
+  document.addEventListener('visibilitychange', update);
+  motion.addEventListener('change', update);
+  mutations.observe(document, {
+    subtree: true, childList: true, attributes: true,
+    attributeFilter: ['hidden', 'class', 'style'],
+  });
+  for (const canvas of desks) intersection.observe(canvas);
+}
+
 export function paintRooms(root) {
+  stopAnimations.get(root)?.();
   for (const canvas of root.querySelectorAll('canvas[data-room]')) paintRoom(canvas);
-  for (const canvas of root.querySelectorAll('canvas[data-desk]')) paintDesk(canvas);
+  const desks = Array.from(root.querySelectorAll('canvas[data-desk]'));
+  for (const canvas of desks) paintDesk(canvas);
+  animateDesks(root, desks.filter(canvas => canvas.closest('.map-pin[data-activity="good"]')));
 }

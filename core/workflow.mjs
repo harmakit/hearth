@@ -17,7 +17,7 @@ function artifactPathFor(task, proposedPath) {
 
 export function createWorkflow({
   read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
-  run, writeArtifact, taskControls, runPrompt, report, isClosed, active, onAvailable,
+  run, writeArtifact, taskControls, runPrompt, report, isClosed, active, availableStudio, onAvailable,
 }) {
   function state(studio, lifecycle, activity, job = null) {
     return update('studios', { ...studio, lifecycle, activity, workflowJob: job });
@@ -28,7 +28,9 @@ export function createWorkflow({
   }
 
   function planning(studio, kind, feedback, previousPlanId) {
-    return state(studio, 'planning', 'Директор готовит план', { purpose: 'plan', kind, feedback, previousPlanId });
+    const job = { purpose: 'plan', kind, feedback, previousPlanId };
+    if (studio.manualPaused) return state(studio, 'paused', 'Студия на паузе', job);
+    return state(studio, 'planning', 'Директор готовит план', job);
   }
 
   function initializeStudio({ studioId }) {
@@ -41,7 +43,7 @@ export function createWorkflow({
   }
 
   function schedule(studio, job, activity) {
-    if (studio.lifecycle === 'paused') return state(studio, 'paused', 'Студия на паузе', job);
+    if (studio.lifecycle === 'paused' || studio.manualPaused) return state(studio, 'paused', 'Студия на паузе', job);
     return state(studio, 'active', activity, job);
   }
 
@@ -142,7 +144,7 @@ export function createWorkflow({
         }
         if (attempt.attemptId) interruptAttempt(attempt.attemptId);
       }
-      return state(studio, 'paused', action === 'stop' ? 'Студия остановлена' : 'Студия на паузе', studio.workflowJob);
+      return state({ ...studio, manualPaused: true }, 'paused', action === 'stop' ? 'Студия остановлена' : 'Студия на паузе', studio.workflowJob);
     });
     if (action === 'stop' && attempt?.job) attempt.controller.abort();
     return changed(result);
@@ -336,7 +338,7 @@ export function createWorkflow({
           }
           planning(studio, 'sprint', undefined, sprint.planId);
         } else {
-          state(studio, 'idle', 'Спринт завершён');
+          state(studio, studio.lifecycle === 'paused' ? 'paused' : 'idle', 'Спринт завершён');
         }
       }
     }
@@ -360,8 +362,8 @@ export function createWorkflow({
   }
 
   async function drain(studioId) {
-    if (isClosed() || active.has(studioId)) return;
-    const studio = read('studios', studioId, 'Студия');
+    const studio = availableStudio(studioId);
+    if (!studio) return;
     const job = studio.workflowJob;
     if (!job || !['active', 'planning'].includes(studio.lifecycle)) return;
     let task = job.taskId ? read('tasks', job.taskId, 'Задача') : undefined;
@@ -409,10 +411,7 @@ export function createWorkflow({
     } finally {
       active.delete(studioId);
       finished.resolve();
-      if (!isClosed()) {
-        queue(studioId);
-        onAvailable(studioId);
-      }
+      if (!isClosed()) onAvailable(studioId);
     }
   }
 

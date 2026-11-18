@@ -1,12 +1,14 @@
 import { agentActivity, buildRooms, languageChoices, pendingStudioPlan, roleDetails, roleNames, taskForAgent } from './workshop.mjs';
 import { paintRooms } from './room-art.mjs';
-import { renderWork } from './work-view.mjs';
+import { publishedPaths, renderWork } from './work-view.mjs';
+import { installDialogSize } from './dialog-size.mjs';
 
 const bridge = window.hearth;
 const $ = selector => document.querySelector(selector);
 const content = $('#content');
 const dialog = $('#dialog');
 const form = $('#dialog-form');
+const configureDialogSize = installDialogSize(dialog, () => stored('dialog-size'), value => stored('dialog-size', value));
 const runtimeNames = { codex: 'Codex', claude: 'Claude Code' };
 const modeNames = { inherit: 'Как у директора', fixed: 'Фиксированные модель и усилие', dynamic: 'Выбирает директор' };
 const views = { overview: 'Обзор', work: 'Работа', inbox: 'Входящие', workshop: 'Мастерская', settings: 'Настройки' };
@@ -45,6 +47,7 @@ let notificationTarget;
 let openingNotification = false;
 let workBusy = false;
 let workTab;
+const expandedEpics = new Set();
 let advancedOpen = false;
 
 function stored(key, value) {
@@ -91,6 +94,7 @@ function selectStudio(id) {
   selectedAgent = '';
   inboxScope = 'open';
   workTab = undefined;
+  expandedEpics.clear();
   advancedOpen = false;
   stored('studio', studioId);
 }
@@ -143,7 +147,7 @@ function work() {
   const rows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
   return heading('Работа', studio().name, button('Новая задача', 'data-open="task"')) + renderWork({
     studio: studio(), tasks: tasks(), epics: rows('epics'), stories: rows('stories'),
-    sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab,
+    sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab, expandedEpics,
   });
 }
 
@@ -152,6 +156,25 @@ function route(next) {
   notice();
   content.focus();
   render();
+}
+
+function taskEpic(task) {
+  const story = state.stories?.find(row => String(row.studioId) === studioId && row.id === task.storyId);
+  return (state.epics ?? []).find(row => String(row.studioId) === studioId && row.id === (task.epicId || story?.epicId));
+}
+
+function showEpic(id) {
+  if (!(state.epics ?? []).some(row => String(row.studioId) === studioId && same(row.id, id))) return;
+  if (dialog.open) dialog.close();
+  expandedEpics.clear();
+  expandedEpics.add(id);
+  workTab = 'epics';
+  route('work');
+  requestAnimationFrame(() => {
+    const section = [...content.querySelectorAll('[data-epic-section]')].find(row => row.dataset.epicSection === id);
+    section?.scrollIntoView({ block: 'nearest' });
+    section?.querySelector('summary')?.focus({ preventScroll: true });
+  });
 }
 
 function overview() {
@@ -166,16 +189,20 @@ function overview() {
   const activePlan = plans().findLast(plan => plan.status === 'approved');
   const initial = plans().some(plan => plan.kind === 'initial' && plan.status === 'approved');
   const canInitialize = current.lifecycle === 'draft';
-  const running = ['active', 'planning'].includes(current.lifecycle) || (current.lifecycle === 'idle' && initial);
-  const runButtons = ['error', 'paused'].includes(current.lifecycle)
+  const running = ['active', 'planning'].includes(current.lifecycle) || (current.lifecycle === 'idle' && initial) || workCount > 0 || current.scheduleWaiting;
+  const manuallyPaused = current.manualPaused || current.lifecycle === 'paused';
+  const runButtons = manuallyPaused || current.lifecycle === 'error'
     ? actionFor(current.lifecycle === 'error' ? 'Повторить шаг' : 'Возобновить', 'run-action', 'resume', false) + actionFor('Остановить', 'run-action', 'stop')
     : running ? actionFor('Пауза', 'run-action', 'pause') + actionFor('Остановить', 'run-action', 'stop') : '';
   const intro = canInitialize ? '<p class="muted">Директор предложит команду, первый спринт и критерии результата.</p>' : '';
-  const activity = current.activity || (current.lifecycle === 'planning' ? 'Директор готовит предложение по проекту.' : '');
+  const activity = current.scheduleWaiting ? 'Новые задачи запустятся в рабочее время студии.' :
+    current.activity || (current.lifecycle === 'planning' ? 'Директор готовит предложение по проекту.' : '');
   return heading('Обзор студии', current.name, (canInitialize ? '' : button('Новая задача', 'data-open="task"')) + runButtons) +
     `<div class="split"><div class="stack">
       ${current.lifecycle || activity || pendingPlan ? `<section class="panel padded stack compact">
-        <div class="row"><h2>${canInitialize ? 'Начало работы' : 'Студия'}</h2>${studioStatuses[current.lifecycle] ? badge(...studioStatuses[current.lifecycle]) : ''}</div>
+        <div class="row"><h2>${canInitialize ? 'Начало работы' : 'Студия'}</h2>${current.scheduleWaiting ? badge('Ждёт рабочего времени', 'warn') :
+          manuallyPaused ? badge('На паузе', 'warn') :
+          studioStatuses[current.lifecycle] ? badge(...studioStatuses[current.lifecycle]) : ''}</div>
         ${intro}${activity ? `<p class="activity" role="status">${safe(activity)}</p>` : ''}
         <div class="actions">${canInitialize ? button('Инициализировать студию', 'data-initialize' + (workBusy ? ' disabled' : '')) : ''}
           ${pendingPlan ? actionFor('Посмотреть план', 'plan', pendingPlan.id, false) : activePlan ? actionFor('Открыть план', 'plan', activePlan.id) : ''}</div>
@@ -185,7 +212,7 @@ function overview() {
         <h2>${safe(decision.title)}</h2><p class="clamp">${safe(decision.body)}</p>
         <div>${actionFor('Открыть во входящих', 'inbox', decision.id, false)}</div>
       </article>` : ''}
-      <section class="stack compact"><h2>Последний отчёт</h2>
+      <section class="stack compact"><div class="row"><h2>Последний отчёт</h2>${button('Все артефакты', 'data-work-pane="artifacts"', true)}</div>
         ${last ? `<article class="panel report">
           <div class="excerpt">${safe(last.summary || 'Результат сохранён в задаче.')}</div>
           <div class="padded stack compact"><div class="row"><h3>${safe(last.title)}</h3>${status(last)}</div>
@@ -258,7 +285,17 @@ function workshop() {
     return taskForAgent(currentTasks, current.id, person.id);
   };
   const job = jobFor(agent);
-  const activityFor = person => agentActivity(jobFor(person), person.id == null ? current.lifecycle : undefined);
+  const activityFor = person => {
+    const job = jobFor(person);
+    const director = person.id == null;
+    if (job?.status !== 'running' && current.scheduleWaiting && (director || job?.status === 'queued')) {
+      return ['Ждёт рабочего времени', 'warn'];
+    }
+    if (job?.status !== 'running' && current.manualPaused && (director || job?.status === 'queued')) {
+      return ['На паузе', 'warn'];
+    }
+    return agentActivity(job, director ? current.lifecycle : undefined);
+  };
   const renderAgent = (person, pin = false, props = '') => {
     const key = person.id == null ? '' : String(person.id);
     const chosen = person === agent;
@@ -312,13 +349,16 @@ function settings() {
   return heading('Настройки', current?.name || 'Подключения приложения') +
     `<div class="stack settings"><section class="stack compact"><h2>Подключения</h2><div class="columns">${providers}</div></section>
       ${current ? `<section class="stack compact"><h2>Студия</h2><div class="panel padded stack compact">
-        <div class="row"><h3>${safe(current.name)}</h3>${button('Изменить', 'data-open="edit-studio"', true)}</div>
+        <div class="row"><h3>${safe(current.name)}</h3><div class="actions">${button('Изменить', 'data-open="edit-studio"', true)}${button('Удалить студию', 'data-open="delete-studio"', true)}</div></div>
         ${current.brief ? plain(current.brief) : ''}<dl class="studio-meta"><dt>Рабочая папка</dt><dd>${safe(current.root || 'Не выбрана')}</dd><dt>Язык отчётов</dt><dd>${safe(current.language || 'Не выбран')}</dd>
           ${current.projectLanguage ? `<dt>Язык материалов</dt><dd>${safe(current.projectLanguage)}</dd>` : ''}</dl>
+        ${current.root ? `<div>${button('Открыть папку проекта', 'data-open="project-folder"', true)}</div>` : ''}
       </div></section>
       <section class="stack compact" id="autonomy" tabindex="-1"><h2>Автономность</h2><div class="panel padded stack compact">
         <label class="checkbox-field"><input type="checkbox" name="approveSprints"${current.approveSprints !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Согласовывать план спринта</span></label>
         <p class="muted">При инициализации Hearth всегда запрашивает согласование. Настройка применяется к будущим спринтам.</p>
+        <div class="row allowed-row"><div><h3>Расписание</h3><p class="muted">${safe(scheduleLabel(current.schedule))}</p></div>
+          ${button('Настроить расписание', 'data-open="schedule"', true)}</div>
       </div></section>
       <details class="panel padded advanced" id="advanced"${advancedOpen ? ' open' : ''}><summary>Расширенные настройки</summary><div class="stack">
       <section class="stack compact"><h2>Модели</h2><div class="inline-result stack compact">
@@ -341,7 +381,7 @@ function settings() {
       </div></section></div>`;
 }
 
-function dialogTo(title, body, submitLabel, submit) {
+function dialogTo(title, body, submitLabel, submit, { adjustable = false } = {}) {
   opener = dialog.open ? opener : document.activeElement;
   taskDialog = undefined;
   submission = submit;
@@ -350,6 +390,8 @@ function dialogTo(title, body, submitLabel, submit) {
   $('#dialog-actions').innerHTML = button(submit ? 'Отмена' : 'Закрыть', 'data-close', true) +
     (submit ? `<button type="submit" class="action">${safe(submitLabel)}</button>` : '');
   dialogError();
+  configureDialogSize(adjustable);
+  $('#dialog-body').scrollTop = 0;
   if (!dialog.open) dialog.showModal();
   const initialFocus = dialogBodyFocus();
   (initialFocus ?? dialog.querySelector('[data-close]'))?.focus();
@@ -383,6 +425,48 @@ function languageField(label, name, value, inherit = false) {
   return select(label, name, choices.join(''));
 }
 
+const weekdays = [[1, 'Пн'], [2, 'Вт'], [3, 'Ср'], [4, 'Чт'], [5, 'Пт'], [6, 'Сб'], [0, 'Вс']];
+const defaultSchedule = { enabled: false, days: [1, 2, 3, 4, 5], start: '09:00', end: '18:00' };
+
+function scheduleLabel(schedule) {
+  if (!schedule?.enabled) return 'Выключено';
+  return [weekdays.filter(([day]) => schedule.days.includes(day)).map(([, label]) => label).join(', '),
+    `${schedule.start}–${schedule.end}`, schedule.end < schedule.start ? 'до следующего дня' : ''].filter(Boolean).join(' · ');
+}
+
+function scheduleEditor() {
+  const current = studio();
+  const schedule = current.schedule ?? defaultSchedule;
+  const days = weekdays.map(([day, label]) => `<label class="checkbox-field"><input type="checkbox" name="day-${day}"${schedule.days.includes(day) ? ' checked' : ''}> <span>${label}</span></label>`).join('');
+  dialogTo('Расписание студии',
+    `<label class="checkbox-field"><input type="checkbox" name="schedule-enabled"${schedule.enabled ? ' checked' : ''}> <span>Запускать задачи по расписанию</span></label>
+     <fieldset class="export-files"><legend>Дни запуска</legend><div class="schedule-days">${days}</div></fieldset>
+     <div class="schedule-times">${input('Начало', 'start', schedule.start, 'type="time" required')}${input('Конец', 'end', schedule.end, 'type="time" required')}</div>
+     <p class="muted">Время местное. Если конец раньше начала, окно продолжается на следующий день. Вне окна новые задачи ждут, а запущенные завершаются. Для работы по расписанию Hearth должен быть запущен.</p>`,
+    'Сохранить расписание', values => bridge.request('updateStudio', {
+      studioId: current.id,
+      schedule: {
+        enabled: Boolean(values['schedule-enabled']),
+        days: weekdays.filter(([day]) => values[`day-${day}`]).map(([day]) => day),
+        start: values.start,
+        end: values.end,
+      },
+    }));
+}
+
+function deleteStudioEditor() {
+  const current = studio();
+  dialogTo('Удалить студию',
+    `<p>Задачи, планы и история студии «${safe(current.name)}» будут удалены из Hearth. Папка проекта и её файлы сохранятся.</p><p class="muted">Для подтверждения введите название студии.</p>` +
+    input('Название студии', 'confirmation', '', 'required autocomplete="off"'),
+    'Удалить студию', async ({ confirmation }) => {
+      await bridge.request('deleteStudio', { studioId: current.id, confirmation });
+      selectStudio(null);
+      view = 'overview';
+      notice('Студия удалена из Hearth.');
+    });
+}
+
 function studioEditor(current) {
   if (!current) {
     newStudio();
@@ -400,25 +484,17 @@ function studioEditor(current) {
 }
 
 const wizardNames = ['Что создаём', 'Папка и язык', 'Подключение директора'];
-const templates = {
-  book: ['Книга', 'Например, план первой главы с тремя ключевыми сценами'],
-  game: ['Игра', 'Например, описание первого игрового цикла и условий победы'],
-  art: ['Арт', 'Например, три визуальных направления с пояснениями'],
-  other: ['Другой проект', 'Например, краткое описание первого результата и способа его проверить'],
-};
 
 function newStudio() {
   const step = (number, fields) => `<section class="form-body" data-wizard-step="${number}"${number ? ' hidden' : ''}>
     <h3>${wizardNames[number]}</h3>${fields}</section>`;
-  const templateChoices = Object.entries(templates).map(([id, [title]]) => option(id, title, 'other')).join('');
   dialogTo('Новая студия',
     '<ol class="wizard-progress" aria-label="Шаги настройки">' +
     wizardNames.map((name, index) => `<li${index === 0 ? ' aria-current="step"' : ''}>${name}</li>`).join('') + '</ol>' +
     step(0, input('Название студии', 'name', '', 'required maxlength="120"') +
-      select('Тип проекта', 'template', templateChoices) +
-      textarea('Что должно получиться?', 'brief', '', 'required placeholder="Например, короткая игра об исследовании острова"') +
-      input('Для кого?', 'audience', '', 'placeholder="Например, для любителей неспешных игр"') +
-      input('Какой первый результат хотите увидеть?', 'firstResult', '', `placeholder="${safe(templates.other[1])}"`)) +
+      textarea('Что должно получиться?', 'brief', '', 'required placeholder="Опишите работу своими словами"') +
+      input('Для кого?', 'audience', '', 'placeholder="Кому предназначен результат"') +
+      input('Какой первый результат хотите увидеть?', 'firstResult', '', 'placeholder="Например, черновик, прототип или первая подборка"')) +
     step(1, pathField() + '<p class="muted">Выберите существующую папку или создайте новую в окне выбора.</p>' +
       languageField('Язык отчётов', 'language', 'Русский') +
       languageField('Язык материалов проекта', 'projectLanguage', '', true)) +
@@ -426,7 +502,7 @@ function newStudio() {
       Object.entries(runtimeNames).map(([id, label]) => option(id, label, 'codex')).join('')) +
       '<div id="wizard-provider" class="stack compact" role="status"></div>' +
       '<p class="muted">Для запуска нужно рабочее подключение. Черновик можно сохранить в любом случае.</p>'),
-    'Создать студию', async ({ template, brief, audience, firstResult, runtime, ...values }) => {
+    'Создать студию', async ({ brief, audience, firstResult, runtime, ...values }) => {
       if (!values.root) throw new Error('Выберите рабочую папку.');
       const completeBrief = [brief, audience && `Аудитория — ${audience}`, firstResult && `Первый результат — ${firstResult}`].filter(Boolean).join('\n\n');
       const created = await bridge.request('createStudio', { ...values, brief: completeBrief, director: { runtime } });
@@ -518,10 +594,13 @@ function openTask(task) {
     ? JSON.stringify(latest.artifact, null, 2) : latest.artifact;
   const block = (label, value) => value ? `<section class="inline-result"><h3>${label}</h3>${plain(value)}</section>` : '';
   const isOpen = taskDialog?.id === latest.id;
+  const previousScroll = $('#dialog-body').scrollTop;
+  const epic = taskEpic(latest);
   const attempts = (state.attempts ?? []).filter(attempt => attempt.taskId === latest.id).slice(-10).reverse();
   const purposes = { task: 'Исполнение', review: 'Ревью', director: 'Решение директора', publish: 'Запись файла' };
   const previousFocus = dialog.contains(document.activeElement) ? Object.entries(document.activeElement.dataset)[0]?.[0] : '';
   dialogTo(latest.title, `<div class="row">${needsWorktreeReview ? badge('Ждёт сверки рабочего дерева', 'warn') : status(latest)}<span class="muted">${safe(nameFor(taskAgent(latest)))}</span></div>` +
+    (epic ? `<div class="actions">${actionFor('К эпику', 'epic-link', epic.id)}<span class="muted">${safe(epic.title)}</span></div>` : '') +
     block('Постановка задачи', latest.prompt) + block('Критерии', listText(latest.criteria)) + block('Ошибка', latest.error) +
     (latest.summary && latest.summary !== artifact ? block('Краткий отчёт', latest.summary) : '') +
     block('Ревью', latest.review) + block('Решение директора', latest.directorDecision) +
@@ -536,9 +615,10 @@ function openTask(task) {
       ${canRun ? needsWorktreeReview ? actionFor('Сверить рабочее дерево', 'review-worktree', latest.id, false)
         : actionFor(latest.status === 'queued' ? 'Запустить' : 'Запустить снова', 'start-task', latest.id, false) : ''}
       ${canCancel ? actionFor('Отменить задачу', 'cancel-task', latest.id) : ''}
-    </div>`);
+    </div>`, undefined, undefined, { adjustable: true });
   taskDialog = latest;
   if (isOpen && previousFocus) Array.from(dialog.querySelectorAll('button')).find(node => Object.hasOwn(node.dataset, previousFocus))?.focus();
+  if (isOpen) $('#dialog-body').scrollTop = previousScroll;
 }
 
 function confirmWorktreeReview(task) {
@@ -575,7 +655,7 @@ function openInbox(item) {
     : item.taskId ? actionFor('Открыть задачу', 'task', item.taskId) : ''),
     question ? 'Отправить ответ' : 'Отметить просмотренной', open ? ({ answer }) => bridge.request('answerInbox', {
       inboxId: item.id, answer: question ? answer : '',
-    }) : undefined);
+    }) : undefined, { adjustable: question || (item.body?.length ?? 0) > 240 });
 }
 
 function openAcceptance(item, revise = false) {
@@ -588,11 +668,10 @@ function openAcceptance(item, revise = false) {
     (pending ? revise ? textarea('Что нужно исправить?', 'answer', '', 'required')
       : actionFor('Вернуть на доработку', 'revise-result', item.id) : ''),
     revise ? 'Отправить на доработку' : 'Принять результат',
-    pending ? ({ answer }) => send(revise ? 'revise' : 'approve', answer) : undefined);
+    pending ? ({ answer }) => send(revise ? 'revise' : 'approve', answer) : undefined, { adjustable: true });
 }
 
 const listText = value => Array.isArray(value) ? value.join('\n') : value;
-const publishedPaths = plan => (plan.publishedFiles ?? []).map(file => typeof file === 'string' ? file : file?.path).filter(Boolean);
 
 function autonomyHint() {
   return '<p class="muted">Сверку плана можно отключить в <button type="button" class="text-button" data-autonomy>Настройки → Автономность</button>. Настройка действует для будущих спринтов.</p>';
@@ -631,12 +710,12 @@ function openPlan(plan, revise = false) {
   const pending = plan.status === 'pending';
   dialogTo(plan.title || (plan.kind === 'initial' ? 'План инициализации' : 'План спринта'),
     planBody(plan) + (pending
-      ? (revise ? textarea('Что изменить в плане?', 'feedback', '', 'required') :
-        `<div class="actions">${actionFor('Подтвердить и запустить', 'approve-plan', plan.id, false)}
-        ${actionFor('Вернуть на доработку', 'revise-plan', plan.id)}</div>`) + autonomyHint()
+      ? (revise ? textarea('Что изменить в плане?', 'feedback', '', 'required') : '') + autonomyHint()
       : ''),
     revise && pending ? 'Отправить на доработку' : undefined, revise && pending ? ({ feedback }) =>
-      bridge.request('decidePlan', { planId: plan.id, decision: 'revise', feedback }) : undefined);
+      bridge.request('decidePlan', { planId: plan.id, decision: 'revise', feedback }) : undefined, { adjustable: true });
+  if (pending && !revise) $('#dialog-actions').insertAdjacentHTML('beforeend',
+    actionFor('Вернуть на доработку', 'revise-plan', plan.id) + actionFor('Подтвердить и запустить', 'approve-plan', plan.id, false));
 }
 
 async function approvePlan(raw) {
@@ -879,6 +958,9 @@ function exportEditor(mode) {
 const commands = {
   studio: () => studioEditor(),
   'edit-studio': () => studioEditor(studio()),
+  'delete-studio': deleteStudioEditor,
+  'project-folder': () => void workCommand('openProject', { studioId: studio().id }),
+  schedule: scheduleEditor,
   task: () => taskEditor(),
   director: directorEditor,
   'allow-model': () => allowEditor(),
@@ -898,6 +980,11 @@ document.addEventListener('click', event => {
   else if (data.wizardNext !== undefined) moveWizard(1);
   else if (data.wizardBack !== undefined) moveWizard(-1);
   else if (data.view) route(data.view);
+  else if (data.workPane) {
+    workTab = data.workPane;
+    route('work');
+  }
+  else if (data.epicLink !== undefined) showEpic(data.epicLink);
   else if (data.workTab) {
     workTab = data.workTab;
     render();
@@ -980,7 +1067,6 @@ form.addEventListener('submit', async event => {
 });
 
 form.addEventListener('change', ({ target }) => {
-  if (target.name === 'template') form.elements.firstResult.placeholder = templates[target.value][1];
   if (target.name === 'role') $('#role-guide').textContent = roleDetails[target.value] || '';
   if (target.name === 'runtime' && $('#wizard-provider')) {
     updateWizardProvider();
@@ -1006,6 +1092,10 @@ content.addEventListener('change', ({ target }) => {
 });
 content.addEventListener('toggle', ({ target }) => {
   if (target.id === 'advanced' && target.isConnected) advancedOpen = target.open;
+  if (target.isConnected && target.dataset.epicSection) {
+    if (target.open) expandedEpics.add(target.dataset.epicSection);
+    else expandedEpics.delete(target.dataset.epicSection);
+  }
 }, true);
 
 dialog.addEventListener('cancel', event => { if (dialogBusy) event.preventDefault(); });

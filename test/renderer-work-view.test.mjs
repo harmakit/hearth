@@ -28,6 +28,51 @@ test('epics include linked stories, acceptance criteria, tasks and dependencies'
   assert.match(html, /Зависимости[^]*?data-task="palette"[^]*?Цветовая схема/);
 });
 
+test('epics start collapsed and open the requested section with a compact summary', () => {
+  const input = {
+    tab: 'epics',
+    epics: [{ id: 'world', title: 'Мир' }, { id: 'other', title: 'Другое' }],
+    stories: [{ id: 'map', epicId: 'world' }],
+    tasks: [{ id: 'one', storyId: 'map' }, { id: 'two', epicId: 'world' }],
+  };
+
+  const collapsed = renderWork(input);
+  assert.match(collapsed, /<details[^>]+data-epic-section="world">\s*<summary>[^]*?Мир[^]*?Историй: 1[^]*?Задач: 2[^]*?<\/summary>/);
+  assert.equal((collapsed.match(/name="studio-epics"/g) ?? []).length, 2);
+  assert.doesNotMatch(collapsed, /<details[^>]+\sopen(?:\s|>)/);
+
+  const expanded = renderWork({ ...input, expandedEpics: new Set(['world']) });
+  assert.match(expanded, /<details[^>]+data-epic-section="world" open>/);
+  assert.match(expanded, /<details[^>]+data-epic-section="other">/);
+});
+
+test('artifacts link to task files, inline reports and published plan files', () => {
+  const html = renderWork({
+    tab: 'artifacts',
+    tasks: [
+      { id: 'file', title: 'Карта', artifactPath: 'maps/<world>.md' },
+      { id: 'inline', title: 'Сводка', summary: 'Результат', artifact: { done: true } },
+      { id: 'unpublished', title: 'В работе', artifactTarget: 'not-yet.md' },
+    ],
+    plans: [{
+      id: 'plan', title: 'Спринт', files: [{ path: 'draft.md' }],
+      publishedFiles: ['rules.md', { path: 'notes/"pilot".md' }, null, { path: 'rules.md' }],
+    }],
+  });
+
+  assert.match(html, /data-work-tab="artifacts" aria-pressed="true">Артефакты/);
+  assert.match(html, /data-artifact="file">maps\/&lt;world&gt;\.md<\/button>/);
+  assert.match(html, /data-task="inline"[^>]*>[^]*?Сводка/);
+  assert.match(html, /data-plan-file="rules\.md" data-plan-id="plan"/);
+  assert.match(html, /data-plan-file="notes\/&quot;pilot&quot;\.md" data-plan-id="plan"/);
+  assert.equal([...html.matchAll(/data-plan-file="rules\.md"/g)].length, 1);
+  assert.doesNotMatch(html, /not-yet\.md|draft\.md|data-task="unpublished"/);
+});
+
+test('artifacts show an empty state before results are published', () => {
+  assert.match(renderWork({ tab: 'artifacts' }), /Артефактов пока нет/);
+});
+
 test('sprints join plans and tasks, and show pending plans before a sprint is created', () => {
   const html = renderWork({
     tab: 'sprints',

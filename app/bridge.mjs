@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "addAgent", "updateAgent", "createTask",
   "startTask", "cancelTask", "answerInbox",
-  "initializeStudio", "decidePlan", "setStudioRunning",
+  "initializeStudio", "decidePlan", "setStudioRunning", "deleteStudio",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 
@@ -59,7 +59,7 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, transfer, protectedRoots = [] }) {
+export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, openProject, transfer, protectedRoots = [] }) {
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
@@ -68,6 +68,11 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       return inspect({ runtime: payload.runtime });
     }
     if (command === "previewImport") return previewImport({ root: await directory(payload.root) });
+    if (command === "openProject") {
+      const studio = service.snapshot().studios.find(entry => entry.id === payload.studioId);
+      if (!studio) throw new Error("Студия не найдена.");
+      return openProject(await directory(studio.root));
+    }
     if (command === "openArtifact") {
       const state = service.snapshot();
       if (payload.planId) {

@@ -72,3 +72,16 @@ test("routes approved workflow commands and only opens a studio's recorded artif
   assert.deepEqual(await dispatch("openArtifact", { taskId: "t1", path: "/etc/passwd" }), { root, path: "files/a.md" });
   await assert.rejects(dispatch("openArtifact", { taskId: "unknown" }), /артефакт/i);
 });
+
+test("opens only a studio's saved project folder and delegates confirmed deletion", async (t) => {
+  await mkdir(temp, { recursive: true });
+  const root = await mkdtemp(join(temp, "bridge-project-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dispatch = router({
+    snapshot: () => ({ studios: [{ id: "s1", root }], tasks: [] }),
+    deleteStudio: input => input,
+  }, { openProject: input => input });
+  assert.equal(await dispatch("openProject", { studioId: "s1", root: "/" }), root);
+  await assert.rejects(dispatch("openProject", { studioId: "wrong", root }), /студия/i);
+  assert.deepEqual(await dispatch("deleteStudio", { studioId: "s1", confirmation: "Тест" }), { studioId: "s1", confirmation: "Тест" });
+});

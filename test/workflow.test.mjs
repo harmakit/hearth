@@ -76,6 +76,71 @@ test('approval creates one dependency-aware sprint, writes the artifact and runs
   assert.deepEqual(snapshot.meetings.map(({ kind }) => kind), ['planning', 'retrospective']);
 });
 
+test('scheduled workflows retain a queued continuation after hours, manual pause, and restart', async (t) => {
+  const dbPath = database(t);
+  const calls = [];
+  const taskStarted = Promise.withResolvers();
+  const finishTask = Promise.withResolvers();
+  let date = new Date(2026, 10, 16, 8);
+  const options = {
+    dbPath, now: () => date,
+    run: async ({ purpose }) => {
+      calls.push(purpose);
+      if (purpose === 'task') {
+        taskStarted.resolve();
+        await finishTask.promise;
+      }
+      const results = {
+        plan: { ...draft, tasks: [{ ...draft.tasks[0], artifactPath: undefined }] },
+        task: { summary: 'Done' }, review: { pass: true, summary: 'Accepted' }, director: { action: 'finish' },
+      };
+      return { text: JSON.stringify(results[purpose]) };
+    },
+  };
+  let service = createStudioService(options);
+  t.after(() => { finishTask.resolve(); return service.close(); });
+  const { id: studioId } = service.createStudio({ name: 'Writer', root: '/project', schedule: { enabled: true, days: [1], start: '09:00', end: '18:00' } });
+  service.initializeStudio({ studioId });
+  await delay(10);
+  assert.deepEqual(calls, []);
+  assert.equal(service.snapshot().studios[0].scheduleWaiting, true);
+  date = new Date(2026, 10, 16, 9);
+  service.refreshSchedules();
+  const { plans: [plan] } = await until(service.snapshot, ({ plans }) => plans.length === 1);
+  date = new Date(2026, 10, 16, 18);
+  service.setStudioRunning({ studioId, action: 'pause' });
+  service.decidePlan({ planId: plan.id, decision: 'approve' });
+  await delay(10);
+  assert.deepEqual(calls, ['plan']);
+  assert.equal(service.snapshot().plans[0].status, 'approved');
+  date = new Date(2026, 10, 23, 17);
+  service.refreshSchedules();
+  await delay(10);
+  assert.deepEqual(calls, ['plan']);
+  assert.equal(service.snapshot().studios[0].lifecycle, 'paused');
+  service.setStudioRunning({ studioId, action: 'resume' });
+  await taskStarted.promise;
+  date = new Date(2026, 10, 23, 18);
+  finishTask.resolve();
+  await until(service.snapshot, ({ studios }) => studios[0].scheduleWaiting);
+  assert.deepEqual(calls, ['plan', 'task']);
+  await service.close();
+  service = createStudioService(options);
+  service.setStudioRunning({ studioId, action: 'pause' });
+  date = new Date(2026, 10, 30, 9);
+  service.refreshSchedules();
+  await delay(10);
+  assert.deepEqual(calls, ['plan', 'task']);
+  service.startTask({ taskId: service.snapshot().tasks[0].id });
+  await until(service.snapshot, ({ sprints }) => sprints[0]?.status === 'completed');
+  assert.deepEqual(calls, ['plan', 'task', 'review', 'director']);
+  const other = service.createStudio({ name: 'Other', root: '/project' });
+  service.deleteStudio({ studioId, confirmation: 'Writer' });
+  const { studios, ...records } = service.snapshot();
+  assert.deepEqual(studios.map(({ id }) => id), [other.id]);
+  for (const table of Object.keys(records)) assert.deepEqual(records[table], [], table);
+});
+
 test('invalid dependency graphs fail planning before creating studio records', async (t) => {
   const invalid = structuredClone(draft);
   invalid.tasks[0].dependsOn = ['second'];

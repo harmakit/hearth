@@ -131,8 +131,8 @@ main { max-width: 1500px; padding: 26px clamp(16px, 3vw, 36px) 38px; margin: aut
 .room-floor { position: relative; min-height: 165px; flex: 1 0 auto; isolation: isolate; background: #694e37; }
 .work-room:only-child .room-floor { min-height: 220px; }
 .room-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; image-rendering: pixelated; z-index: -1; }
-.work-room:only-child .room-art { object-fit: contain; background: repeating-linear-gradient(#61442f 0 2px, #76513c 2px 20px); }
-.room-occupants { display: flex; justify-content: center; flex-wrap: wrap; align-items: center; padding: 63px 8px 12px; gap: 5px; }
+.work-room:only-child .room-art { object-fit: contain; }
+.room-occupants { display: flex; justify-content: center; flex-wrap: wrap; align-items: center; padding: 68px 8px 12px; gap: 5px; }
 .work-room:only-child .room-occupants { padding-top: 97px; }
 .map-pin { display: grid; align-content: start; justify-items: center; min-width: 65px; max-width: 145px; padding: 5px; border: 1px solid transparent; border-radius: 5px; background: #33271a25; color: #fff7ea; }
 .map-pin:hover, .map-pin[aria-pressed="true"] { border-color: #ffcc96; background: #30261d91; box-shadow: 0 0 0 2px #1f1c18b0; }
@@ -143,8 +143,6 @@ main { max-width: 1500px; padding: 26px clamp(16px, 3vw, 36px) 38px; margin: aut
 .map-pin canvas { width: 58px; height: 58px; image-rendering: pixelated; }
 .map-pin[data-activity="warn"] { border-color: #d9a469; }
 .map-pin[data-activity="attention"] { border-color: #e29a8a; }
-.map-pin[data-activity="good"] canvas { animation: desk-activity 1.7s ease-in-out infinite; }
-@keyframes desk-activity { 50% { transform: translateY(-3px); } }
 .role-row { justify-content: flex-start; }
 .role-row canvas { width: 38px; height: 38px; image-rendering: pixelated; }
 .workshop-detail { margin-top: 17px; }
@@ -208,5 +206,4 @@ dialog form { display: grid; gap: 16px; padding: 19px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
-  .map-pin[data-activity="good"] canvas { animation: none; }
 }
