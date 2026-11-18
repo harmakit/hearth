@@ -1,0 +1,306 @@
+.work-view {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.work-view .work-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.work-view .work-tabs button {
+  min-height: 44px;
+  padding: 5px 4px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.work-view .work-tabs button:hover,
+.work-view .work-tabs button[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.work-view .work-tabs button[aria-pressed="true"] {
+  border-color: currentColor;
+}
+
+.work-view .work-board {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(116px, 1fr)) minmax(148px, 1.15fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 4px 4px 12px;
+  border-radius: var(--radius);
+}
+
+.work-view .work-lane {
+  --lane-color: var(--muted);
+  min-width: 0;
+  min-height: 128px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.work-view .work-lane[data-stage="in_progress"],
+.work-view .work-lane[data-stage="done"] {
+  --lane-color: var(--green);
+}
+
+.work-view .work-lane[data-stage="review"],
+.work-view .work-lane[data-stage="qa"] {
+  --lane-color: var(--yellow);
+}
+
+.work-view .work-lane[data-stage="blocked"] {
+  --lane-color: var(--accent);
+}
+
+.work-view .work-lane header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 52px;
+  padding: 8px 9px;
+  color: var(--lane-color);
+}
+
+.work-view .work-lane h2 {
+  font-size: 13px;
+  letter-spacing: 0;
+  overflow-wrap: normal;
+}
+
+.work-view .work-lane header > span {
+  min-width: 24px;
+  border: 1px solid var(--line);
+  border-radius: 100px;
+  background: var(--surface);
+  font-size: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.work-view .work-lane ul,
+.work-view .work-links,
+.work-view .work-dependencies ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.work-view .work-lane > ul {
+  padding: 0 7px 7px;
+}
+
+.work-view .work-task,
+.work-view .work-links > li {
+  min-width: 0;
+  padding: 0 8px 7px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.work-view .work-task-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 9px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: start;
+}
+
+.work-view .work-task-link:hover strong {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.work-view .work-task-link strong {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.work-view .work-task-link span,
+.work-view .work-owner,
+.work-view .work-muted,
+.work-view .work-progress p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.work-view .work-attempt {
+  width: fit-content;
+  margin-top: 5px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--contrast);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.work-view .work-attempt span {
+  font-weight: 650;
+}
+
+.work-view .work-attempt[data-attempt="waiting"],
+.work-view .work-approval[data-plan-status="pending"] {
+  color: var(--yellow);
+  background: var(--yellow-soft);
+}
+
+.work-view .work-attempt:is([data-attempt="failed"], [data-attempt="interrupted"]),
+.work-view .work-approval[data-plan-status="returned"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.work-view .work-approval[data-plan-status="approved"] {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.work-view .work-records {
+  display: grid;
+  gap: 12px;
+  max-width: 860px;
+}
+
+.work-view :is(.work-record, .work-empty) {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  min-width: 0;
+  padding: clamp(12px, 2vw, 20px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.work-view .work-empty p {
+  color: var(--muted);
+}
+
+.work-view .work-record > header,
+.work-view .work-record-statuses {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.work-view .work-record > header,
+.work-view :is(.work-story, .work-links, .work-progress) {
+  width: 100%;
+}
+
+.work-view .work-story {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-raised);
+}
+
+.work-view .work-text > strong,
+.work-view .work-dependencies > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.work-view .work-text p,
+.work-view .work-text li {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.work-view .work-text ul {
+  margin: 2px 0;
+  padding-inline-start: 19px;
+}
+
+.work-view .work-file {
+  color: var(--muted);
+  font: 12px/1.5 ui-monospace, monospace;
+}
+
+.work-view .work-dependencies {
+  margin-top: 5px;
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid var(--line);
+}
+
+.work-view .work-dependencies li > span {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.work-view .work-approval {
+  border-radius: 5px;
+  background: var(--contrast);
+  color: var(--muted);
+  padding: 3px 7px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.work-view .work-plan-button {
+  min-height: 44px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--surface);
+  font-weight: 620;
+}
+
+.work-view .work-plan-button:hover {
+  background: var(--surface-raised);
+}
+
+.work-view .work-progress {
+  display: grid;
+  gap: 4px;
+}
+
+.work-view progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--green);
+}
+
+@media (width <= 700px) {
+  .work-view .work-board {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 156px), 1fr));
+    overflow: visible;
+  }
+
+  .work-view .work-lane:has(> ul:empty) {
+    min-height: 0;
+  }
+}

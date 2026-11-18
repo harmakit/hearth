@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { realpathSync } from 'node:fs';
+import { appendFileSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
-const [runtime, mode, ...args] = process.argv.slice(2);
+const [runtime, mode, tracePath, ...args] = process.argv.slice(2);
 const sessionId = '12345678-1234-1234-1234-123456789abc';
 const turnId = 'fixture-turn';
 const profile = 'hearth-studio-read-only';
@@ -65,9 +65,9 @@ if (args[0] === '--version') {
   assert.equal(process.argv0, realpathSync(process.execPath));
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   let initialized = false;
-  let resumed = false;
   for await (const line of input) {
     const { id, method, params } = JSON.parse(line);
+    if (tracePath) appendFileSync(tracePath, `${method}\n`);
     const reply = result => send({ id, result });
     const event = (method, params) => send({ method, params: { threadId: sessionId, ...params } });
     if (method === 'initialize') {
@@ -82,17 +82,19 @@ if (args[0] === '--version') {
         reply({ account: { type: 'chatgpt', email: 'should-not-escape@example.org' }, requiresOpenaiAuth: true });
       } else if (method === 'model/list') {
         reply({ data: [{ model: 'fixture-model', displayName: 'Fixture model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }] });
-      } else if (method === 'thread/read') {
-        assert.equal(params.threadId, sessionId);
-        reply({ thread: { id: sessionId, cwd: process.cwd() } });
-      } else if (method === 'thread/start' || method === 'thread/resume') {
-        resumed = method === 'thread/resume';
-        if (resumed) assert.equal(params.threadId, sessionId);
+      } else if (method === 'thread/start') {
+        assert.equal(params.ephemeral, true);
         assert.equal(params.cwd, process.cwd());
         assert.deepEqual(params.runtimeWorkspaceRoots, [process.cwd()]);
         assert.equal(params.approvalPolicy, 'never');
         assert.equal(params.permissions, profile);
-        reply({ thread: { id: sessionId }, cwd: params.cwd, approvalPolicy: 'never', model: params.model,
+        const thread = { id: sessionId };
+        if (mode === 'unsupported-ephemeral') {
+          send({ id, error: { code: -32602, message: 'unknown field ephemeral' } });
+          continue;
+        }
+        if (mode !== 'missing-ephemeral') thread.ephemeral = mode !== 'persistent-thread';
+        reply({ thread, cwd: params.cwd, approvalPolicy: 'never', model: params.model,
           activePermissionProfile: { id: mode === 'wrong-sandbox' ? ':danger-full-access' : profile, extends: null }, runtimeWorkspaceRoots: [process.cwd()] });
       } else if (method === 'turn/start') {
         assert.deepEqual(params.input, [{ type: 'text', text: 'Test prompt', text_elements: [] }]);
@@ -103,7 +105,7 @@ if (args[0] === '--version') {
         event('item/completed', { turnId, item: { type: 'agentMessage', text: 'commentary', phase: 'commentary' } });
         if (mode === 'failure') event('turn/completed', { turn: { id: turnId, status: 'failed', error: { message: 'fixture failure' } } });
         else {
-          if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: resumed ? 'Codex resumed' : 'Codex answer', phase: 'final_answer' } });
+          if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: 'Codex answer', phase: 'final_answer' } });
           event('turn/completed', { turn: { id: turnId, status: 'completed' } });
         }
       } else if (method === 'turn/interrupt') {

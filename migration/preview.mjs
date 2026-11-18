@@ -12,7 +12,7 @@ const MAX_WORKTREE_DEPTH = 32;
 const isMissing = error => error.code === 'ENOENT' || error.code === 'ENOTDIR';
 const sameEntry = (a, b) => a.dev === b.dev && a.ino === b.ino;
 
-function createInspector(warn) {
+export function createInspector(warn) {
   let metadataBytes = 0;
 
   async function inspect(path, label, missing = null) {
@@ -159,7 +159,7 @@ function createInspector(warn) {
     return 'unverified';
   }
 
-  return { inspect, inspectDirectory, entries, tasks, worktreeState };
+  return { inspect, inspectDirectory, entries, readMetadata, tasks, worktreeState };
 }
 
 export async function previewImport({ root } = {}) {

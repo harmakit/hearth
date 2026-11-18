@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, net, Notification, protocol } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, net, Notification, protocol, shell } = require("electron");
 const { existsSync, mkdirSync } = require("node:fs");
 const { homedir } = require("node:os");
 const path = require("node:path");
@@ -124,11 +124,32 @@ function notify({ title, studioId, inboxId }) {
 }
 
 async function pickFolder() {
-  const options = { properties: ["openDirectory"], title: "Выбрать папку проекта" };
+  const options = { properties: ["openDirectory", "createDirectory"], title: "Выбрать или создать папку проекта" };
   const result = window && !window.isDestroyed()
     ? await dialog.showOpenDialog(window, options)
     : await dialog.showOpenDialog(options);
   return result.canceled ? null : result.filePaths[0] ?? null;
+}
+
+async function pickBundle() {
+  const options = {
+    properties: ["openFile"],
+    title: "Открыть снимок Hearth Studio",
+    filters: [{ name: "Шаблон или снимок Hearth Studio", extensions: ["json"] }],
+  };
+  const result = window && !window.isDestroyed() ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? null : result.filePaths[0] ?? null;
+}
+
+async function saveBundle(studioName, mode) {
+  const filename = studioName.replace(/[/\\:\u0000-\u001f]/g, "-").slice(0, 100) || "Hearth";
+  const options = {
+    title: "Экспорт студии",
+    defaultPath: filename + (mode === "template" ? "-template" : "-snapshot") + ".hearth.json",
+    filters: [{ name: "Экспорт Hearth Studio", extensions: ["json"] }],
+  };
+  const result = window && !window.isDestroyed() ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+  return result.canceled ? null : result.filePath ?? null;
 }
 
 async function start() {
@@ -137,11 +158,15 @@ async function start() {
     { createStudioService },
     { run, inspect },
     { previewImport },
+    { createArtifactStore },
+    { createTransferController },
   ] = await Promise.all([
     import("./bridge.mjs"),
     import("../core/service.mjs"),
     import("../runtimes/index.mjs"),
     import("../migration/preview.mjs"),
+    import("./artifacts.mjs"),
+    import("./transfer.mjs"),
   ]);
   protocol.handle("hearth", async ({ url }) => {
     try {
@@ -172,13 +197,28 @@ async function start() {
   if (path.isAbsolute(process.env.HEARTH_LEGACY_ROOT || "")) {
     protectedRoots.push(process.env.HEARTH_LEGACY_ROOT);
   }
+  const validateRoot = root => validateProjectRoot(root, protectedRoots);
+  const artifacts = createArtifactStore({ receipts: path.join(dataDir, "artifact-receipts"), validateRoot });
   service = createStudioService({
     dbPath: path.join(dataDir, "studio.sqlite3"),
-    run: async request => run({ ...request, projectRoot: await validateProjectRoot(request.projectRoot, protectedRoots) }),
+    run: async request => run({ ...request, projectRoot: await validateRoot(request.projectRoot) }),
+    writeArtifact: artifacts.write,
     onChange: broadcast,
     notify,
   });
-  const dispatch = createCommandRouter({ service, selectFolder: pickFolder, inspect, previewImport, protectedRoots });
+  const transfer = createTransferController({
+    service, artifacts, pickBundle, saveBundle, journalDir: path.join(dataDir, "import-journal"),
+  });
+  const failedImports = await transfer.recover();
+  if (failedImports.length) console.warn("Hearth Studio: часть импортов ожидает восстановления.", failedImports.length);
+  const dispatch = createCommandRouter({
+    service, selectFolder: pickFolder, inspect, previewImport, transfer, protectedRoots,
+    async openArtifact({ root, path }) {
+      const error = await shell.openPath(await artifacts.openable(root, path));
+      if (error) throw new Error("Не удалось открыть артефакт: " + error);
+      return true;
+    },
+  });
   ipcMain.handle("hearth:request", async (event, command, payload) => {
     try {
       if (!window || event.sender !== window.webContents ||

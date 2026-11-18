@@ -107,6 +107,42 @@ test('answers once, persists the decision, and completes through the selected ro
   assert.equal(seen.at(-1).tasks[0].status, 'completed');
 });
 
+test('dynamic roles use the director’s exact allowlisted choice and reject outside choices', async (t) => {
+  const requests = [];
+  let pick = { runtime: 'claude', model: 'reader', effort: 'high' };
+  const service = createStudioService({
+    dbPath: ':memory:',
+    run: async (request) => {
+      requests.push(request);
+      return { text: request.purpose === 'select-model' ? JSON.stringify(pick) : 'Done' };
+    },
+  });
+  t.after(() => service.close());
+  const { id: studioId } = studio(service);
+  service.updateStudio({ studioId, allowed: [
+    { runtime: 'codex', model: 'writer', efforts: ['low'] },
+    { runtime: 'claude', model: 'reader', efforts: ['medium', 'high'] },
+  ] });
+  const agent = service.addAgent({ studioId, role: 'editor', mode: 'dynamic' });
+  const first = task(service, studioId, agent.id);
+  service.startTask({ taskId: first.id });
+  await until(service.snapshot, ({ tasks }) => tasks[0].status === 'completed');
+  assert.equal(requests[0].purpose, 'select-model');
+  assert.equal(requests[0].runtime, 'codex');
+  assert.match(requests[0].prompt, /writer.*low.*reader.*medium.*high/s);
+  assert.deepEqual(
+    requests.slice(1).map(({ runtime, model, effort }) => ({ runtime, model, effort })),
+    [pick],
+  );
+
+  pick = { runtime: 'claude', model: 'reader', effort: 'low' };
+  const second = task(service, studioId, agent.id);
+  service.startTask({ taskId: second.id });
+  const blocked = await until(service.snapshot, ({ tasks }) => tasks[1].status === 'failed');
+  assert.equal(requests.length, 3);
+  assert.match(blocked.tasks[1].error, /разрешён/);
+});
+
 test('serializes one studio while another runs and records provider errors', async (t) => {
   const requests = [];
   const service = createStudioService({

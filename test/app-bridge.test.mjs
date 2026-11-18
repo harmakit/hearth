@@ -55,3 +55,20 @@ test("only exposes supported runtime availability probes", async () => {
   await assert.rejects(dispatch("inspect", { runtime: "arbitrary-binary" }), /подключени/i);
   await assert.rejects(dispatch("inspect", []), /данны/i);
 });
+
+test("routes approved workflow commands and only opens a studio's recorded artifact", async (t) => {
+  await mkdir(temp, { recursive: true });
+  const root = await mkdtemp(join(temp, "bridge-workflow-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dispatch = router({
+    initializeStudio: input => input.studioId,
+    decidePlan: ({ planId }) => planId,
+    setStudioRunning: ({ action }) => action,
+    snapshot: () => ({ studios: [{ id: "s1", root }], tasks: [{ id: "t1", studioId: "s1", artifactPath: "files/a.md" }] }),
+  }, { openArtifact: input => input });
+  assert.equal(await dispatch("initializeStudio", { studioId: "s1" }), "s1");
+  assert.equal(await dispatch("decidePlan", { planId: "p1", decision: "approve" }), "p1");
+  assert.equal(await dispatch("setStudioRunning", { studioId: "s1", action: "resume" }), "resume");
+  assert.deepEqual(await dispatch("openArtifact", { taskId: "t1", path: "/etc/passwd" }), { root, path: "files/a.md" });
+  await assert.rejects(dispatch("openArtifact", { taskId: "unknown" }), /артефакт/i);
+});

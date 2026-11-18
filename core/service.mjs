@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createWorkflow } from './workflow.mjs';
+import { normalizeImport } from './import.mjs';
+import { parseResponse } from './protocol.mjs';
 
 const runtimes = ['codex', 'claude'];
 const modes = ['inherit', 'fixed', 'dynamic'];
@@ -8,6 +11,9 @@ const roles = ['library', 'engineer', 'editor', 'artist', 'other'];
 const defaultDirector = { runtime: 'codex', model: '', effort: '' };
 const restartable = ['queued', 'failed', 'interrupted'];
 const now = () => new Date().toISOString();
+const domains = ['plans', 'epics', 'stories', 'sprints', 'meetings', 'attempts'];
+const stages = { queued: 'ready', scheduled: 'ready', running: 'in_progress', completed: 'done', waiting: 'blocked', failed: 'blocked', interrupted: 'blocked' };
+const visibleStudio = (studio) => ({ approveSprints: true, lifecycle: 'draft', projectLanguage: '', ...studio });
 
 function string(value, label, { required = false, fallback = '' } = {}) {
   if (value === undefined) value = fallback;
@@ -41,47 +47,82 @@ function allowlist(input) {
 function studioSettings(input, current = { brief: '', director: defaultDirector, allowed: [], agents: [] }) {
   const root = string(input.root, 'папка проекта', { required: true, fallback: current.root });
   if (!isAbsolute(root)) throw new Error('Укажите абсолютный путь к папке проекта.');
+  const approveSprints = input.approveSprints ?? current.approveSprints ?? true;
+  if (typeof approveSprints !== 'boolean') throw new Error('Некорректная настройка согласования спринтов.');
   return {
     name: string(input.name, 'название студии', { required: true, fallback: current.name }),
     brief: string(input.brief, 'бриф', { fallback: current.brief }),
     root,
     language: string(input.language, 'язык', { required: true, fallback: current.language ?? 'Русский' }),
+    projectLanguage: string(input.projectLanguage, 'язык материалов проекта', { fallback: current.projectLanguage }),
     director: controls(input.director ?? {}, current.director),
     allowed: input.allowed === undefined ? current.allowed : allowlist(input.allowed),
     agents: current.agents,
+    approveSprints,
   };
 }
 
 function agentSettings(input, current = { role: 'other', mode: 'inherit', runtime: '', model: '', effort: '' }) {
   return {
-    name: string(input.name, 'имя агента', { required: true, fallback: current.name }),
+    name: string(input.name, 'имя агента', { fallback: current.name }),
+    description: string(input.description, 'обязанности', { fallback: current.description }),
     role: option(input.role, current.role, roles, 'роль'),
     mode: option(input.mode, current.mode, modes, 'политика модели'),
     ...controls(input, current, ['', ...runtimes]),
   };
 }
 
-function taskControls(studio, agent) {
+async function taskControls(studio, agent, task, { run, signal, purpose }) {
+  if (!agent || agent.mode === 'inherit') return studio.director;
+  const options = new Map();
+  const tupleKey = ({ runtime, model, effort }) => JSON.stringify([runtime, model, effort]);
+  for (const { runtime, model, efforts } of studio.allowed) {
+    for (const effort of efforts.length ? efforts : ['']) {
+      const tuple = { runtime, model, effort };
+      options.set(tupleKey(tuple), tuple);
+    }
+  }
   if (agent?.mode === 'fixed') {
-    return { runtime: agent.runtime || studio.director.runtime, model: agent.model, effort: agent.effort };
+    const fixed = { runtime: agent.runtime || studio.director.runtime, model: agent.model, effort: agent.effort };
+    if (options.size && !options.has(tupleKey(fixed))) {
+      throw new Error('Модель и усилие агента отсутствуют в разрешённом списке студии.');
+    }
+    return fixed;
   }
-  if (agent?.mode === 'dynamic' && studio.allowed.length) {
-    // The studio sets the preference order. Keep the role's requested effort when supported.
-    const selection = studio.allowed[0];
-    const preferred = agent.effort || studio.director.effort;
-    const effort = selection.efforts.includes(preferred) ? preferred : selection.efforts[0] ?? '';
-    return { runtime: selection.runtime, model: selection.model, effort };
+  if (!options.size) return studio.director;
+  if (options.size === 1) return options.values().next().value;
+  const { runtime, model, effort } = studio.director;
+  const context = {
+    brief: studio.brief,
+    purpose,
+    agent: { role: agent.role, description: agent.description, preferredEffort: agent.effort },
+    task: { title: task.title, prompt: task.prompt, criteria: task.criteria },
+    allowed: [...options.values()],
+  };
+  const prompt = [
+    'Select the model and effort for this studio task.',
+    'Choose one option from allowed verbatim. Return it as a JSON object with exactly the runtime, model and effort fields. Leave project files unchanged.',
+    JSON.stringify(context, null, 2),
+  ].join('\n\n');
+  const selected = parseResponse(await run({
+    runtime, model: model || undefined, effort: effort || undefined,
+    purpose: 'select-model', projectRoot: studio.root, prompt, signal,
+  }));
+  const permitted = options.get(tupleKey(selected));
+  if (!permitted || Object.keys(selected).length !== 3) {
+    throw new Error('Директор выбрал сочетание вне разрешённого списка студии.');
   }
-  return studio.director;
+  return permitted;
 }
 
-function runPrompt(studio, agent, task, decisions) {
+function runPrompt(studio, agent, task, decisions, workflowContext) {
   const priorDraft = decisions.length ? {
     summary: task.summary.slice(0, 4000),
     artifact: task.artifact.slice(0, 16_000),
   } : undefined;
   const context = {
     language: studio.language,
+    projectLanguage: studio.projectLanguage || studio.language,
     brief: studio.brief,
     role: agent?.role ?? 'director',
     agent: agent?.name ?? '',
@@ -89,11 +130,13 @@ function runPrompt(studio, agent, task, decisions) {
     task: task.prompt,
     priorDraft,
     decisions: decisions.map(({ body, answer }) => ({ question: body, answer })),
+    ...workflowContext,
   };
   return [
     'Work on the task described in the JSON context. Read the project as needed and leave its files unchanged.',
     'Use the owner’s language from the language field for the report, artifact, and any question.',
     'Return one JSON object with string fields "summary" and "artifact". If you need an owner decision to continue, add "question" as a string or as {"title": "…", "body": "…"}. Omit "question" when finished.',
+    ...(workflowContext ? ['For a file, return its exact content in "artifact" and its relative path in "artifactPath". Use projectLanguage for the artifact. Use the planned artifactPath when present. For a revision of an already published result, propose a new unused filename.'] : []),
     'Use any recorded decisions and the prior draft to continue the original task. Ask only for decisions that are still needed.',
     JSON.stringify(context, null, 2),
   ].join('\n\n');
@@ -119,10 +162,10 @@ function report(result) {
 }
 
 function visibleTask(task) {
-  return task.status === 'scheduled' ? { ...task, status: 'queued' } : task;
+  return { stage: stages[task.status], dependencies: [], ...task, status: task.status === 'scheduled' ? 'queued' : task.status };
 }
 
-export function createStudioService({ dbPath, run, onChange, notify }) {
+export function createStudioService({ dbPath, run, onChange, notify, writeArtifact }) {
   const db = new DatabaseSync(dbPath);
   db.exec(`
     PRAGMA busy_timeout = 5000;
@@ -134,6 +177,8 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), data TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS inbox_by_task ON inbox(task_id);
+    CREATE TABLE IF NOT EXISTS studio_inbox (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+    ${domains.map((table) => `CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, data TEXT NOT NULL);`).join('\n')}
   `);
 
   const active = new Map();
@@ -150,6 +195,7 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     const row = typeof id === 'string' && db.prepare(`SELECT data FROM ${table} WHERE id = ?`).get(id);
     if (row) {
       const record = JSON.parse(row.data);
+      if (table === 'studios') return visibleStudio(record);
       return table === 'tasks' ? visibleTask(record) : record;
     }
     throw new Error(`${label} не найдено.`);
@@ -161,6 +207,14 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
 
   function update(table, value) {
     db.prepare(`UPDATE ${table} SET data = ? WHERE id = ?`).run(JSON.stringify(value), value.id);
+    return value;
+  }
+
+  function insert(table, value) {
+    const data = JSON.stringify(value);
+    if (table === 'tasks') db.prepare('INSERT INTO tasks VALUES (?, ?, ?)').run(value.id, value.studioId, data);
+    else if (table === 'inbox') db.prepare('INSERT INTO inbox VALUES (?, ?, ?)').run(value.id, value.taskId, data);
+    else db.prepare(`INSERT INTO ${table} VALUES (?, ?)`).run(value.id, data);
     return value;
   }
 
@@ -178,7 +232,15 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
 
   function snapshot() {
     assertOpen();
-    return { studios: list('studios'), tasks: list('tasks').map(visibleTask), inbox: list('inbox') };
+    return {
+      studios: list('studios').map((value) => {
+        const { workflowJob, manualPaused, resumeDraft, importedPaused, ...studio } = visibleStudio(value);
+        return studio;
+      }),
+      tasks: list('tasks').map(visibleTask),
+      inbox: [...list('inbox'), ...list('studio_inbox')].sort((left, right) => String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''))),
+      ...Object.fromEntries(domains.map((table) => [table, list(table)])),
+    };
   }
 
   function publish(callback, value) {
@@ -197,14 +259,24 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
 
   function createStudio(input) {
     assertOpen();
-    const studio = { id: randomUUID(), ...studioSettings(input) };
+    const studio = { id: randomUUID(), lifecycle: 'draft', ...studioSettings(input) };
     db.prepare('INSERT INTO studios VALUES (?, ?)').run(studio.id, JSON.stringify(studio));
     return changed(studio);
   }
 
   function updateStudio({ studioId, ...patch }) {
     const studio = read('studios', studioId, 'Студия');
-    return changed(update('studios', { id: studio.id, ...studioSettings(patch, studio) }));
+    const settings = studioSettings(patch, studio);
+    if (settings.root !== studio.root) {
+      const attachedTask = list('tasks').some((task) => task.studioId === studioId && (
+        task.artifactPath || ['scheduled', 'running', 'waiting'].includes(task.status)
+      ));
+      const publishedFiles = list('plans').some((plan) => plan.studioId === studioId && plan.publishedFiles?.length);
+      if (studio.workflowJob || active.has(studioId) || pending.has(studioId) || attachedTask || publishedFiles) {
+        throw new Error('Папка проекта уже связана с текущей работой или опубликованными файлами.');
+      }
+    }
+    return changed(update('studios', { ...studio, ...settings }));
   }
 
   function getAgent(studio, agentId) {
@@ -240,11 +312,11 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
       status: 'queued', summary: '', artifact: '', error: '', createdAt, updatedAt: createdAt,
     };
     db.prepare('INSERT INTO tasks VALUES (?, ?, ?)').run(task.id, studioId, JSON.stringify(task));
-    return changed(task);
+    return changed(visibleTask(task));
   }
 
   function taskState(task, status, patch = {}) {
-    return visibleTask(update('tasks', { ...task, ...patch, status, updatedAt: now() }));
+    return visibleTask(update('tasks', { ...task, stage: stages[status], ...patch, status, updatedAt: now() }));
   }
 
   function taskInbox(taskId) {
@@ -267,6 +339,10 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     return item;
   }
 
+  function addStudioInbox(studioId, kind, input) {
+    return insert('studio_inbox', { id: randomUUID(), studioId, taskId: null, kind, ...input, status: 'open', answer: '', createdAt: now() });
+  }
+
   function enqueue({ id, studioId }) {
     const queue = pending.get(studioId) ?? new Set();
     queue.add(id);
@@ -274,13 +350,28 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     queueMicrotask(() => { void drain(studioId); });
   }
 
-  function startTask({ taskId }) {
+  function startTask({ taskId, confirmLegacy }) {
     const task = read('tasks', taskId, 'Задача');
+    if (task.workflowManaged) {
+      const studio = read('studios', task.studioId, 'Студия');
+      if (studio.workflowJob?.taskId !== task.id || !['paused', 'error'].includes(studio.lifecycle)) throw new Error('Директор управляет запуском этой задачи.');
+      return workflow.setStudioRunning({ studioId: studio.id, action: 'resume' });
+    }
     if (!restartable.includes(task.status)) throw new Error('Задача сейчас недоступна для запуска.');
     if (pending.get(task.studioId)?.has(taskId)) return task;
+    if (task.legacyWorktreeReview && confirmLegacy !== true) {
+      throw new Error('Подтвердите сверку рабочего дерева и изменений перед запуском.');
+    }
+    if (task.dependencies.some((id) => read('tasks', id, 'Зависимость').stage !== 'done')) {
+      throw new Error('Сначала завершите задачи, от которых зависит эта работа.');
+    }
+    const studio = read('studios', task.studioId, 'Студия');
     const queued = transaction(() => {
       resolveInbox(taskId);
-      return taskState(task, 'scheduled', { error: '' });
+      if (studio.importedPaused) {
+        update('studios', { ...studio, lifecycle: 'idle', activity: 'Студия готова к ручному запуску задач', importedPaused: undefined });
+      }
+      return taskState(task, 'scheduled', { error: '', ...(task.legacyWorktreeReview ? { legacyWorktreeReview: false } : {}) });
     });
     enqueue(queued);
     return changed(queued);
@@ -288,6 +379,11 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
 
   function cancelTask({ taskId }) {
     const task = read('tasks', taskId, 'Задача');
+    if (task.workflowManaged) {
+      const studio = read('studios', task.studioId, 'Студия');
+      if (studio.workflowJob?.taskId !== task.id) throw new Error('Директор управляет остановкой этой задачи.');
+      return workflow.setStudioRunning({ studioId: studio.id, action: 'stop' });
+    }
     if (!['queued', 'running', 'waiting'].includes(task.status)) throw new Error('Задача сейчас недоступна для остановки.');
     const cancelled = transaction(() => {
       resolveInbox(taskId);
@@ -301,20 +397,23 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     return changed(cancelled);
   }
 
-  function answerInbox({ inboxId, answer }) {
-    const item = read('inbox', inboxId, 'Сообщение');
+  function answerInbox({ inboxId, answer, decision }) {
+    const studioItem = list('studio_inbox').find(({ id }) => id === inboxId);
+    const item = studioItem ?? read('inbox', inboxId, 'Сообщение');
     if (item.status !== 'open') throw new Error('Сообщение уже закрыто.');
-    if (item.kind === 'error') return changed(update('inbox', { ...item, status: 'resolved' }));
+    if (item.kind === 'plan') return workflow.decidePlan({ planId: item.planId, decision, feedback: answer });
+    if (item.kind === 'error') return changed(update(studioItem ? 'studio_inbox' : 'inbox', { ...item, status: 'resolved' }));
     const task = read('tasks', item.taskId, 'Задача');
     if (task.status !== 'waiting') {
       throw new Error('Ответ на этот вопрос уже закрыт.');
     }
+    if (task.workflowManaged) return workflow.resumeInbox(item, task, answer, decision);
     const body = string(answer, 'ответ', { required: true });
     const resolved = transaction(() => {
-      taskState(task, 'scheduled');
+      taskState(task, task.legacyWorktreeReview ? 'interrupted' : 'scheduled');
       return update('inbox', { ...item, status: 'resolved', answer: body });
     });
-    enqueue(task);
+    if (!task.legacyWorktreeReview) enqueue(task);
     return changed(resolved);
   }
 
@@ -324,6 +423,12 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
 
   async function drain(studioId) {
     if (closed || active.has(studioId)) return;
+    const studio = read('studios', studioId, 'Студия');
+    if (studio.manualPaused || studio.lifecycle === 'paused') return;
+    if (studio.workflowJob && ['planning', 'active'].includes(studio.lifecycle)) {
+      workflow.queue(studioId);
+      return;
+    }
     const queue = pending.get(studioId);
     const taskId = queue?.values().next().value;
     if (!taskId) return;
@@ -331,7 +436,6 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     if (!queue.size) pending.delete(studioId);
 
     const task = read('tasks', taskId, 'Задача');
-    const studio = read('studios', studioId, 'Студия');
     const agent = task.agentId ? getAgent(studio, task.agentId) : undefined;
     const decisions = taskInbox(taskId).filter(({ kind, answer }) => kind === 'question' && answer);
     const controller = new AbortController();
@@ -343,7 +447,8 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     try {
       changed(running);
       if (!isCurrent()) return;
-      const { runtime, model, effort } = taskControls(studio, agent);
+      const { runtime, model, effort } = await taskControls(studio, agent, running, { run, signal: controller.signal, purpose: 'task' });
+      if (!isCurrent()) return;
       const result = report(await run({
         runtime,
         model: model || undefined,
@@ -372,16 +477,28 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     } finally {
       active.delete(studioId);
       finished.resolve();
+      if (!closed) workflow.queue(studioId);
       if (!closed && pending.get(studioId)?.size) queueMicrotask(() => { void drain(studioId); });
     }
   }
 
   function interruptUnfinishedAttempts() {
-    db.prepare(`
-      UPDATE tasks
-      SET data = json_set(data, '$.status', 'interrupted', '$.updatedAt', ?)
-      WHERE json_extract(data, '$.status') IN ('scheduled', 'running')
-    `).run(now());
+    const date = now();
+    transaction(() => {
+      for (const task of list('tasks')) {
+        if (['scheduled', 'running'].includes(task.status)) {
+          update('tasks', { ...task, status: 'interrupted', stage: 'blocked', activeAgentId: undefined, updatedAt: date });
+        }
+      }
+      for (const attempt of list('attempts')) {
+        if (attempt.status === 'running') update('attempts', { ...attempt, status: 'interrupted', finishedAt: date });
+      }
+      for (const studio of list('studios')) {
+        if (studio.workflowJob && ['active', 'planning'].includes(studio.lifecycle)) {
+          update('studios', { ...studio, lifecycle: 'paused', activity: 'Работа прервана. Продолжите после сверки результатов.' });
+        }
+      }
+    });
   }
 
   function close() {
@@ -415,6 +532,60 @@ export function createStudioService({ dbPath, run, onChange, notify }) {
     return closing;
   }
 
+  const workflow = createWorkflow({
+    read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
+    run, writeArtifact, taskControls, runPrompt, report, isClosed: () => closed, active,
+    onAvailable: (studioId) => {
+      if (pending.get(studioId)?.size) queueMicrotask(() => { void drain(studioId); });
+    },
+  });
+
+  function setStudioRunning({ studioId, action, running }) {
+    action ??= running === true ? 'resume' : running === false ? 'pause' : undefined;
+    if (!['pause', 'resume', 'stop'].includes(action)) throw new Error('Неизвестная команда студии.');
+    const studio = read('studios', studioId, 'Студия');
+    const attempt = active.get(studioId);
+    if (action === 'stop') {
+      const queued = pending.get(studioId) ?? [];
+      transaction(() => {
+        for (const taskId of queued) taskState(read('tasks', taskId, 'Задача'), 'interrupted');
+        if (attempt && !attempt.job) taskState(read('tasks', attempt.id, 'Задача'), 'interrupted');
+      });
+      pending.delete(studioId);
+      if (attempt && !attempt.job) attempt.controller.abort();
+    }
+    let result;
+    if (studio.lifecycle === 'awaiting-approval') {
+      result = changed(update('studios', { ...studio, manualPaused: action !== 'resume' }));
+    } else if (studio.lifecycle === 'draft' && action !== 'resume') {
+      result = changed(update('studios', { ...studio, lifecycle: 'paused', activity: 'Студия на паузе', resumeDraft: true }));
+    } else if (action === 'resume' && studio.resumeDraft) {
+      result = changed(update('studios', { ...studio, lifecycle: 'draft', activity: '', resumeDraft: undefined, manualPaused: false }));
+    } else {
+      if (action === 'resume' && (studio.manualPaused || studio.importedPaused)) {
+        update('studios', { ...studio, manualPaused: false, importedPaused: undefined });
+      }
+      result = workflow.setStudioRunning({ studioId, action });
+    }
+    if (action === 'resume' && pending.get(studioId)?.size) queueMicrotask(() => { void drain(studioId); });
+    return result;
+  }
+
+  function importStudio(payload) {
+    assertOpen();
+    const normalized = normalizeImport(payload, studioSettings, agentSettings);
+    const studio = transaction(() => {
+      insert('studios', normalized.studio);
+      for (const table of ['tasks', ...domains.filter((name) => name !== 'attempts')]) {
+        for (const record of normalized[table]) insert(table, record);
+      }
+      for (const record of normalized.inbox) insert(record.taskId ? 'inbox' : 'studio_inbox', record);
+      return normalized.studio;
+    });
+    return changed(studio);
+  }
+
   interruptUnfinishedAttempts();
-  return { snapshot, createStudio, updateStudio, addAgent, updateAgent, createTask, startTask, cancelTask, answerInbox, close };
+  const { initializeStudio, decidePlan } = workflow;
+  return { snapshot, createStudio, updateStudio, addAgent, updateAgent, createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, setStudioRunning, importStudio, close };
 }

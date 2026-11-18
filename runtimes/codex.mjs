@@ -157,24 +157,24 @@ export async function inspectCodex(binary, options) {
   });
 }
 
-export async function runCodex(binary, { cwd, model, effort, prompt, nativeId, emit, ...options }) {
+export async function runCodex(binary, { cwd, model, effort, prompt, emit, ...options }) {
   const mcpOverrides = await disableMcpServers(binary, { cwd, ...options, timeoutMs: Math.min(options.timeoutMs, 8000) });
   return withServer(binary, { cwd, ...options }, async server => {
     const { rpc } = server;
     const { signal } = options;
     if (signal?.aborted) throw new DOMException('Запуск Codex отменён.', 'AbortError');
-    if (nativeId) {
-      const previous = await rpc('thread/read', { threadId: nativeId, includeTurns: false });
-      if (previous.thread?.cwd !== cwd || previous.thread?.id !== nativeId) {
-        throw new Error('Сессия Codex относится к другой рабочей папке.');
-      }
-    }
     const scope = { cwd, runtimeWorkspaceRoots: [cwd], permissions: profile, approvalPolicy: 'never' };
-    const thread = nativeId
-      ? await rpc('thread/resume', { ...scope, model, threadId: nativeId })
-      : await rpc('thread/start', { ...scope, model });
+    let thread;
+    try {
+      thread = await rpc('thread/start', { ...scope, model, ephemeral: true });
+    } catch (error) {
+      throw new Error(`Не удалось открыть временную сессию Codex. ${error.message}`, { cause: error });
+    }
+    if (thread?.thread?.ephemeral !== true) {
+      throw new Error('Codex не подтвердил временный режим сессии. Проверьте подключение и версию Codex.');
+    }
     const threadId = thread.thread?.id;
-    if (!threadId || (nativeId && nativeId !== threadId) || thread.cwd !== cwd ||
+    if (!threadId || thread.cwd !== cwd ||
         thread.approvalPolicy !== 'never' || thread.activePermissionProfile?.id !== profile ||
         thread.activePermissionProfile.extends != null || thread.runtimeWorkspaceRoots?.length !== 1 ||
         thread.runtimeWorkspaceRoots[0] !== cwd) {
@@ -205,7 +205,7 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
       if (cancelled) reject(cancelled);
       else if (params.turn.status === 'interrupted') reject(new DOMException('Codex прервал выполнение.', 'AbortError'));
       else if (params.turn.status !== 'completed') reject(providerError(params.turn.error?.message, 'Codex завершил задачу с ошибкой.'));
-      else resolve({ text: finalText || legacyText, nativeId: threadId });
+      else resolve({ text: finalText || legacyText });
     }
 
     onNotify(message => {

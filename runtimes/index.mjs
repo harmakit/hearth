@@ -120,6 +120,9 @@ export function createRuntimes({ binaries = {}, env: sourceEnv = process.env, ti
         throw new Error(`Усилие «${effort}» не поддерживается подключением ${provider.label}.`);
       }
       const nativeId = decodeSession(sessionId, runtime, root);
+      if (runtime === 'codex' && nativeId) {
+        throw new Error('Hearth не возобновляет сохранённые сессии Codex. Продолжите задачу из истории Hearth.');
+      }
       const env = electronEnvironment(sourceEnv, runtime);
       const binary = await locate(runtime, env);
       await checkVersion(binary, provider, { cwd, env, timeoutMs: inspectTimeoutMs, signal });

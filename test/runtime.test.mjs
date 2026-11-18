@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRuntimes } from '../runtimes/index.mjs';
@@ -7,23 +9,39 @@ const fixture = fileURLToPath(new URL('./fixtures/runtime-cli.mjs', import.meta.
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const request = { runtime: 'codex', projectRoot, prompt: 'Test prompt', model: 'fixture-model', effort: 'high' };
 
-function adapter(mode = 'success', options = {}) {
+function adapter(mode = 'success', options = {}, tracePath = '') {
   function binary(runtime) {
-    return { command: process.execPath, args: [fixture, runtime, mode] };
+    return { command: process.execPath, args: [fixture, runtime, mode, tracePath] };
   }
   return createRuntimes({ binaries: { codex: binary('codex'), claude: binary('claude') }, timeoutMs: 2000, ...options });
 }
 
-test('Codex exchanges JSONL, scopes final content to the active turn and resumes the native thread', async () => {
+test('Codex uses an ephemeral thread and returns only the active turn answer', async () => {
   const events = [];
   const runtimes = adapter();
   const result = await runtimes.run({ ...request, onEvent: event => events.push(event) });
-  assert.equal(result.text, 'Codex answer');
-  assert.ok(result.sessionId);
+  assert.deepEqual(result, { text: 'Codex answer' });
   assert.ok(events.some(event => event.type === 'completed'));
-  const resumed = await runtimes.run({ ...request, sessionId: result.sessionId });
-  assert.equal(resumed.text, 'Codex resumed');
-  assert.equal(resumed.sessionId, result.sessionId);
+});
+
+test('Codex sends no prompt and does not retry if ephemeral mode is unconfirmed', async t => {
+  const scratch = join(projectRoot, '.tmp');
+  await mkdir(scratch, { recursive: true });
+  const folder = await mkdtemp(join(scratch, 'runtime-privacy-'));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  for (const mode of ['missing-ephemeral', 'persistent-thread', 'unsupported-ephemeral']) {
+    const trace = join(folder, mode);
+    const events = [];
+    await assert.rejects(adapter(mode, {}, trace).run({ ...request, onEvent: event => events.push(event.type) }), /временн/i);
+    assert.equal(await readFile(trace, 'utf8'), 'initialize\ninitialized\nthread/start\n');
+    assert.deepEqual(events, ['failed']);
+  }
+});
+
+test('Codex rejects a previously persisted native session handle', async () => {
+  const tuple = ['codex', await realpath(projectRoot), '12345678-1234-1234-1234-123456789abc'];
+  const sessionId = Buffer.from(JSON.stringify(tuple)).toString('base64url');
+  await assert.rejects(adapter().run({ ...request, sessionId }), /сохранённ.*сесси/i);
 });
 
 test('Claude receives the prompt on stdin and resumes explicitly with tools disabled', async () => {
@@ -38,9 +56,10 @@ test('Claude receives the prompt on stdin and resumes explicitly with tools disa
 
 test('native session handles reject cross-project and cross-provider use', async () => {
   const runtimes = adapter();
-  const { sessionId } = await runtimes.run(request);
-  await assert.rejects(runtimes.run({ ...request, sessionId, runtime: 'claude' }), /сесси/i);
-  await assert.rejects(runtimes.run({ ...request, sessionId, projectRoot: process.cwd() + '/test' }), /сесси/i);
+  const claude = { ...request, runtime: 'claude' };
+  const { sessionId } = await runtimes.run(claude);
+  await assert.rejects(runtimes.run({ ...request, sessionId }), /сесси/i);
+  await assert.rejects(runtimes.run({ ...claude, sessionId, projectRoot: join(projectRoot, 'test') }), /сесси/i);
 });
 
 test('Codex disables configured MCP servers before creating a thread', async () => {

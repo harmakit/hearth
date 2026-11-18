@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "addAgent", "updateAgent", "createTask",
   "startTask", "cancelTask", "answerInbox",
+  "initializeStudio", "decidePlan", "setStudioRunning",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 
@@ -58,7 +59,7 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCommandRouter({ service, selectFolder, inspect, previewImport, protectedRoots = [] }) {
+export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, transfer, protectedRoots = [] }) {
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
@@ -67,6 +68,28 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       return inspect({ runtime: payload.runtime });
     }
     if (command === "previewImport") return previewImport({ root: await directory(payload.root) });
+    if (command === "openArtifact") {
+      const state = service.snapshot();
+      if (payload.planId) {
+        const plan = state.plans?.find(entry => entry.id === payload.planId);
+        const studio = plan && state.studios.find(entry => entry.id === plan.studioId);
+        if (!studio || !plan.publishedFiles?.some(file => (typeof file === "string" ? file : file.path) === payload.path)) {
+          throw new Error("Артефакт плана недоступен.");
+        }
+        return openArtifact({ root: studio.root, path: payload.path });
+      }
+      const task = state.tasks.find(entry => entry.id === payload.taskId);
+      const studio = task && state.studios.find(entry => entry.id === task.studioId);
+      if (!task?.artifactPath || !studio) throw new Error("Артефакт для этой задачи недоступен.");
+      return openArtifact({ root: studio.root, path: task.artifactPath });
+    }
+    if (command === "exportStudio") return transfer.exportStudio(service.snapshot(), payload);
+    if (command === "importBundle" || command === "importLegacy") {
+      const root = await validateProjectRoot(payload.root, protectedRoots);
+      const input = { ...payload, root };
+      if (command === "importLegacy") input.source = await directory(payload.source);
+      return transfer[command](input);
+    }
     if (!serviceCommands.has(command)) throw new Error("Неизвестная команда приложения.");
     if (command === "snapshot") return service.snapshot();
     if (command === "createStudio" || (command === "updateStudio" && Object.hasOwn(payload, "root"))) {
