@@ -1,7 +1,7 @@
 {
   "name": "hearth-studio",
   "productName": "Hearth Studio",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Local desktop workspace for independent agent studios",
   "type": "module",

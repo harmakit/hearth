@@ -6,6 +6,7 @@ const { randomUUID } = require("node:crypto");
 const { homedir } = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createLaunchRequests } = require("./launch-lifecycle.cjs");
 
 const appUrl = "hearth://app/index.html";
 const rendererPath = path.resolve(__dirname, "../renderer");
@@ -47,11 +48,17 @@ let shuttingDown = false;
 let scheduleTimer;
 let power;
 const notifications = new Set();
+const launchRequests = createLaunchRequests({
+  isShuttingDown: () => shuttingDown,
+  openWindow,
+  relaunch: () => app.relaunch(),
+});
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on("second-instance", () => { openWindow().catch(console.error); });
-  app.on("activate", () => { openWindow().catch(console.error); });
+  const requestWindow = () => { launchRequests.open().catch(console.error); };
+  app.on("second-instance", requestWindow);
+  app.on("activate", requestWindow);
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
   });
@@ -309,7 +316,7 @@ async function start() {
   const dispatch = createCommandRouter({
     service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,
     restart() {
-      app.relaunch();
+      launchRequests.relaunch();
       app.quit();
       return true;
     },
