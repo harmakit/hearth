@@ -1,0 +1,39 @@
+{
+  "release": "0.4.0",
+  "asarSHA256": "cbc9c110c0c04f08579e84d5ab9b20f8d1367855d23fd4384a26ece596d83b0c",
+  "windows": {
+    "selectedCount": 1,
+    "fullPathEqual": true,
+    "electron": "44.11.4",
+    "arch": "arm64",
+    "build": "10.0.26100.0",
+    "renderer": "hearth://app/index.html",
+    "selectedName": "Глава 01 — проверка.txt"
+  },
+  "linux": [
+    {
+      "result": "PASS",
+      "os": "Ubuntu 22.04",
+      "arch": "arm64",
+      "electron": "44.11.4",
+      "mode": "selection",
+      "window": [
+        "project-hearth-native-98Zo8s"
+      ],
+      "selected_role": "single selected file in Thunar status bar",
+      "file": "Глава 01 — проверка.txt",
+      "ui": "hearth://app/index.html"
+    },
+    {
+      "result": "PASS",
+      "os": "Ubuntu 22.04",
+      "arch": "arm64",
+      "electron": "44.11.4",
+      "mode": "fallback",
+      "parentOpened": true,
+      "observer": "unique parent folder title in Thunar X11 window",
+      "file": "Глава 01 — проверка.txt",
+      "ui": "hearth://app/index.html"
+    }
+  ]
+}
