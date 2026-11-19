@@ -152,6 +152,8 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     trainRoster: payload.trainRoster === true && input.lifecycle === 'draft',
     studio: {
       ...studioSettings(input), id: studioId, agents,
+      ...(['summary','off','hold'].includes(input.sprintReview) ? {sprintReview:input.sprintReview} : {}),
+      ...(input.languageMode==='app' ? {languageMode:'app'} : {}),
       ...(input.debtAssessment !== undefined && input.lifecycle !== 'draft' ? { debtAssessment: {
         reason: field(object(input.debtAssessment, 'оценка долга').reason, 'причина оценки долга', 2_000),
         assessedAt: field(input.debtAssessment.assessedAt, 'дата оценки долга', 64),

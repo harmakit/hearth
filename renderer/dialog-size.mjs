@@ -1,3 +1,4 @@
+import {copy} from './copy.mjs';
 const margin = 28;
 
 export function fitDialogSize(size, viewport) {
@@ -24,8 +25,8 @@ export function installDialogSize(dialog, readPreference, savePreference) {
   function expanded(value) {
     dialog.toggleAttribute("data-expanded", value);
     expand.setAttribute("aria-pressed", String(value));
-    expand.setAttribute("aria-label", value ? "Вернуть размер окна" : "Развернуть окно");
-    expand.title = value ? "Вернуть размер окна" : "Развернуть окно";
+    expand.setAttribute("aria-label", value ? copy("Вернуть размер окна") : copy("Развернуть окно"));
+    expand.title = value ? copy("Вернуть размер окна") : copy("Развернуть окно");
     expand.textContent = value ? "↙" : "⛶";
     grip.hidden = value || !dialog.hasAttribute("data-adjustable");
   }

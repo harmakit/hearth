@@ -185,9 +185,11 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     const existing = await refOid(identity.repository, ref);
     if (!existing && create === true) {
       const baseOid = await oid(identity.repository, baseRef ?? 'HEAD');
-      await git(identity.repository, [
-        'update-ref', '--no-deref', ref, baseOid, '0'.repeat(baseOid.length),
-      ]);
+      try {
+        await git(identity.repository, ['update-ref', '--no-deref', ref, baseOid, '0'.repeat(baseOid.length)]);
+      } catch (error) {
+        if (await refOid(identity.repository,ref) !== baseOid) throw error;
+      }
       return { ...identity, targetRef: ref, targetOid: baseOid, baseOid };
     }
     const targetOid = await oid(identity.repository, ref);

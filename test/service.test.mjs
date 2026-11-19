@@ -489,3 +489,46 @@ test('durable task transitions are scoped and paginated after restart', async t 
   assert.equal(prior.rows[0].toStatus, 'running');
   assert.throws(()=>read({studioId:other.id}), /студии/);
 });
+test('task entry preserves criteria and rejects dependencies from another studio', async t=>{
+  const service=createStudioService({dbPath:database(t)});
+  t.after(()=>service.close());
+  const a=studio(service), b=studio(service,'Other');
+  const before=task(service,a.id);
+  const values={studioId:a.id,title:'Publish',prompt:'Publish result',criteria:'Proof is attached',dependencies:[before.id],points:3,priority:40,backlog:true};
+  const created=service.createTask(values);
+  assert.equal(created.criteria,values.criteria);
+  assert.deepEqual(created.dependencies,[before.id]);
+  assert.equal(created.stage,'backlog');
+  assert.throws(()=>service.createTask({...values,studioId:b.id}),/студии/);
+});
+test('archive and restore retain the task list and keep scheduled work held',async t=>{
+  let clock=new Date(2026,10,16,21),runs=0;
+  const options={dbPath:database(t),now:()=>clock,run:async()=>{runs++;return {text:'QA'};}};
+  let service=createStudioService(options);
+  t.after(()=>service.close());
+  const s=studio(service); const work=task(service,s.id);
+  service.updateStudio({studioId:s.id,schedule:{enabled:true,days:[1],start:'22:00',end:'23:00'}});
+  service.initializeStudio({studioId:s.id});
+  const saved=service.setStudioArchived({studioId:s.id,archived:true});
+  assert.ok(saved.archivedAt);
+  await service.close();
+  clock=new Date(2026,10,16,22,15);
+  service=createStudioService(options);
+  service.refreshSchedules();
+  await delay(25);
+  assert.equal(runs,0);
+  assert.ok(service.snapshot().studios.find(v=>v.id===s.id).archivedAt);
+  assert.throws(()=>service.setStudioRunning({studioId:s.id,action:'resume'}),/архив/);
+  assert.equal(service.setStudioArchived({studioId:s.id,archived:false}).id,s.id);
+  assert.ok(service.snapshot().tasks.some(t=>t.id===work.id));
+});
+test('reconnecting cannot reinterpret previous files at an unrelated path',async t=>{
+  const service=createStudioService({dbPath:database(t)});
+  t.after(()=>service.close());
+  service.importStudio({studio:{id:'historical',root:'/initial',name:'Edition',language:'English',agents:[]},
+    tasks:[{id:'chapter',studioId:'historical',title:'Chapter',prompt:'Write',artifactPath:'book.md',stage:'done',status:'completed'}]});
+  service.detachProject({studioId:'historical'},'disk:original');
+  assert.throws(()=>service.updateStudio({studioId:'historical',root:'/elsewhere'},'disk:other'),/папка|Папка/);
+  const restored=service.updateStudio({studioId:'historical',root:'/moved'},'disk:original');
+  assert.equal(restored.root,'/moved');assert.equal(restored.projectDetached,undefined);
+});

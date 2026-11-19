@@ -1,32 +1,49 @@
+import {textFor} from './locale.mjs';
+import {copy as uiCopy, onCopyLocale , getCopyLocale} from './copy.mjs';
 import { roleNames } from './workshop.mjs';
 import { coachTitle, renderBoardTraining } from './coach-view.mjs';
 import { renderEvidence, renderRetrospective } from './legacy-view.mjs';
 
-const tabs = {
-  registry: 'Реестр задач',
-  board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи', artifacts: 'Артефакты', planning: 'Планирование',
-};
-const stages = {
-  backlog: 'Бэклог', ready: 'Готова к работе', in_progress: 'В работе', review: 'Ревью',
-  qa: 'Проверка', done: 'Готово', blocked: 'Заблокирована',
-};
+const makeTabs = () => ({
+  registry: uiCopy('Реестр задач'),
+  board: uiCopy('Доска'), epics: uiCopy('Эпики и истории'), sprints: uiCopy('Спринты'), meetings: uiCopy('Встречи'), artifacts: uiCopy('Артефакты'), planning: uiCopy('Планирование'),
+});
+let tabs = makeTabs();
+onCopyLocale(() => { tabs = makeTabs(); });
+const makeStages = () => ({
+  backlog: uiCopy('Бэклог'), ready: uiCopy('Готова к работе'), in_progress: uiCopy('В работе'), review: uiCopy('Ревью'),
+  qa: uiCopy('Проверка'), done: uiCopy('Готово'), blocked: uiCopy('Заблокирована'),
+});
+let stages = makeStages();
+onCopyLocale(() => { stages = makeStages(); });
 const legacyStages = {
   queued: 'ready', scheduled: 'ready', running: 'in_progress', waiting: 'blocked',
   completed: 'done', failed: 'blocked', interrupted: 'blocked', cancelled: 'blocked',
 };
-const attempts = {
-  queued: 'В очереди', scheduled: 'В очереди', running: 'Выполняется', waiting: 'Ждёт ответа',
-  completed: 'Завершена', failed: 'Ошибка', interrupted: 'Прервана', cancelled: 'Отменена',
-};
-const planStatuses = {
-  draft: 'Черновик', pending: 'Ждёт согласования', approved: 'Согласован', returned: 'На доработке',
-};
-const sprintStatuses = { active: 'В работе', completed: 'Завершён' };
-const meetingKinds = {
-  planning: 'Планирование', retrospective: 'Ретроспектива', review: 'Обзор результатов', grooming: 'Разбор очереди задач', topic: 'Обсуждение',
-};
-const meetingStages = { positions: 'Позиции участников', facilitation: 'Обсуждение', objections: 'Возражения', owner_review: 'Ждёт решения владельца', resolved: 'Решение сохранено', held: 'Приостановлена' };
-const meetingDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' });
+const makeAttempts = () => ({
+  queued: uiCopy('В очереди'), scheduled: uiCopy('В очереди'), running: uiCopy('Выполняется'), waiting: uiCopy('Ждёт ответа'),
+  completed: uiCopy('Завершена'), failed: uiCopy('Ошибка'), interrupted: uiCopy('Прервана'), cancelled: uiCopy('Отменена'),
+});
+let attempts = makeAttempts();
+onCopyLocale(() => { attempts = makeAttempts(); });
+const makePlanStatuses = () => ({
+  draft: uiCopy('Черновик'), pending: uiCopy('Ждёт согласования'), approved: uiCopy('Согласован'), returned: uiCopy('На доработке'),
+});
+let planStatuses = makePlanStatuses();
+onCopyLocale(() => { planStatuses = makePlanStatuses(); });
+const makeSprintStatuses = () => ({ active: uiCopy('В работе'), completed: uiCopy('Завершён') });
+let sprintStatuses = makeSprintStatuses();
+onCopyLocale(() => { sprintStatuses = makeSprintStatuses(); });
+const makeMeetingKinds = () => ({
+  planning: uiCopy('Планирование'), retrospective: uiCopy('Ретроспектива'), review: uiCopy('Обзор результатов'), grooming: uiCopy('Разбор очереди задач'), topic: uiCopy('Обсуждение'),
+});
+let meetingKinds = makeMeetingKinds();
+onCopyLocale(() => { meetingKinds = makeMeetingKinds(); });
+const makeMeetingStages = () => ({ positions: uiCopy('Позиции участников'), facilitation: uiCopy('Обсуждение'), objections: uiCopy('Возражения'), owner_review: uiCopy('Ждёт решения владельца'), resolved: uiCopy('Решение сохранено'), held: uiCopy('Приостановлена') });
+let meetingStages = makeMeetingStages();
+onCopyLocale(() => { meetingStages = makeMeetingStages(); });
+let meetingDate = new Intl.DateTimeFormat(getCopyLocale(), { dateStyle: 'medium' });
+onCopyLocale(()=>{ meetingDate=new Intl.DateTimeFormat(getCopyLocale(), { dateStyle: 'medium' }); });
 const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const safe = value => String(value ?? '').replace(/[&<>"']/g, character => entities[character]);
 const lookup = (dictionary, key) => Object.hasOwn(dictionary, key) ? dictionary[key] : undefined;
@@ -53,8 +70,8 @@ function bulletBlock(title, value) {
 
 function taskLink(task, showStage = true) {
   return `<button type="button" class="work-task-link" data-task="${safe(task.id)}">
-    <strong>${safe(nameOf(task, 'Задача без названия'))}</strong>
-    ${task.kind === 'debt' ? '<span class="debt-label">Улучшение</span>' : ''}
+    <strong>${safe(nameOf(task, uiCopy('Задача без названия')))}</strong>
+    ${task.kind === 'debt' ? uiCopy('<span class="debt-label">Улучшение</span>') : ''}
     ${showStage ? `<span>${stages[stageOf(task)]}</span>` : ''}
   </button>`;
 }
@@ -66,8 +83,8 @@ function linkedTasks(tasks, byTask) {
     return `<li>
       ${taskLink(task)}
       ${task.artifactPath ? `<p class="work-file">${safe(task.artifactPath)}</p>` : ''}
-      ${bulletBlock('Критерии приёмки', task.criteria)}
-      ${dependencies.length ? `<div class="work-dependencies"><span>Зависимости</span>
+      ${bulletBlock(uiCopy('Критерии приёмки'), task.criteria)}
+      ${dependencies.length ? uiCopy`<div class="work-dependencies"><span>Зависимости</span>
         <ul>${dependencies.map(id => {
           const dependency = byTask.get(id);
           return `<li>${dependency ? taskLink(dependency) : `<span>${safe(id)}</span>`}</li>`;
@@ -79,10 +96,10 @@ function linkedTasks(tasks, byTask) {
 
 function board(tasks, studio, byTask) {
   const replaced = tasks.filter(task => task.stage === 'replaced');
-  if (!tasks.length) return empty('На доске пока пусто', 'Задачи появятся здесь после согласования плана или создания вручную.');
+  if (!tasks.length) return empty(uiCopy('На доске пока пусто'), uiCopy('Задачи появятся здесь после согласования плана или создания вручную.'));
   const byStage = Map.groupBy(tasks.filter(task => task.stage !== 'replaced'), stageOf);
   const agents = new Map((studio.agents ?? []).map(agent => [agent.id, agent]));
-  return `<div class="work-board" role="region" aria-label="Доска задач" tabindex="0">
+  return uiCopy`<div class="work-board" role="region" aria-label="Доска задач" tabindex="0">
     ${Object.entries(stages).map(([stage, label]) => {
       const lane = byStage.get(stage) ?? [];
       return `<section class="work-lane" data-stage="${stage}" aria-labelledby="work-stage-${stage}">
@@ -90,20 +107,20 @@ function board(tasks, studio, byTask) {
         <ul>${lane.map(task => {
           const agent = agents.get(task.agentId);
           const owner = agent ? (agent.systemRole === 'coach' ? coachTitle : agent.name || lookup(roleNames, agent.role)) :
-            (task.agentId ? '' : (studio.director?.name || 'Директор'));
+            (task.agentId ? '' : (studio.director?.name || uiCopy('Директор')));
           const attempt = lookup(attempts, task.status) ?? task.status;
           return `<li class="work-task"${['train', 'debt'].includes(task.kind) ? ` data-task-kind="${task.kind}"` : ''}>
             ${taskLink(task, false)}
             ${owner ? `<p class="work-owner">${safe(owner)}</p>` : ''}
-            ${task.priority != null ? `<p class="work-owner">Приоритет: ${safe(task.priority)}</p>` : ''}
-            ${task.gitDelivery ? '<p class="work-owner">Git-доставка</p>' : ''}
+            ${task.priority != null ? uiCopy`<p class="work-owner">Приоритет: ${safe(task.priority)}</p>` : ''}
+            ${task.gitDelivery ? uiCopy('<p class="work-owner">Git-доставка</p>') : ''}
             ${renderBoardTraining(task, agents, byTask)}
-            ${attempt ? `<p class="work-attempt" data-attempt="${safe(task.status)}"><span>Попытка</span> ${safe(attempt)}</p>` : ''}
+            ${attempt ? uiCopy`<p class="work-attempt" data-attempt="${safe(task.status)}"><span>Попытка</span> ${safe(attempt)}</p>` : ''}
           </li>`;
         }).join('')}</ul>
       </section>`;
     }).join('')}
-  </div>${replaced.length ? `<details class="work-record"><summary>Заменённые задачи · ${replaced.length}</summary>${linkedTasks(replaced, byTask)}</details>` : ''}`;
+  </div>${replaced.length ? uiCopy`<details class="work-record"><summary>Заменённые задачи · ${replaced.length}</summary>${linkedTasks(replaced, byTask)}</details>` : ''}`;
 }
 
 function epicView(epics, stories, tasks, byTask, expandedEpics) {
@@ -115,13 +132,13 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
   const orphanStories = stories.filter(story => !epicIds.has(story.epicId));
   const orphanTasks = tasks.filter(task => !epicIds.has(task.epicId) && !storyIds.has(task.storyId));
   if (!epics.length && !stories.length && !tasks.length) {
-    return empty('Эпиков и историй пока нет', 'Они появятся здесь после согласования плана.');
+    return empty(uiCopy('Эпиков и историй пока нет'), uiCopy('Они появятся здесь после согласования плана.'));
   }
 
   const showStories = entries => entries.map(story => `<section class="work-story">
-    <h3>${safe(nameOf(story, 'История без названия'))}</h3>
-    ${textBlock('Цель', story.goal || story.description)}
-    ${bulletBlock('Критерии приёмки', story.acceptance ?? story.criteria ?? story.acceptanceCriteria)}
+    <h3>${safe(nameOf(story, uiCopy('История без названия')))}</h3>
+    ${textBlock(uiCopy('Цель'), story.goal || story.description)}
+    ${bulletBlock(uiCopy('Критерии приёмки'), story.acceptance ?? story.criteria ?? story.acceptanceCriteria)}
     ${linkedTasks(tasksByStory.get(story.id) ?? [], byTask)}
   </section>`).join('');
 
@@ -130,28 +147,28 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
       const epicStories = storiesByEpic.get(epic.id) ?? [];
       const directTasks = (tasksByEpic.get(epic.id) ?? []).filter(task => !storyIds.has(task.storyId));
       const taskCount = epicStories.reduce((count, story) => count + (tasksByStory.get(story.id)?.length ?? 0), directTasks.length);
-      return `<details class="work-record work-epic" name="studio-epics" data-epic-section="${safe(epic.id)}"${expandedEpics.has(epic.id) ? ' open' : ''}>
+      return uiCopy`<details class="work-record work-epic" name="studio-epics" data-epic-section="${safe(epic.id)}"${expandedEpics.has(epic.id) ? ' open' : ''}>
         <summary>
-          <strong>${safe(epic.kind === 'debt' && nameOf(epic) === 'Техдолг' ? 'Улучшения проекта' : nameOf(epic, 'Эпик без названия'))}</strong>
+          <strong>${safe(epic.kind === 'debt' && nameOf(epic) === 'Техдолг' ? uiCopy('Улучшения проекта') : nameOf(epic, uiCopy('Эпик без названия')))}</strong>
           <span class="work-muted">Историй: ${epicStories.length} · Задач: ${taskCount}</span>
         </summary>
         <div class="work-epic-body">
-          ${textBlock('Цель', epic.goal || epic.description)}
-          <p class="work-muted">Приоритет · ${safe(epic.priority ?? 'не задан')}</p>
-          <div class="actions">${action('Изменить приоритет', 'epic-priority', epic.id)}</div>
+          ${textBlock(uiCopy('Цель'), epic.goal || epic.description)}
+          <p class="work-muted">Приоритет · ${safe(epic.priority ?? uiCopy('не задан'))}</p>
+          <div class="actions">${action(uiCopy('Изменить приоритет'), 'epic-priority', epic.id)}</div>
           ${showStories(epicStories)}
           ${linkedTasks(directTasks, byTask)}
         </div>
       </details>`;
     }).join('')}
-    ${orphanStories.length ? `<article class="work-record"><h2>Истории без эпика</h2>${showStories(orphanStories)}</article>` : ''}
-    ${orphanTasks.length ? `<article class="work-record"><h2>Задачи без эпика и истории</h2>${linkedTasks(orphanTasks, byTask)}</article>` : ''}
+    ${orphanStories.length ? uiCopy`<article class="work-record"><h2>Истории без эпика</h2>${showStories(orphanStories)}</article>` : ''}
+    ${orphanTasks.length ? uiCopy`<article class="work-record"><h2>Задачи без эпика и истории</h2>${linkedTasks(orphanTasks, byTask)}</article>` : ''}
   </div>`;
 }
 
 function planButton(plan) {
-  const title = safe(nameOf(plan, 'План спринта'));
-  return `<button type="button" class="work-plan-button" data-plan="${safe(plan.id)}" aria-label="Открыть план «${title}»">Открыть план</button>`;
+  const title = safe(nameOf(plan, uiCopy('План спринта')));
+  return uiCopy`<button type="button" class="work-plan-button" data-plan="${safe(plan.id)}" aria-label="Открыть план «${title}»">Открыть план</button>`;
 }
 
 function sprintView(studio, sprints, plans, tasks, byTask) {
@@ -170,53 +187,61 @@ function sprintView(studio, sprints, plans, tasks, byTask) {
     const done = members.filter(task => stageOf(task) === 'done').length;
     const status = lookup(planStatuses, plan?.status ?? sprint.approvalStatus);
     const lifecycle = lookup(sprintStatuses, sprint.status);
-    const progress = `Задач готово ${done} из ${members.length}`;
+    const progress = uiCopy`Задач готово ${done} из ${members.length}`;
     return `<article class="work-record">
-      <header><h2>${safe(nameOf(sprint, plan?.title || 'Спринт без названия'))}</h2>
+      <header><h2>${safe(nameOf(sprint, plan?.title || uiCopy('Спринт без названия')))}</h2>
         <div class="work-record-statuses">
-          ${sprint.debtSprint || plan?.debtSprint ? '<span class="debt-label">Спринт улучшений</span>' : ''}
+          ${sprint.debtSprint || plan?.debtSprint ? uiCopy('<span class="debt-label">Спринт улучшений</span>') : ''}
           ${lifecycle ? `<span class="work-muted">${lifecycle}</span>` : ''}
           ${status ? `<span class="work-approval" data-plan-status="${safe(plan?.status ?? sprint.approvalStatus)}">${status}</span>` : ''}
         </div>
       </header>
-      ${textBlock('Цель', sprint.goal || plan?.goal)}
+      ${textBlock(uiCopy('Цель'), sprint.goal || plan?.goal)}
       ${members.length ? `<div class="work-progress">
         <p aria-hidden="true">${progress}</p>
         <progress max="${members.length}" value="${done}" aria-label="${progress}"></progress>
-      </div>` : '<p class="work-muted">В спринте пока нет задач.</p>'}
+      </div>` : uiCopy('<p class="work-muted">В спринте пока нет задач.</p>')}
       ${linkedTasks(members, byTask)}
-      ${textBlock('Итоги', sprint.outcome || sprint.summary)}
+      ${textBlock(uiCopy('Итоги'), sprint.outcome || sprint.summary)}
       ${renderRetrospective(sprint.retrospective)}
-      ${sprint.carryovers?.length ? `<div class="work-text"><strong>Переносы</strong><ul>${sprint.carryovers.map(row => `<li>
+      ${sprint.carryovers?.length ? uiCopy`<div class="work-text"><strong>Переносы</strong><ul>${sprint.carryovers.map(row => `<li>
         ${byTask.get(row.taskId) ? taskLink(byTask.get(row.taskId), false) : safe(row.taskId)} · ${safe(row.reason)}</li>`).join('')}</ul></div>` : ''}
-      <div class="actions">${plan ? planButton(plan) : ''}${sprint.status === 'active' ? action('Закрыть спринт', 'close-sprint', sprint.id) : ''}</div>
+      <div class="actions">${plan ? planButton(plan) : ''}${sprint.status === 'active' ? action(uiCopy('Закрыть спринт'), 'close-sprint', sprint.id) : ''}</div>
     </article>`;
   });
   const upcoming = plans.filter(plan => !attachedPlans.has(plan.id) && (plan.kind === 'sprint' || plan.status !== 'approved'));
-  if (!entries.length && !upcoming.length) return empty('Спринтов пока нет', 'Здесь появятся планы спринтов, состав задач и результаты.');
+  const closed=sprints.filter(s=>s.status==='completed');
+  const ui=k=>textFor(getCopyLocale(),k);
+  const comparison=closed.length>1 ? `<details class="work-record"><summary>${ui('compare')}</summary>
+    <table class="owner-table"><thead><tr><th>${uiCopy('Спринт')}</th><th>${ui('completedOfPlanned')}</th><th>${ui('carried')}</th><th>${ui('method')}</th></tr></thead><tbody>${closed.map(s=>{
+      const facts=s.retrospective;
+      return `<tr><td>${action(s.title,'owner-sprint',s.id)}<br><small>${safe(s.closedAt?.slice(0,10))}</small></td>
+        <td>${safe(facts?.accepted?.count??'—')} / ${safe(facts?.planned?.count??'—')}</td><td>${safe(facts?.carried?.count??'—')}</td><td>${safe(facts?.methodVersion??'—')}</td></tr>`;
+    }).join('')}</tbody></table></details>` : '';
+  if (!entries.length && !upcoming.length) return empty(uiCopy('Спринтов пока нет'), uiCopy('Здесь появятся планы спринтов, состав задач и результаты.'));
   const canPlanNext = sprints.some(sprint => sprint.status === 'completed') &&
     !sprints.some(sprint => sprint.status === 'active') &&
     !upcoming.some(plan => ['draft', 'pending'].includes(plan.status)) &&
     !['draft', 'planning', 'awaiting-approval'].includes(studio.lifecycle);
   return `<div class="work-records">
-    ${canPlanNext ? `<div class="actions">${action('Запланировать следующий спринт', 'open', 'next-sprint')}</div>` : ''}
+    ${canPlanNext ? `<div class="actions">${action(uiCopy('Запланировать следующий спринт'), 'open', 'next-sprint')}</div>` : ''}
     ${upcoming.map(plan => `<article class="work-record">
-      <header><h2>${safe(nameOf(plan, 'План спринта'))}</h2>
+      <header><h2>${safe(nameOf(plan, uiCopy('План спринта')))}</h2>
         <div class="work-record-statuses">
-          ${plan.debtSprint ? '<span class="debt-label">Спринт улучшений</span>' : ''}
+          ${plan.debtSprint ? uiCopy('<span class="debt-label">Спринт улучшений</span>') : ''}
           <span class="work-approval" data-plan-status="${safe(plan.status)}">${safe(lookup(planStatuses, plan.status) ?? plan.status)}</span>
         </div>
       </header>
-      ${textBlock('Цель', plan.goal)}
+      ${textBlock(uiCopy('Цель'), plan.goal)}
       ${planButton(plan)}
     </article>`).join('')}
-    ${entries.join('')}
+    ${comparison}${entries.join('')}
   </div>`;
 }
 
 function meetingsView(meetings, byTask, sprints) {
-  const controls = `<div class="actions">${action('Назначить встречу', 'open', 'meeting')}</div>`;
-  if (!meetings.length) return controls + empty('Встреч пока не было', 'Здесь сохраняются позиции участников, решения и задачи по итогам встречи.');
+  const controls = `<div class="actions">${action(uiCopy('Назначить встречу'), 'open', 'meeting')}</div>`;
+  if (!meetings.length) return controls + empty(uiCopy('Встреч пока не было'), uiCopy('Здесь сохраняются позиции участников, решения и задачи по итогам встречи.'));
   const bySprint = new Map(sprints.map(sprint => [sprint.id, sprint]));
   return controls + `<div class="work-records">${meetings.map(meeting => {
     const kind = lookup(meetingKinds, meeting.kind ?? meeting.type);
@@ -227,15 +252,15 @@ function meetingsView(meetings, byTask, sprints) {
       : '';
     const related = listed(meeting.taskIds).map(id => byTask.get(id)).filter(Boolean);
     return `<article class="work-record">
-      <header><h2>${safe(nameOf(meeting, kind || 'Встреча'))}</h2>
+      <header><h2>${safe(nameOf(meeting, kind || uiCopy('Встреча')))}</h2>
         ${time ? `<span class="work-muted">${time}</span>` : ''}
       </header>
-      ${meeting.stage ? `<p class="work-muted">${safe(meetingStages[meeting.stage] ?? meeting.stage)} · Версия ${safe(meeting.version)}</p>` : ''}
-      ${sprint ? `<p class="work-muted">${safe(nameOf(sprint, 'Спринт'))}</p>` : ''}
-      ${textBlock('Итог', meeting.outcome || meeting.summary)}
-      ${bulletBlock('Решения', listed(meeting.decisions).map(decision => decision.text ?? decision))}
+      ${meeting.stage ? uiCopy`<p class="work-muted">${safe(meetingStages[meeting.stage] ?? meeting.stage)} · Версия ${safe(meeting.version)}</p>` : ''}
+      ${sprint ? `<p class="work-muted">${safe(nameOf(sprint, uiCopy('Спринт')))}</p>` : ''}
+      ${textBlock(uiCopy('Итог'), meeting.outcome || meeting.summary)}
+      ${bulletBlock(uiCopy('Решения'), listed(meeting.decisions).map(decision => decision.text ?? decision))}
       ${linkedTasks(related, byTask)}
-      ${meeting.id ? action('Открыть встречу', 'meeting-detail', meeting.id) : ''}
+      ${meeting.id ? action(uiCopy('Открыть встречу'), 'meeting-detail', meeting.id) : ''}
     </article>`;
   }).join('')}</div>`;
 }
@@ -244,29 +269,37 @@ export const publishedPaths = plan => (plan.publishedFiles ?? [])
   .map(file => typeof file === 'string' ? file : file?.path)
   .filter(path => typeof path === 'string' && path.length > 0);
 
-function artifactsView(tasks, plans, evidence) {
+function artifactsView(tasks, plans, evidence, studio, sprints) {
+  const ui = key=>textFor(getCopyLocale(),key);
+  const info=t=>[t?.title,t?.id,t?.sprintId,sprints.find(s=>s.id===t?.sprintId)?.title,studio.agents?.find(a=>a.id===t?.agentId)?.name].filter(Boolean);
+  const attrs=(key,at)=>`data-file-key="${safe(key.filter(Boolean).join(' '))}" data-file-date="${safe(at?.slice(0,10))}"`;
+  const fileButtons=(id,path,isPlan)=>['revealArtifact','copyArtifactPath'].map((cmd,i)=>
+    `<button type="button" class="text-button" data-file-action="${cmd}" data-file-source="${isPlan?'plan':'task'}" data-file-id="${safe(id)}" data-file-path="${safe(path)}">${uiCopy(i ? 'Копировать путь' : 'Показать в папке')}</button>`).join(' ');
   const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary);
   const planResults = plans.map(plan => ({ plan, paths: [...new Set(publishedPaths(plan))] }))
     .filter(({ paths }) => paths.length);
   if (!taskResults.length && !planResults.length && !evidence.length) {
-    return empty('Артефактов пока нет', 'Здесь появятся файлы планов и результаты задач.');
+    return empty(uiCopy('Артефактов пока нет'), uiCopy('Здесь появятся файлы планов и результаты задач.'));
   }
 
   return `<div class="work-records">
-    ${renderEvidence(evidence)}
-    ${taskResults.length ? `<section class="work-record">
+    <div class="actions"><input data-file-query aria-label="${ui('findFile')}" placeholder="${ui('findFile')}"><label>${ui('periodFrom')} <input type="date" data-file-from></label><label>${ui('periodTo')} <input type="date" data-file-to></label></div>
+    ${evidence.map(e=>`<div ${attrs([e.sourcePath,e.kind,...info(tasks.find(t=>t.id===e.taskId))],e.recordedAt)}>${renderEvidence([e])}</div>`).join('')}
+    ${taskResults.length ? uiCopy`<section class="work-record">
       <h2>Результаты задач</h2>
-      <ul class="work-links">${taskResults.map(task => `<li>
-        ${taskLink(task, false)}
-        ${task.artifactPath ? `<button type="button" class="text-button work-file-link" data-artifact="${safe(task.id)}">${safe(task.artifactPath)}</button>` : '<span class="work-muted">Отчёт</span>'}
+      <ul class="work-links">${taskResults.map(task => `<li ${attrs([...info(task),task.artifactPath,...(task.artifactVersions??[])],task.updatedAt)}>
+        ${taskLink(task, false)} <small>${safe(info(task).slice(2).join(" · "))} ${safe(task.updatedAt?.slice(0,10))}</small>
+        ${task.artifactPath ? `<button type="button" class="text-button work-file-link" data-artifact="${safe(task.id)}">${safe(task.artifactPath)}</button>` : uiCopy('<span class="work-muted">Отчёт</span>')}
+        ${task.artifactPath ? fileButtons(task.id,task.artifactPath,false) : ''}
+        ${(task.artifactVersions??[]).filter(p=>p!==task.artifactPath).map(p=>`<div><button type="button" class="text-button" data-file-action="openArtifact" data-file-source="task" data-file-id="${safe(task.id)}" data-file-path="${safe(p)}">${safe(p)}</button> ${fileButtons(task.id,p,false)}</div>`).join('')}
       </li>`).join('')}</ul>
     </section>` : ''}
-    ${planResults.length ? `<section class="work-record">
+    ${planResults.length ? uiCopy`<section class="work-record">
       <h2>Файлы планов</h2>
       ${planResults.map(({ plan, paths }) => `<section class="work-story">
-        <h3>${safe(nameOf(plan, 'План без названия'))}</h3>
-        <ul class="work-artifact-files">${paths.map(path => `<li>
-          <button type="button" class="text-button work-file-link" data-plan-file="${safe(path)}" data-plan-id="${safe(plan.id)}">${safe(path)}</button>
+        <h3>${safe(nameOf(plan, uiCopy('План без названия')))}</h3>
+        <ul class="work-artifact-files">${paths.map(path => `<li ${attrs([plan.title,plan.id,path],plan.createdAt)}>
+          <button type="button" class="text-button work-file-link" data-plan-file="${safe(path)}" data-plan-id="${safe(plan.id)}">${safe(path)}</button> ${fileButtons(plan.id,path,true)}
         </li>`).join('')}</ul>
       </section>`).join('')}
     </section>` : ''}
@@ -277,59 +310,61 @@ function planningView(studio, phases, tasks) {
   const grooming = studio.grooming;
   const backlog = tasks.filter(task => !task.sprintId && task.kind !== 'train' && !['done', 'replaced'].includes(task.stage))
     .toSorted((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
-  return `<div class="work-records">
-    <section class="work-record"><header><h2>Бэклог</h2>${action('Добавить в бэклог', 'open', 'backlog-task')}</header>
+  return uiCopy`<div class="work-records">
+    <section class="work-record"><header><h2>Бэклог</h2>${action(uiCopy('Добавить в бэклог'), 'open', 'backlog-task')}</header>
       <p class="work-muted">Версия ${safe(studio.backlogVersion ?? 0)} · Задач: ${backlog.length}</p>
-      ${backlog.length ? `<ul class="work-links">${backlog.map(task => `<li>
+      ${backlog.length ? `<ul class="work-links">${backlog.map(task => uiCopy`<li>
         ${taskLink(task)}
-        <p class="work-muted">Приоритет: ${safe(task.priority ?? 'не задан')}${task.points != null ? ` · Баллы: ${safe(task.points)}` : ''}</p>
-        ${task.status !== 'running' ? `<div class="actions">${action('Изменить', 'backlog-edit', task.id)}${backlog.length > 1 ? action('Заменить', 'backlog-replace', task.id) : ''}</div>` : ''}
-      </li>`).join('')}</ul>` : '<p class="work-muted">Здесь будут задачи вне спринта.</p>'}
+        <p class="work-muted">Приоритет: ${safe(task.priority ?? uiCopy('не задан'))}${task.points != null ? uiCopy` · Баллы: ${safe(task.points)}` : ''}</p>
+        ${task.status !== 'running' ? `<div class="actions">${action(uiCopy('Изменить'), 'backlog-edit', task.id)}${backlog.length > 1 ? action(uiCopy('Заменить'), 'backlog-replace', task.id) : ''}</div>` : ''}
+      </li>`).join('')}</ul>` : uiCopy('<p class="work-muted">Здесь будут задачи вне спринта.</p>')}
     </section>
-    <section class="work-record"><header><h2>Подготовка задач к спринту</h2>${grooming?.status === 'open' ? action('Завершить разбор', 'resolve-grooming', grooming.id) : action('Разобрать очередь', 'open', 'request-grooming')}</header>
-      ${grooming ? `<p class="work-muted">${grooming.status === 'open' ? 'Открыт' : 'Завершён'} · Готовых задач: ${safe(grooming.readyTasks)} · Порог: ${safe(grooming.threshold)}</p>`
-        : '<p class="work-muted">Директор уточняет карточки и зависимости, чтобы подготовить задачи к следующему спринту.</p>'}
-      ${grooming?.result ? textBlock('Что изменилось', grooming.result) : ''}
-      ${grooming?.error ? textBlock('Ошибка подготовки', grooming.error) : ''}</section>
-    <section class="work-record"><header><h2>Фазы проекта</h2>${action('Добавить фазу', 'open', 'phase')}</header>
+    <section class="work-record"><header><h2>Подготовка задач к спринту</h2>${grooming?.status === 'open' ? action(uiCopy('Завершить разбор'), 'resolve-grooming', grooming.id) : action(uiCopy('Разобрать очередь'), 'open', 'request-grooming')}</header>
+      ${grooming ? uiCopy`<p class="work-muted">${grooming.status === 'open' ? uiCopy('Открыт') : uiCopy('Завершён')} · Готовых задач: ${safe(grooming.readyTasks)} · Порог: ${safe(grooming.threshold)}</p>`
+        : uiCopy('<p class="work-muted">Директор уточняет карточки и зависимости, чтобы подготовить задачи к следующему спринту.</p>')}
+      ${grooming?.result ? textBlock(uiCopy('Что изменилось'), grooming.result) : ''}
+      ${grooming?.error ? textBlock(uiCopy('Ошибка подготовки'), grooming.error) : ''}</section>
+    <section class="work-record"><header><h2>Фазы проекта</h2>${action(uiCopy('Добавить фазу'), 'open', 'phase')}</header>
       ${phases.length ? phases.map(phase => `<article class="work-story"><h3>${safe(phase.title)}</h3>
-        ${textBlock('Цель', phase.goal)}${bulletBlock('Условия завершения', (phase.criteria ?? []).map(row => row.description))}
-        <p class="work-muted">${phase.status === 'completed' ? 'Завершена' : phase.transition?.status === 'pending' ? 'Ждёт согласования' : 'В работе'}</p>
-        ${phase.status !== 'completed' ? `<div class="actions">${phase.transition?.status === 'pending' ? action('Решение о завершении', 'phase-transition', phase.id) :
-          action('Изменить', 'phase-edit', phase.id) + action('Предложить завершение', 'phase-transition', phase.id)}</div>` : ''}
-      </article>`).join('') : '<p class="work-muted">Фазы объединяют эпики и спринты вокруг одной цели.</p>'}</section>
+        ${textBlock(uiCopy('Цель'), phase.goal)}${bulletBlock(uiCopy('Условия завершения'), (phase.criteria ?? []).map(row => row.description))}
+        <p class="work-muted">${phase.status === 'completed' ? uiCopy('Завершена') : phase.transition?.status === 'pending' ? uiCopy('Ждёт согласования') : uiCopy('В работе')}</p>
+        ${phase.status !== 'completed' ? `<div class="actions">${phase.transition?.status === 'pending' ? action(uiCopy('Решение о завершении'), 'phase-transition', phase.id) :
+          action(uiCopy('Изменить'), 'phase-edit', phase.id) + action(uiCopy('Предложить завершение'), 'phase-transition', phase.id)}</div>` : ''}
+      </article>`).join('') : uiCopy('<p class="work-muted">Фазы объединяют эпики и спринты вокруг одной цели.</p>')}</section>
   </div>`;
 }
 
-export function registerRows(tasks, studio, sprints, query, stage) {
+export function registerRows(tasks, studio, sprints, query, stage, sprintId='', agentId='') {
   const owners = new Map((studio.agents ?? []).map(a => [a.id, a.name || a.roleTitle || a.role]));
   const sprintNames = new Map(sprints.map(s => [s.id, s.title]));
   const needle = query.trim().toLocaleLowerCase();
   const rows = [];
   for (const task of tasks) {
-    const owner = owners.get(task.agentId) || (task.agentId ? 'Неизвестный агент' : 'Директор');
+    if ((sprintId && task.sprintId!==sprintId) || (agentId && task.agentId!==agentId)) continue;
+    const owner = owners.get(task.agentId) || (task.agentId ? uiCopy('Неизвестный агент') : uiCopy('Директор'));
     const sprint = sprintNames.get(task.sprintId) || '';
     const state = task.stage === 'replaced' ? 'replaced' : stageOf(task);
     if (stage && state !== stage) continue;
     if (![task.title, task.id, owner, sprint, task.prompt].join(' ').toLocaleLowerCase().includes(needle)) continue;
-    rows.push(`<tr><td>${taskLink(task, false)}</td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${safe(stages[state] || 'Заменена')}</td></tr>`);
+    rows.push(`<tr><td>${taskLink(task, false)}<small class="registry-meta">${safe(task.legacyId || task.id?.slice(0,8))}${task.priority!=null ? ' · P'+safe(task.priority) : ''}</small></td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${safe(stages[state] || uiCopy('Заменена'))}</td></tr>`);
   }
-  return rows.join('') || '<tr><td colspan="4">По этим условиям задач нет.</td></tr>';
+  return rows.join('') || uiCopy('<tr><td colspan="4">По этим условиям задач нет.</td></tr>');
 }
 
-export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set(), registryQuery = '', registryStage = '' } = {}) {
+export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set(), registryQuery = '', registryStage = '', registrySprint = '', registryOwner = '' } = {}) {
+  const filterSelect=(name,label,items,selected)=>uiCopy`<label class="registry-filter">${label}<select data-registry-${name}><option value="">Все</option>${items.map(i=>`<option value="${safe(i.id)}" ${i.id===selected?'selected':''}>${safe(i.title || i.name || i.roleTitle || i.role || i.id)}</option>`).join('')}</select></label>`;
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
   const views = {
-    registry: () => `<section><div class="actions"><input type="search" data-registry-query aria-label="Найти задачу" placeholder="Название, ID, агент, спринт" value="${safe(registryQuery)}"><select data-registry-stage aria-label="Этап"><option value="">Все этапы</option>${Object.entries({...stages, replaced: 'Заменена'}).map(([key,label]) => `<option value="${key}" ${registryStage === key ? 'selected' : ''}>${label}</option>`).join('')}</select></div><div class="registry-scroll"><table class="registry"><thead><tr><th>Задача</th><th>Ответственный</th><th>Спринт</th><th>Этап</th></tr></thead><tbody data-registry-rows>${registerRows(tasks, studio, sprints, registryQuery, registryStage)}</tbody></table></div></section>`,
+    registry: () => uiCopy`<section><div class="actions"><input type="search" data-registry-query aria-label="Найти задачу" placeholder="Название, ID, агент, спринт" value="${safe(registryQuery)}"><select data-registry-stage aria-label="Этап"><option value="">Все этапы</option>${Object.entries({...stages, replaced: uiCopy('Заменена')}).map(([key,label]) => `<option value="${key}" ${registryStage === key ? 'selected' : ''}>${label}</option>`).join('')}</select>${filterSelect("sprint",uiCopy("Спринт"),sprints,registrySprint)}${filterSelect("owner",uiCopy("Исполнитель"),studio.agents ?? [],registryOwner)}</div><div class="registry-scroll"><table class="registry"><thead><tr><th>Задача</th><th>Ответственный</th><th>Спринт</th><th>Этап</th></tr></thead><tbody data-registry-rows>${registerRows(tasks, studio, sprints, registryQuery, registryStage, registrySprint, registryOwner)}</tbody></table></div></section>`,
     board: () => board(tasks, studio, byTask),
     epics: () => epicView(epics, stories, tasks, byTask, expandedEpics),
     sprints: () => sprintView(studio, sprints, plans, tasks, byTask),
     meetings: () => meetingsView(meetings, byTask, sprints),
-    artifacts: () => artifactsView(tasks, plans, evidence),
+    artifacts: () => artifactsView(tasks, plans, evidence,studio,sprints),
     planning: () => planningView(studio, phases, tasks),
   };
-  return `<section class="work-view" aria-label="Работа студии">
+  return uiCopy`<section class="work-view" aria-label="Работа студии">
     <div class="work-tabs" role="group" aria-label="Разделы работы">
       ${Object.entries(tabs).map(([id, label]) => `<button type="button" data-work-tab="${id}" aria-pressed="${id === selected}">${label}</button>`).join('')}
     </div>

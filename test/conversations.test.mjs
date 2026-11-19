@@ -85,3 +85,11 @@ test('versioned answers enforce freshness, choices and attachment IDs', () => {
   assert.throws(() => prepareInboxAnswer(closed, { version: 2, answer: 'Нет', operationId: 'request-3' }), /закрыт/);
   assert.equal(prepareInboxAnswer({ status: 'open', kind: 'question' }, { attachmentIds: ['att-2'] }).answer, 'Вложения');
 });
+test('task comments are replay-safe and do not schedule an agent',()=>{
+  const {conversations,wakes}=setup();
+  const input={studioId:'s',taskId:'t',kind:'comment',text:'Checked',operationId:'comment-1'};
+  const saved=conversations.postStudioMessage(input);
+  assert.equal(saved.status,'processed');
+  assert.deepEqual(conversations.postStudioMessage(input),saved);
+  assert.deepEqual(wakes,[]);
+});

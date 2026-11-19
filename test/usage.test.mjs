@@ -65,3 +65,8 @@ test('configured estimates price cache separately and keep subscription data sep
   assert.equal(usage.studioUsage('a').estimatedCost, null);
   assert.equal(usage.studioUsage('a').subscription, null);
 });
+test('imported incomplete usage keeps unknown counters distinct from a measured zero',()=>{
+  const service=createUsage({list:()=>[{studioId:'s',runtime:'codex',model:'m',input:0}],insert:()=>{}});
+  const r=service.studioUsage('s',{tariffs:[{runtime:'codex',model:'m',input:1,output:1,currency:'USD'}]});
+  assert.equal(r.totals.input,0);assert.equal(r.totals.output,null);assert.equal(r.totals.cacheRead,null);assert.equal(r.estimatedCost,null);
+});

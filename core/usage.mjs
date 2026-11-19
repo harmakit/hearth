@@ -25,7 +25,8 @@ function tokenTotals(events) {
   const totals = Object.fromEntries(counters.map((key) => [key, null]));
   for (const event of events) {
     for (const key of counters) {
-      if (event[key] !== null) totals[key] = (totals[key] ?? 0) + event[key];
+      const measured = count(event[key]);
+      if (measured !== null) totals[key] = (totals[key] ?? 0) + measured;
     }
   }
   return totals;
@@ -50,16 +51,16 @@ function estimatedCost(events, tariffs) {
     const rate = tariffs.find((rate) => rate?.runtime === event.runtime && rate.model === event.model);
     if (!rate || !/^[A-Z]{3}$/.test(rate.currency) || (currency && currency !== rate.currency)) return null;
     currency = rate.currency;
-    let input = event.input;
+    let input = count(event.input);
     if (input !== null) {
-      if (event.cacheRead !== null) input -= event.cacheRead;
-      if (event.cacheWrite !== null) input -= event.cacheWrite;
+      if (count(event.cacheRead) !== null) input -= event.cacheRead;
+      if (count(event.cacheWrite) !== null) input -= event.cacheWrite;
       if (input < 0) return null;
     }
     const billable = { ...event, input };
     for (const key of counters) {
       const unitRate = rate[key];
-      const tokens = billable[key];
+      const tokens = count(billable[key]);
       if (unitRate === undefined && key.startsWith('cache')) {
         if (tokens > 0) return null;
         continue;

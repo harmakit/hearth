@@ -220,7 +220,7 @@ export function createKnowledge({ list, insert, read, transaction = write => wri
       return { id, notes, sources, layer, key, version: version ?? 1 };
     });
     const customSkills = activeRecords(studio, agent, 'customSkill').filter(relevant).sort(recency).slice(0, 4)
-      .map(({ key, title, version, content }) => ({ key, title, version, content }));
+      .map(({ id, key, title, version, content }) => ({ id,key, title, version, content }));
     return { knowledge, customSkills };
   }
 

@@ -40,6 +40,7 @@ test('owner can edit pending assignments and checkpoints before approving the di
   const { plans: [plan] } = await until(service.snapshot, s => s.plans.length === 1);
   const edits = [{key:'second', title:'Review chapter', agentKey:'reviewer', reviewerKey:'writer', requiresAcceptance:true}];
   const patch = { planId: plan.id, expectedEditVersion: 0, tasks: edits };
+  assert.throws(()=>service.updatePlanTasks({...patch,tasks:[{...edits[0],modelOverride:{runtime:'codex',model:'unknown',effort:'high'}}]}),/разреш/);
   assert.throws(() => service.updatePlanTasks({...patch, tasks:[{...edits[0], reviewerKey:'reviewer'}]}), /проверяющ/);
   const updated = service.updatePlanTasks(patch);
   assert.equal(updated.editVersion, 1);

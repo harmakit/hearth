@@ -405,3 +405,17 @@ test('legacy import preserves structure, scopes explicit artifacts and leaves th
   await assert.rejects(prepareLegacyImport({ source, root: workspace }), /отдельн/i);
   await assert.rejects(prepareLegacyImport({ source, root, artifactPaths: ['studio/artifacts/../../outside'] }), /путь/i);
 });
+test('portable snapshots retain package members, evidence identity and historical acceptance without activating delivery',()=>{
+  const member=snapshot.tasks[0], parent=snapshot.tasks[1];
+  const manifest=[{taskId:member.id,title:'Delivered chapter',summary:'Verified',revision:1,artifactPath:'reports/result.md'}];
+  const source={...snapshot,studios:[{...studio,sprintReview:'hold'}],tasks:[member,{...parent,packageMembers:[member.id],packageManifest:manifest}],
+    inbox:[owned({id:'packet',kind:'acceptance',status:'open',taskId:parent.id,review:{key:'a'.repeat(64),members:manifest,summary:'Accepted versions',criteria:null}})]};
+  const bundle=makeStudioBundle(source,{studioId:studio.id,mode:'snapshot'});
+  const restored=prepareBundleImport(bundle,{root:'/new/project'});
+  assert.equal(restored.studio.sprintReview,'hold');
+  const record=restored.inbox[0];
+  assert.equal(record.status,'resolved');assert.equal(record.review.historical,true);
+  assert.equal(record.review.members[0].taskId,restored.tasks[0].id);
+  assert.equal(record.review.members[0].artifactPath,undefined);
+  assert.deepEqual(restored.tasks[1].archivedPackage.members,[restored.tasks[0].id]);
+});

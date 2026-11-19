@@ -18,24 +18,27 @@ export function taskFacts(snapshot, studioId, taskId) {
       total += input + output;
       measured++;
     }
-    return { ...attempt, usage: { input, output, cacheRead: sum('cacheRead'), cacheWrite: sum('cacheWrite') } };
+    const elapsed = Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
+    return { ...attempt, elapsedMs:Number.isFinite(elapsed) && elapsed>=0 ? elapsed : null,
+      usage: { input, output, cacheRead: sum('cacheRead'), cacheWrite: sum('cacheWrite') } };
   });
   const threads = new Map(rows('conversations').filter(thread => thread.taskId === taskId)
     .map(thread => [thread.id, thread]));
   const messages = rows('conversationMessages').filter(message => threads.has(message.conversationId))
-    .map(message => ({ ...message, agentId: threads.get(message.conversationId).agentId }));
+    .map(message => ({ ...message, agentId: threads.get(message.conversationId).agentId }))
+    .sort((a,b)=>String(b.createdAt??'').localeCompare(String(a.createdAt??'')) || String(b.id).localeCompare(String(a.id)));
   const history = [];
-  const record = (type, at, detail = '') => {
-    if (at && Number.isFinite(Date.parse(at))) history.push({ type, at, detail });
+  const record = (type, at, detail = '', id='') => {
+    if (at && Number.isFinite(Date.parse(at))) history.push({ type, at, detail, id:type+':'+id });
   };
   record('created', task.createdAt);
   for (const run of runs) {
-    record('attempt-start', run.startedAt, run.purpose);
-    record('attempt-end', run.finishedAt, run.status);
+    record('attempt-start', run.startedAt, run.purpose, run.id);
+    record('attempt-end', run.finishedAt, run.status, run.id);
   }
-  for (const message of messages) record('message', message.createdAt);
-  for (const item of rows('evidence').filter(row => row.taskId === taskId)) record('evidence', item.recordedAt ?? item.createdAt, item.sourcePath);
-  history.sort((a,b) => Date.parse(b.at) - Date.parse(a.at));
+  for (const message of messages) record('message', message.createdAt,'',message.id);
+  for (const item of rows('evidence').filter(row => row.taskId === taskId)) record('evidence', item.recordedAt ?? item.createdAt, item.sourcePath,item.id);
+  history.sort((a,b) => Date.parse(b.at) - Date.parse(a.at) || b.id.localeCompare(a.id));
   return {
     task, messages, history, attempts: runs, usage: { measured, total: measured ? total : null },
     before: tasks.filter(row => task.dependencies?.includes(row.id)),

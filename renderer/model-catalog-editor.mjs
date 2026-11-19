@@ -1,3 +1,4 @@
+import {copy as uiCopy} from './copy.mjs';
 import { modelKey } from './model-policy.mjs';
 
 const labels = { codex: 'Codex', claude: 'Claude Code' };
@@ -61,24 +62,24 @@ export function createModelCatalogEditor({ providers = {}, policy, appPolicy, st
   const countMarkup = () => {
     const count = activeSelection().size;
     const modeLabel = {
-      all: 'Все обнаруженные модели разрешены',
-      app: 'Действует политика приложения',
-      custom: 'Свой список разрешённых моделей',
-      director: 'Действуют модель и усилие директора',
+      all: uiCopy('Все обнаруженные модели разрешены'),
+      app: uiCopy('Действует политика приложения'),
+      custom: uiCopy('Свой список разрешённых моделей'),
+      director: uiCopy('Действуют модель и усилие директора'),
     }[mode];
-    return `${modeLabel}. Выбрано моделей: ${count}.`;
+    return uiCopy`${modeLabel}. Выбрано моделей: ${count}.`;
   };
 
   function listMarkup() {
     const groups = visibleGroups();
     const active = activeSelection();
-    if (mode === 'director') return '<p class="muted">Агенты с автоматическим выбором используют настройки директора.</p>';
+    if (mode === 'director') return uiCopy('<p class="muted">Агенты с автоматическим выбором используют настройки директора.</p>');
     if (!groups.some(group => group.models.length)) {
-      if (Object.values(providers).some(info => info?.loading)) return '<p class="muted">Подгружаем каталоги подключений…</p>';
+      if (Object.values(providers).some(info => info?.loading)) return uiCopy('<p class="muted">Подгружаем каталоги подключений…</p>');
       return `<p class="muted">${root?.querySelector('[data-model-search]').value.trim()
-        ? 'По этому запросу моделей нет.' : 'Каталог пока недоступен. Можно добавить идентификатор вручную.'}</p>`;
+        ? uiCopy('По этому запросу моделей нет.') : uiCopy('Каталог пока недоступен. Можно добавить идентификатор вручную.')}</p>`;
     }
-    return groups.filter(group => group.models.length).map(group => `<section class="catalog-group panel">
+    return groups.filter(group => group.models.length).map(group => uiCopy`<section class="catalog-group panel">
       <header class="row"><h3>${group.label}</h3><div class="actions">
         <button class="text-button" type="button" data-model-bulk="select" data-model-group="${group.runtime}">Выбрать</button>
         <button class="text-button" type="button" data-model-bulk="clear" data-model-group="${group.runtime}">Снять выбор</button>
@@ -90,8 +91,8 @@ export function createModelCatalogEditor({ providers = {}, policy, appPolicy, st
         return `<li class="catalog-model">
           <label class="checkbox-field catalog-choice"><input type="checkbox" data-model-choice="${safe(key)}" data-model-runtime="${row.runtime}" data-model-id="${safe(row.model)}"${chosen ? ' checked' : ''}>
           <span><strong>${safe(row.name)}</strong>${row.name !== row.model ? `<small>${safe(row.model)}</small>` : ''}
-          ${row.catalog ? '' : '<small>Сохранённый идентификатор</small>'}</span></label>
-          ${chosen && levels.length ? `<details data-model-detail="${safe(key)}"${open.has(key) ? ' open' : ''}><summary>Усилие · ${safe(chosen.efforts.join(', ') || 'По умолчанию')}</summary>
+          ${row.catalog ? '' : uiCopy('<small>Сохранённый идентификатор</small>')}</span></label>
+          ${chosen && levels.length ? uiCopy`<details data-model-detail="${safe(key)}"${open.has(key) ? ' open' : ''}><summary>Усилие · ${safe(chosen.efforts.join(', ') || uiCopy('По умолчанию'))}</summary>
             <div class="policy-efforts">${levels.map(level => `<label class="checkbox-field"><input type="checkbox" data-model-effort="${safe(key)}" value="${safe(level)}"${chosen.efforts.includes(level) ? ' checked' : ''}> <span>${safe(level)}</span></label>`).join('')}</div>
           </details>` : ''}
         </li>`;
@@ -99,10 +100,10 @@ export function createModelCatalogEditor({ providers = {}, policy, appPolicy, st
   }
 
   function markup() {
-    return `<div class="policy-editor" data-model-catalog-editor>
+    return uiCopy`<div class="policy-editor" data-model-catalog-editor>
       <label class="field"><span>Как выбирать модели</span><select data-model-mode>
-        ${studio ? option('app', 'Настройки приложения', mode) : option('all', 'Все доступные модели', mode)}
-        ${option('custom', 'Свой список', mode)}${option('director', 'Как у директора', mode)}</select></label>
+        ${studio ? option('app', uiCopy('Настройки приложения'), mode) : option('all', uiCopy('Все доступные модели'), mode)}
+        ${option('custom', uiCopy('Свой список'), mode)}${option('director', uiCopy('Как у директора'), mode)}</select></label>
       <p class="muted" role="status" data-model-count>${countMarkup()}</p>
       <div class="policy-editor" data-model-controls${mode === 'director' ? ' hidden' : ''}>
         <label class="field"><span>Поиск моделей</span><input type="search" data-model-search placeholder="Название, идентификатор или провайдер"></label>
@@ -183,7 +184,7 @@ export function createModelCatalogEditor({ providers = {}, policy, appPolicy, st
       } else if (target.closest('[data-model-add]')) {
         const field = root.querySelector('[data-model-manual-id]');
         const model = field.value.trim();
-        if (!model) { error = 'Введите идентификатор модели.'; field.focus(); render(); return; }
+        if (!model) { error = uiCopy('Введите идентификатор модели.'); field.focus(); render(); return; }
         const runtime = root.querySelector('[data-model-manual-runtime]').value;
         const key = keyOf(runtime, model);
         const row = choices(modelCatalogGroups(providers, [])).get(key) ?? { runtime, model, efforts: [] };
@@ -199,7 +200,7 @@ export function createModelCatalogEditor({ providers = {}, policy, appPolicy, st
   }
 
   function value() {
-    if (mode === 'custom' && !selected.size) throw new Error('Выберите хотя бы одну модель или смените режим.');
+    if (mode === 'custom' && !selected.size) throw new Error(uiCopy('Выберите хотя бы одну модель или смените режим.'));
     const allowed = mode === 'custom' ? [...selected.values()].map(row => ({ ...row, efforts: [...row.efforts] })) : [];
     if (studio) return mode === 'app' ? { allowedMode: 'app' } : { allowedMode: 'studio', allowed };
     return mode === 'custom' ? { mode, allowed } : { mode };

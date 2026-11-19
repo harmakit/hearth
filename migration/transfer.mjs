@@ -19,12 +19,12 @@ const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'bloc
 const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'failed', 'interrupted'];
 
 const fields = {
-  studio: ['name', 'brief', 'language', 'projectLanguage', 'allowedMode'],
+  studio: ['name', 'brief', 'language', 'projectLanguage', 'allowedMode','sprintReview','languageMode'],
   agent: ['key', 'name', 'description', 'role', 'roleTitle', 'mode', 'runtime', 'model', 'effort', 'systemRole'],
   director: ['runtime', 'model', 'effort'],
   tasks: ['key', 'title', 'prompt', 'summary', 'artifact', 'error', 'review', 'directorDecision', 'createdAt', 'updatedAt', 'legacyId', 'legacyStatus', 'legacyBranch', 'kind', 'type', 'debtCategory'],
   inbox: ['title', 'body', 'status', 'kind', 'answer', 'createdAt', 'updatedAt', 'legacyId'],
-  plans: ['title', 'goal', 'status', 'kind', 'feedback', 'createdAt', 'updatedAt', 'decidedAt', 'legacyId'],
+  plans: ['title', 'goal', 'status', 'kind', 'feedback', 'createdAt', 'updatedAt', 'decidedAt', 'legacyId','sprintReview'],
   epics: ['title', 'goal', 'description', 'status', 'createdAt', 'updatedAt', 'legacyId'],
   stories: ['title', 'goal', 'description', 'status', 'createdAt', 'updatedAt', 'legacyId'],
   sprints: ['title', 'goal', 'description', 'summary', 'status', 'createdAt', 'updatedAt', 'closedAt', 'legacyId'],
@@ -47,7 +47,7 @@ const links = {
   conversationId: 'conversations', replyTo: 'conversationMessages', replyId: 'conversationMessages', phaseId: 'phases',
   facilitatorId: 'agents', transferAgentId: 'agents', firstTaskId: 'tasks', rosterProposalId: 'rosterProposals',
   rollbackProposalId: 'rosterProposals', proposalId: 'rosterProposals', trainTaskId: 'tasks',
-  dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents',
+  dependencies: 'tasks', taskIds: 'tasks', storyIds: 'stories', agentIds: 'agents', previousPlanId:'plans',
   epicIds: 'epics', sprintIds: 'sprints', actionIds: 'meeting_actions', originalTaskIds: 'tasks', attachmentIds: 'evidence',
   answerAttachmentIds: 'evidence', blockedTaskIds: 'tasks',
 };
@@ -504,7 +504,21 @@ function copyPayload(source, { mode, toBundle, root, name }) {
           : value === null ? null : link(target, value) ?? null;
       }
       if (record.references !== undefined) copy.references = copyReferences(record.references, link);
-      if (kind === 'inbox') Object.assign(copy, inboxFields(record, text, link));
+      if (kind === 'inbox') {
+        Object.assign(copy, inboxFields(record, text, link));
+        if (record.review) {
+          const review = object(record.review,'история приёмки');
+          if (!/^[a-f0-9]{64}$/.test(review.key)) throw new Error('Некорректный идентификатор ревизии.');
+          copy.review={key:review.key, historical:true, taskId:copy.taskId,
+            ...copyFields(review,['summary','targetRef'],text),
+            criteria:review.criteria == null ? null : textList(review.criteria,'критерии',text),
+            evidenceIds:list(review.evidenceIds,'доказательства').map(id=>link('evidence',id)).filter(Boolean),
+            ...(review.delivery ? {delivery:copyGitHistory(review.delivery,text,link,opaque)} : {}),
+            ...(review.members ? {members:list(review.members,'результаты').map(m=>portableMember(m))} : {}),
+            ...(review.artifactPath && selectedPaths.has(review.artifactPath) ? {artifactPath:portablePath(review.artifactPath)} : {})};
+          if (!toBundle && copy.status==='open') {copy.status='resolved';copy.answer='Архивная версия. Для доставки требуется новая проверка.';}
+        }
+      }
       for (const label of ['criteria', 'acceptance']) {
         if (kind === 'phases') continue;
         const value = textList(record[label], label, text);
@@ -592,6 +606,12 @@ function copyPayload(source, { mode, toBundle, root, name }) {
           linkedFields(item, text, link, { number: ['points'], refs: { id: 'tasks' } }));
       }
       if (kind === 'tasks') {
+        if (record.packageMembers || record.packageManifest || record.packageTargetRef || record.packageSourceRef || record.archivedPackage) {
+          const pkg=record.archivedPackage ?? record;
+          copy.archivedPackage={members:list(pkg.members ?? pkg.packageMembers,'задачи пакета').map(id=>link('tasks',id)).filter(Boolean),
+            versions:list(pkg.versions ?? pkg.packageManifest,'версии пакета').map(portableMember),
+            ...copyFields(pkg,['packageTargetRef','packageFinalRef','packageSourceRef'],text)};
+        }
         if (record.deliveryMode === 'git') copy.deliveryMode = 'git';
         if (record.carryoverHistory !== undefined) copy.carryoverHistory = list(record.carryoverHistory, 'история переноса').map(item => carryover(item, text, link));
         if (record.assignmentHistory !== undefined) copy.assignmentHistory = list(record.assignmentHistory, 'история назначений').map(item =>
@@ -638,6 +658,12 @@ function copyPayload(source, { mode, toBundle, root, name }) {
           const path = toBundle && !selectedPaths.has(record.artifactPath) ? null : portablePath(record.artifactPath);
           if (path && selectedPaths.has(path)) copy.artifactPath = path;
         }
+      }
+      function portableMember(raw) {
+        const m=object(raw,'версия задачи');
+        return {taskId:link('tasks',m.taskId),...copyFields(m,['title','summary'],text),
+          revision:typeof m.revision==='number' ? m.revision : text(String(m.revision ?? '')),
+          ...(m.artifactPath && selectedPaths.has(m.artifactPath) ? {artifactPath:portablePath(m.artifactPath)} : {})};
       }
       return copy;
     });

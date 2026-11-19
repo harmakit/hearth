@@ -1,21 +1,28 @@
-const roomNames = {
-  director: 'Кабинет директора', library: 'Библиотека', workshop: 'Разработка',
-  atelier: 'Ателье', common: 'Общая комната',
-};
+import {copy as uiCopy, onCopyLocale} from './copy.mjs';
+const makeRoomNames = () => ({
+  director: uiCopy('Кабинет директора'), library: uiCopy('Библиотека'), workshop: uiCopy('Разработка'),
+  atelier: uiCopy('Ателье'), common: uiCopy('Общая комната'),
+});
+let roomNames = makeRoomNames();
+onCopyLocale(() => { roomNames = makeRoomNames(); });
 
-export const roleNames = {
-  director: 'Директор', library: 'Библиотекарь', engineer: 'Инженер',
-  editor: 'Редактор', artist: 'Художник', other: 'Другая роль',
-};
+const makeRoleNames = () => ({
+  director: uiCopy('Директор'), library: uiCopy('Библиотекарь'), engineer: uiCopy('Инженер'),
+  editor: uiCopy('Редактор'), artist: uiCopy('Художник'), other: uiCopy('Другая роль'),
+});
+export let roleNames = makeRoleNames();
+onCopyLocale(() => { roleNames = makeRoleNames(); });
 
-export const roleDetails = {
-  director: 'Планирует работу, распределяет задачи и принимает результаты команды.',
-  library: 'Подбирает утверждённые источники и навыки для задач, ведёт справочные материалы.',
-  engineer: 'Работает с кодом, техническими документами и проверками.',
-  editor: 'Готовит и проверяет тексты, ведёт редактуру материалов.',
-  artist: 'Разрабатывает визуальные идеи и готовит материалы для проекта.',
-  other: 'Выполняет задачи по назначению, указанному в описании роли.',
-};
+const makeRoleDetails = () => ({
+  director: uiCopy('Планирует работу, распределяет задачи и принимает результаты команды.'),
+  library: uiCopy('Подбирает утверждённые источники и навыки для задач, ведёт справочные материалы.'),
+  engineer: uiCopy('Работает с кодом, техническими документами и проверками.'),
+  editor: uiCopy('Готовит и проверяет тексты, ведёт редактуру материалов.'),
+  artist: uiCopy('Разрабатывает визуальные идеи и готовит материалы для проекта.'),
+  other: uiCopy('Выполняет задачи по назначению, указанному в описании роли.'),
+});
+export let roleDetails = makeRoleDetails();
+onCopyLocale(() => { roleDetails = makeRoleDetails(); });
 
 const languages = ['Русский', 'English', 'Español', 'Deutsch', 'Français', 'Português', 'Українська', '中文', '日本語'];
 
@@ -28,18 +35,18 @@ export function pendingStudioPlan(plans, studioId) {
 }
 
 export function agentActivity(task, directorLifecycle) {
-  if (directorLifecycle === 'planning') return ['Готовит план', 'good'];
-  if (directorLifecycle === 'awaiting-approval') return ['Ждёт согласования', 'warn'];
+  if (directorLifecycle === 'planning') return [uiCopy('Готовит план'), 'good'];
+  if (directorLifecycle === 'awaiting-approval') return [uiCopy('Ждёт согласования'), 'warn'];
   if (task?.status === 'running') {
-    if (task.stage === 'director') return ['Выбирает следующий шаг', 'good'];
-    if (task.stage === 'review') return ['На ревью', 'good'];
-    if (task.stage === 'qa') return ['На проверке', 'good'];
-    return ['Работает', 'good'];
+    if (task.stage === 'director') return [uiCopy('Выбирает следующий шаг'), 'good'];
+    if (task.stage === 'review') return [uiCopy('На ревью'), 'good'];
+    if (task.stage === 'qa') return [uiCopy('На проверке'), 'good'];
+    return [uiCopy('Работает'), 'good'];
   }
-  if (task?.status === 'waiting') return ['Ждёт ответа', 'warn'];
-  if (task?.status === 'queued' && task.stage !== 'backlog') return ['Ждёт запуска', 'warn'];
-  if (task?.stage === 'blocked') return ['Работа заблокирована', 'attention'];
-  return ['Свободен', ''];
+  if (task?.status === 'waiting') return [uiCopy('Ждёт ответа'), 'warn'];
+  if (task?.status === 'queued' && task.stage !== 'backlog') return [uiCopy('Ждёт запуска'), 'warn'];
+  if (task?.stage === 'blocked') return [uiCopy('Работа заблокирована'), 'attention'];
+  return [uiCopy('Свободен'), ''];
 }
 
 export function actorState(task, directorLifecycle, { paused, scheduled } = {}) {
@@ -61,7 +68,7 @@ const taskPriority = { running: 3, waiting: 2, queued: 1 };
 
 export function buildRooms(studio) {
   const rooms = Object.entries(roomNames).map(([id, name]) => ({ id, name, desks: [] }));
-  rooms[0].desks.push({ agent: { id: null, name: 'Директор', role: 'director', description: roleDetails.director, ...studio.director }, props: 'plan' });
+  rooms[0].desks.push({ agent: { id: null, name: uiCopy('Директор'), role: 'director', description: roleDetails.director, ...studio.director }, props: 'plan' });
 
   for (const agent of studio.agents ?? []) {
     const [roomId, props] = Object.hasOwn(workspaces, agent.role) ? workspaces[agent.role] : workspaces.other;

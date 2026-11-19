@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -29,7 +29,15 @@
           <div id="breadcrumb" class="breadcrumb">Hearth Studio</div>
         </header>
         <div id="notice" class="notice" role="status" hidden></div>
-        <main id="content" tabindex="-1"><p class="muted">Загружаем студии…</p></main>
+        <div class="owner-layout"><main id="content" tabindex="-1"><p class="muted">Загружаем студии…</p></main>
+          <aside id="owner-inspector" hidden aria-labelledby="owner-title">
+            <div class="owner-tools"><button type="button" class="action secondary" data-owner-back></button>
+              <label><span id="owner-width-label"></span><input type="range" id="owner-width" min="32" max="66" value="48"></label>
+              <button type="button" class="action secondary" data-owner-close></button></div>
+            <h2 id="owner-title" tabindex="-1"></h2><div id="owner-body"></div>
+            <form id="owner-comment" hidden><label class="field"><span></span><textarea name="comment" required maxlength="8000" rows="2"></textarea></label><button class="action secondary" type="submit"></button><p role="status" class="muted"></p></form>
+          </aside>
+        </div>
       </div>
     </div>
     <dialog id="dialog" aria-labelledby="dialog-title">

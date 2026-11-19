@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createWorkflow } from './workflow.mjs';
 import { normalizeImport } from './import.mjs';
-import { allowedTuples, completeInitialRoster, parseResponse, roleTitle, trainingTopics, tupleKey } from './protocol.mjs';
+import { allowedTuples, completeInitialRoster, field, parseResponse, roleTitle, trainingTopics, tupleKey } from './protocol.mjs';
 import { createTraining, defaultSkillMinStars, roleObjective } from './training.mjs';
 import { nextScheduleWindow, normalizeSchedule, withinSchedule } from './schedule.mjs';
 import { assessDebtPrompt, debtAssessment, normalizeDebtPolicy } from './debt.mjs';
@@ -161,6 +161,7 @@ function runPrompt(studio, agent, task, decisions, workflowContext, approvedTrai
     description: agent?.description,
     title: task.title,
     task: task.prompt,
+    ...(task.criteria ? {criteria:task.criteria} : {}),
     priorDraft,
     decisions: decisions.map(({ body, answer, attachmentIds, choiceId }) => ({ question: body, answer, attachmentIds, choiceId })),
     ...workflowContext,
@@ -214,6 +215,16 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   projectPipeline, prepareTarget, verifyGitHistory, manageCleanup, deliverNotification, describeAttachment, now: clock = () => new Date(),
 }) {
   const db = new DatabaseSync(dbPath);
+  let transitionActor=null;
+  db.function('hearth_transition_actor',()=>transitionActor);
+  function attributed(meta,write) {
+    const previous=transitionActor;transitionActor=JSON.stringify(meta);
+    try {return write();} finally {transitionActor=previous;}
+  }
+  function withAttemptActor(attemptId,write) {
+    const attempt=read('attempts',attemptId,'Запуск'),call=attempt.calls?.at(-1);
+    return attributed({source:'attempt',attemptId,agentId:call?.agentId,role:call?.role,purpose:attempt.purpose},write);
+  }
   db.exec(`
     PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS studios (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -232,6 +243,11 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       from_agent TEXT, to_agent TEXT
     );
     CREATE INDEX IF NOT EXISTS task_transitions_by_task ON task_transitions(studio_id, task_id, seq);
+    CREATE TABLE IF NOT EXISTS task_transition_sources(seq INTEGER PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TEMP TRIGGER record_transition_source AFTER INSERT ON main.task_transitions
+      WHEN hearth_transition_actor() IS NOT NULL BEGIN
+        INSERT INTO task_transition_sources(seq,data) VALUES(NEW.seq,hearth_transition_actor());
+      END;
     CREATE TRIGGER IF NOT EXISTS record_task_transition AFTER UPDATE OF data ON tasks
     WHEN json_extract(OLD.data,'$.status') IS NOT json_extract(NEW.data,'$.status')
       OR json_extract(OLD.data,'$.stage') IS NOT json_extract(NEW.data,'$.stage')
@@ -397,7 +413,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   }
 
   function isPaused(studio) {
-    return studio.manualPaused || studio.lifecycle === 'paused';
+    return Boolean(studio.archivedAt || studio.projectDetached) || studio.manualPaused || studio.lifecycle === 'paused';
   }
 
   function hasWorkflowWork(studio) {
@@ -505,7 +521,8 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       .all(studioId, taskId, before, limit + 1);
     const more = rows.length > limit;
     if (more) rows.pop();
-    return { rows, nextBefore: more ? rows.at(-1).seq : null };
+    const sources=db.prepare('SELECT data FROM task_transition_sources WHERE seq=?');
+    return { rows:rows.map(row=>({...row,actor:JSON.parse(sources.get(row.seq)?.data ?? 'null')})), nextBefore: more ? rows.at(-1).seq : null };
   }
 
   function publish(callback, value) {
@@ -555,6 +572,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         director: { ...defaultDirector, runtime: preferred?.runtime ?? defaultDirector.runtime }, ...input,
         language:languageMode === 'app' ? interfaceLanguages[readAppLocale()] : input.language }),
       languageMode,
+      sprintReview:option(input.sprintReview, 'off',['off','summary','hold'],'приёмка спринта'),
       ...(preparedProject ? {projectGit:{enabled:true,targetRef:preparedProject.targetRef,profile:normalizeProjectProfile()}} : {}),
     };
     transaction(() => {
@@ -564,23 +582,24 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     return changed(studio);
   }
 
-  function updateStudio({ studioId, ...patch }) {
+  function updateStudio({ studioId, ...patch }, folderIdentity) {
     const studio = read('studios', studioId, 'Студия');
     const languageMode = patch.languageMode ?? (patch.language === undefined ? studio.languageMode ?? 'studio' : 'studio');
     if (!['app','studio'].includes(languageMode)) throw new Error('Неизвестный режим языка отчётов.');
     if (languageMode === 'app') patch.language = interfaceLanguages[readAppLocale()];
     const settings = studioSettings(patch, studio);
-    if (settings.root !== studio.root) {
+    if (settings.root !== studio.root || (studio.projectDetached && studio.detachedIdentity && folderIdentity!==studio.detachedIdentity && patch.root)) {
       const attachedTask = list('tasks').some((task) => task.studioId === studioId && (
         task.artifactPath || ['scheduled', 'running', 'waiting'].includes(task.status)
       ));
       const publishedFiles = list('plans').some((plan) => plan.studioId === studioId && plan.publishedFiles?.length);
-      if (studio.projectGit?.enabled || studio.workflowJob || activeCount(studioId) || pending.has(studioId) || attachedTask || publishedFiles) {
+      const movedOriginal=studio.projectDetached && folderIdentity && folderIdentity===studio.detachedIdentity;
+      if (studio.projectGit?.enabled || studio.workflowJob || activeCount(studioId) || pending.has(studioId) || (!movedOriginal && (attachedTask || publishedFiles))) {
         throw new Error('Папка проекта уже связана с текущей работой или опубликованными файлами.');
       }
     }
     const result = changed(update('studios', {
-      ...studio, ...settings, languageMode,
+      ...studio, ...settings, languageMode, ...(studio.projectDetached && patch.root ? {projectDetached:undefined} : {}),
       ...(patch.debtPolicy !== undefined ? { debtAssessment: undefined } : {}),
     }));
     if (patch.schedule !== undefined && (hasWorkflowWork(result) || pending.get(studioId)?.size)) wake(studioId);
@@ -589,6 +608,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
 
   async function configureProject({ studioId, enabled, targetRef = '', profile }) {
     const studio = read('studios', studioId, 'Студия');
+    if (enabled && studio.projectDetached) throw new Error('Сначала подключите папку проекта.');
     if (typeof enabled !== 'boolean') throw new Error('Укажите, разрешены ли изменения в Git.');
     const mutable = () => !activeCount(studioId) && !list('tasks').some(task => task.studioId === studioId && task.gitDelivery?.worktreeId && task.stage !== 'done');
     if (!mutable()) throw new Error('Завершите активные изменения в Git перед сменой параметров.');
@@ -678,6 +698,28 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     }
   }
 
+  function setStudioArchived({studioId,archived}) {
+    const studio=read('studios',studioId,'Студия');
+    if(typeof archived!=='boolean')throw new Error('Некорректный статус архива.');
+    if(Boolean(studio.archivedAt)===archived)return visibleStudio(studio);
+    if(activeCount(studioId))throw new Error('Сначала остановите активную работу студии.');
+    const saved=archived ? {...studio,archivedAt:now(),archivedLifecycle:studio.lifecycle,manualPaused:true} :
+      {...studio,archivedAt:undefined,archivedLifecycle:undefined,lifecycle:studio.archivedLifecycle==='draft'?'draft':'paused',
+        manualPaused:studio.archivedLifecycle!=='draft'};
+    return changed(visibleStudio(update('studios',saved)));
+  }
+
+  function detachProject({studioId},folderIdentity=null) {
+    const studio=read('studios',studioId,'Студия');
+    if (studio.projectDetached) return visibleStudio(studio);
+    if (activeCount(studioId) || studio.workflowJob || pending.has(studioId) || list('tasks').some(t=>t.studioId===studioId &&
+      (['running','waiting','scheduled'].includes(t.status) || t.gitDelivery?.worktreeId && t.stage!=='done'))) {
+      throw new Error('Сначала завершите текущую работу и доставку.');
+    }
+    return changed(visibleStudio(update('studios',{...studio,projectDetached:true,detachedIdentity:folderIdentity,projectGit:undefined,
+      manualPaused:true,lifecycle:studio.lifecycle==='draft'?'draft':'paused'})));
+  }
+
   function deleteStudio({ studioId, confirmation }) {
     const studio = read('studios', studioId, 'Студия');
     if (confirmation !== studio.name) throw new Error('Введите точное название студии.');
@@ -687,6 +729,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       for (const table of ['studio_inbox', ...domains, ...privateDomains]) {
         db.prepare(`DELETE FROM ${table} WHERE json_extract(data, '$.studioId') = ?`).run(studioId);
       }
+      db.prepare('DELETE FROM task_transition_sources WHERE seq IN (SELECT seq FROM task_transitions WHERE studio_id=?)').run(studioId);
       db.prepare('DELETE FROM task_transitions WHERE studio_id = ?').run(studioId);
       db.prepare('DELETE FROM tasks WHERE studio_id = ?').run(studioId);
       db.prepare('DELETE FROM studios WHERE id = ?').run(studioId);
@@ -732,7 +775,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     return changed(agent);
   }
 
-  function createTask({ studioId, agentId, reviewerId, title, prompt, kind, deliveryMode }) {
+  function createTask({ studioId, agentId, reviewerId, title, prompt, kind, deliveryMode, criteria, dependencies: requested = [], epicId, points, priority, attachmentIds, backlog = false }) {
     const studio = read('studios', studioId, 'Студия');
     if (agentId && assertAssignable(studio, agentId).systemRole === 'coach') throw new Error('Коуч агентов выполняет только задачи обучения.');
     if (deliveryMode === 'git') {
@@ -743,17 +786,30 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       }
     }
     const createdAt = now();
-    const dependencies = training.pendingIds(studio, [agentId]);
+    if (!Array.isArray(requested) || requested.length>200) throw new Error('Некорректные зависимости.');
+    for (const id of requested) if (read('tasks',id,'Зависимость').studioId!==studioId) throw new Error('Зависимость принадлежит другой студии.');
+    if (epicId && read('epics',epicId,'Эпик').studioId!==studioId) throw new Error('Эпик принадлежит другой студии.');
+    if (points != null && (!Number.isSafeInteger(points)||points<1||points>100)) throw new Error('Оценка задачи должна быть от 1 до 100 баллов.');
+    if (priority != null && (!Number.isInteger(priority)||priority<0||priority>100)) throw new Error('Приоритет должен быть от 0 до 100.');
+    validateAttachments(studioId, attachmentIds);
+    const dependencies = [...new Set([...training.pendingIds(studio, [agentId,reviewerId]), ...requested])];
     const task = {
       id: randomUUID(), studioId, agentId: agentId || null,
       ...(kind === 'debt' ? { kind } : {}),
       ...(deliveryMode === 'git' ? { deliveryMode, reviewerId, requiresAcceptance: true } : {}),
       title: string(title, 'название задачи', { required: true }),
       prompt: string(prompt, 'описание задачи', { required: true }),
-      dependencies, stage: dependencies.length ? 'backlog' : 'ready',
+      ...(criteria ? {criteria:field(criteria,'критерии приёмки')} : {}), ...(epicId ? {epicId} : {}),
+      ...(points != null ? {points} : {}), ...(priority != null ? {priority} : {}),
+      ...(attachmentIds?.length ? {attachmentIds:[...new Set(attachmentIds)]} : {}),
+      dependencies, stage: backlog || dependencies.length ? 'backlog' : 'ready',
       status: 'queued', summary: '', artifact: '', error: '', createdAt, updatedAt: createdAt,
     };
-    db.prepare('INSERT INTO tasks VALUES (?, ?, ?)').run(task.id, studioId, JSON.stringify(task));
+    transaction(()=>{
+      if (kind==='debt' && !task.epicId) task.epicId=planning.getDebtEpic(studioId).id;
+      insert('tasks',task);
+      if (backlog) update('studios',{...studio,backlogVersion:(studio.backlogVersion ?? 0)+1});
+    });
     return changed(visibleTask(task));
   }
 
@@ -772,11 +828,26 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     }
   }
 
+  function reviewedResult(task) {
+    const git = task.gitDelivery;
+    const delivery = git ? {revision:git.revision, checks:git.checks, receipt:git.receipt} : null;
+    const contents = {
+      taskId:task.id, revision:task.revision ?? 0, targetRef: git ? task.packageTargetRef || read('studios',task.studioId,'Студия').projectGit?.targetRef : null,
+      delivery, summary:task.summary ?? '', artifact:task.artifact ?? '', artifactPath:task.artifactPath ?? null,
+      criteria:task.criteria ?? null, reviewerId:task.reviewerId ?? null,
+      ...(task.packageManifest ? {members:task.packageManifest} : {}),
+    };
+    const key = createHash('sha256').update(JSON.stringify(contents)).digest('hex');
+    return { ...contents, key, evidenceIds:list('evidence').filter(row=>row.studioId === task.studioId && row.taskId === task.id &&
+      (!git || row.revision?.digest === git.revision?.digest)).map(row=>row.id) };
+  }
+
   function addInbox(task, kind, { title, body, choices }) {
     const item = {
       id: randomUUID(), studioId: task.studioId, taskId: task.id, kind,
       title, body, status: 'open', answer: '', createdAt: now(),
       ...(choices?.length ? { choices, version: 1 } : {}),
+      ...(kind==='acceptance' ? {review:reviewedResult(read('tasks',task.id,'Задача'))} : {}),
     };
     db.prepare('INSERT INTO inbox VALUES (?, ?, ?)').run(item.id, item.taskId, JSON.stringify(item));
     return item;
@@ -795,6 +866,8 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
 
   function startTask({ taskId, confirmLegacy }) {
     let task = read('tasks', taskId, 'Задача');
+    const ownerStudio=read('studios',task.studioId,'Студия');
+    if (ownerStudio.archivedAt || ownerStudio.projectDetached) throw new Error('Студия в архиве или папка проекта отсоединена.');
     if (task.deliveryMode === 'git' && !task.workflowManaged) {
       const studio = read('studios', task.studioId, 'Студия');
       if (!studio.projectGit?.enabled) throw new Error('Привяжите Git-проект перед запуском.');
@@ -861,9 +934,13 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const { inboxId } = input;
     const studioItem = list('studio_inbox').find(({ id }) => id === inboxId);
     const previous = studioItem ?? read('inbox', inboxId, 'Сообщение');
+    if (input.studioId !== undefined && input.studioId !== previous.studioId) throw new Error('Решение принадлежит другой студии.');
+    if (previous.review && input.expectedResult !== undefined && previous.review.key !== input.expectedResult) throw new Error('Версия результата изменилась.');
     validateAttachments(previous.studioId, input.attachmentIds);
     const prepared = prepareInboxAnswer(previous, input);
     if (prepared.duplicate) return previous;
+    if (previous.kind === 'acceptance' && previous.review &&
+        reviewedResult(read('tasks',previous.taskId,'Задача')).key !== previous.review.key) throw new Error('Результат изменился после ревью. Требуется новая проверка.');
     const { answer, decision, response } = prepared;
     const item = { ...previous, ...response };
     if (item.kind === 'plan') {
@@ -890,7 +967,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     if (task.status !== 'waiting') {
       throw new Error('Ответ на этот вопрос уже закрыт.');
     }
-    if (task.workflowManaged) return workflow.resumeInbox(item, task, answer, decision);
+    if (task.workflowManaged) return workflow.resumeInbox(item, task, answer, decision,input.reworkTaskId);
     const body = string(answer, 'ответ', { required: true });
     if (!task.sprintId && task.carryoverHistory?.length) {
       return changed(transaction(() => {
@@ -1000,7 +1077,16 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     });
   }
 
-  async function trackedRun({ studio, task, agent, attemptId, request }) {
+  async function trackedRun({ studio, task, agent, attemptId, usedTraining, request }) {
+    const existing = db.prepare('SELECT data FROM attempts WHERE id = ?').get(attemptId);
+    if (existing) {
+      const attempt = JSON.parse(existing.data);
+      const call = {purpose:request.purpose ?? attempt.purpose,runtime:request.runtime,model:request.model ?? null,
+        effort:request.effort ?? null,agentId:agent?.id ?? null,role:agent?.roleTitle || agent?.role || 'director',startedAt:now()};
+      if (usedTraining) call.materials=['skills','knowledge','customSkills'].flatMap(kind=>
+        (usedTraining[kind] ?? []).map(m=>({kind,id:m.id,key:m.key,title:m.title ?? m.path ?? m.key,version:m.version ?? m.commit ?? null})));
+      update('attempts',{...attempt,calls:[...(attempt.calls ?? []),call]});
+    }
     return run({
       ...request,
       onEvent(event) {
@@ -1085,7 +1171,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       }
       if (!signal.aborted) finalStatus = 'failed';
     } finally {
-      if (!closed && attemptRecord) update('attempts', { ...attemptRecord, status: finalStatus, finishedAt: now() });
+      if (!closed && attemptRecord) update('attempts', { ...read('attempts',attemptId,'Запуск'), status: finalStatus, finishedAt: now() });
       active.delete(studioId);
       finished.resolve();
       if (!closed) onAvailable(studioId);
@@ -1214,13 +1300,14 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       const selected = await taskControls(studio, agent, running, { run, signal: controller.signal, purpose: 'task' });
       if (!isCurrent()) return;
       const { runtime, model, effort } = confirmTaskControls(studio, agent, selected);
-      const result = report(await trackedRun({ studio, task: running, agent, attemptId, request: {
+      const usedTraining=training.context(studio,agent,running);
+      const result = report(await trackedRun({ studio, task: running, agent, attemptId, usedTraining, request: {
         runtime,
         model: model || undefined,
         effort: effort || undefined,
         projectRoot: studio.root,
-        prompt: runPrompt(studio, agent, running, decisions, undefined, training.context(studio, agent, running)) +
-          (decisions.some(decision => decision.attachmentIds?.length) ? '\n\n' + JSON.stringify(await describeAttachments(studioId, decisions.flatMap(({ attachmentIds }) => attachmentIds ?? []))) : ''),
+        prompt: runPrompt(studio, agent, running, decisions, undefined, usedTraining) +
+          (running.attachmentIds?.length || decisions.some(d => d.attachmentIds?.length) ? '\n\n' + JSON.stringify(await describeAttachments(studioId, [...new Set([...(running.attachmentIds ?? []), ...decisions.flatMap(d => d.attachmentIds ?? [])])])) : ''),
         signal: controller.signal,
       } }));
       if (!isCurrent()) return;
@@ -1228,7 +1315,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         const { summary, artifact, question, improvements } = result;
         const finished = taskState(running, question ? 'waiting' : 'completed', { summary, artifact, improvements });
         if (!question) planning.addReportedImprovements(finished);
-        update('attempts', { ...attemptRecord, status: 'completed', finishedAt: now() });
+        update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'completed', finishedAt: now() });
         return question && addInbox(running, 'question', question);
       });
       changed();
@@ -1238,13 +1325,13 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       const body = error instanceof Error ? error.message : String(error);
       const item = transaction(() => {
         taskState(running, 'failed', { error: body });
-        update('attempts', { ...attemptRecord, status: 'failed', finishedAt: now() });
+        update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'failed', finishedAt: now() });
         return addInbox(running, 'error', { title: `Ошибка · ${running.title}`, body });
       });
       changed();
       notifyInbox(item);
     } finally {
-      if (!closed && controller.signal.aborted) update('attempts', { ...attemptRecord, status: 'interrupted', finishedAt: now() });
+      if (!closed && controller.signal.aborted) update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'interrupted', finishedAt: now() });
       if (isParallel) manualParallel.delete(taskId);
       else active.delete(studioId);
       finished.resolve();
@@ -1428,11 +1515,13 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     effectiveAllowed: (studio) => modelPolicyFor(studio).allowed, training, hasHeldWorkflow,
     projectPipeline, dispatcher, checkpoints, planning, prerequisites, roster, trackedRun, describeAttachments,
     nonWorkflowActiveCount: studioId => Number(active.has(studioId)) + parallelManual(studioId).length,
-    afterGitMerge,
+    afterGitMerge, withAttemptActor,
     validateFixed,
   });
 
   function setStudioRunning({ studioId, action, running }) {
+    if (read('studios',studioId,'Студия').archivedAt) throw new Error('Сначала восстановите студию из архива.');
+    if (read('studios',studioId,'Студия').projectDetached) throw new Error('Сначала подключите папку проекта.');
     action ??= running === true ? 'resume' : running === false ? 'pause' : undefined;
     if (!['pause', 'resume', 'stop'].includes(action)) throw new Error('Неизвестная команда студии.');
     const studio = read('studios', studioId, 'Студия');
@@ -1499,9 +1588,11 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   refreshSchedules();
   const { initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks } = workflow;
   return {
-    snapshot, taskHistory, setAppLocale, updateModelPolicy, inspectProvider, refreshProviders, updateProviderPreference,
+    snapshot, taskHistory, readAppLocale, setAppLocale, setStudioArchived, detachProject, updateModelPolicy, inspectProvider, refreshProviders, updateProviderPreference,
     createStudio, updateStudio, assessDebtPolicy, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent,
-    createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, importStudio, configureProject,
+    createTask, startTask:input=>attributed({source:'owner'},()=>startTask(input)),
+    cancelTask:input=>attributed({source:'owner'},()=>cancelTask(input)),answerInbox:input=>attributed({source:'owner',inboxId:input.inboxId},()=>answerInbox(input)),
+    initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, importStudio, configureProject,
     previewCleanup, applyCleanup, cleanupState, recordEvidence, findEvidence, close,
     reviseBacklog: planning.reviseBacklog, closeSprint: planning.closeSprint, createPhase: planning.createPhase, updatePhase: planning.updatePhase,
     proposePhaseTransition: planning.proposePhaseTransition, decidePhaseTransition: planning.decidePhaseTransition,

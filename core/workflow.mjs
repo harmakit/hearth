@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { posix, resolve } from 'node:path';
-import { completeInitialRoster, directorPrompt, field, newDirectorHire, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, trainingTopics, validatePlan } from './protocol.mjs';
+import { allowedTuples, tupleKey, completeInitialRoster, directorPrompt, field, newDirectorHire, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, trainingTopics, validatePlan } from './protocol.mjs';
 import { coachFor } from './training.mjs';
 import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 import { buildTaskContext } from './checkpoints.mjs';
@@ -23,7 +23,7 @@ export function createWorkflow({
   read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
   run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, effectiveAllowed, validateFixed,
   runPrompt, report, isClosed, active, availableStudio, onAvailable, training, hasHeldWorkflow,
-  projectPipeline, afterGitMerge, dispatcher, checkpoints, planning: planningService, prerequisites, roster, trackedRun, describeAttachments,
+  projectPipeline, afterGitMerge, withAttemptActor=(_id,write)=>write(), dispatcher, checkpoints, planning: planningService, prerequisites, roster, trackedRun, describeAttachments,
   nonWorkflowActiveCount = () => 0,
 }) {
   const controllers = new Map();
@@ -255,6 +255,10 @@ export function createWorkflow({
       ...(plan.debtSprint ? { debtSprint: true } : {}),
     };
     const roster = { ...studio, agents };
+    const sprintReview = plan.sprintReview ?? studio.sprintReview ?? 'off';
+    const releaseId = sprintReview === 'off' ? null : randomUUID();
+    const heldRef = sprintReview === 'hold' && plan.tasks.some(t=>t.deliveryMode==='git') ? 'refs/heads/hearth-packages/'+sprint.id : null;
+    if (releaseId) sprint.taskIds.push(releaseId);
     const coach = coachFor(roster);
     for (const { agent, topics } of hires) {
       const assignments = plan.tasks.filter(({ agentKey, reviewerKey }) => [agentKey, reviewerKey].includes(agent.key));
@@ -285,11 +289,21 @@ export function createWorkflow({
         storyId: story.id, sprintId: sprint.id, dependencies: [...new Set([...dependencies, ...(carried?.dependencies ?? [])])],
         stage: dependencies.length ? 'backlog' : 'ready', status: 'queued', summary: carried?.summary ?? '', artifact: carried?.artifact ?? '', error: '',
         artifactTarget: artifactPath, workflowManaged: true, createdAt, updatedAt: createdAt,
+        ...(heldRef && task.deliveryMode==='git' ? { packageTargetRef:heldRef, packageFinalRef:studio.projectGit.targetRef } : {}),
         ...(taskRecommendation || reviewRecommendation ? { modelRecommendations: { task: taskRecommendation, review: reviewRecommendation } } : {}),
       };
       if (!carried) return insert('tasks', record);
       return update('tasks', { ...record, title: plan.editedTaskTitles?.includes(task.key) ? task.title : carried.title, prompt: carried.prompt, createdAt: carried.createdAt, lifecycle: undefined });
     });
+    if (releaseId) {
+      const lead = tasks.at(-1);
+      insert('tasks', {id:releaseId,studioId,sprintId:sprint.id,epicId:epic.id,storyId:story.id,
+        key:'release-'+releaseId,title:'Приёмка спринта · '+sprint.title,prompt:plan.goal,criteria:plan.story?.acceptance ?? plan.goal,
+        agentId:lead.agentId,reviewerId:lead.reviewerId,workflowManaged:true,requiresAcceptance:true,
+        packageMembers:tasks.map(t=>t.id), dependencies:tasks.map(t=>t.id),stage:'backlog',status:'queued',
+        ...(heldRef ? {deliveryMode:'git',packageSourceRef:heldRef,packageFinalRef:studio.projectGit.targetRef} : {}),
+        summary:'',artifact:'',createdAt,updatedAt:createdAt});
+    }
     insert('meetings', {
       id: randomUUID(), studioId, sprintId: sprint.id, kind: 'planning', title: 'Планирование спринта',
       summary: plan.goal, taskIds: sprint.taskIds, createdAt,
@@ -311,13 +325,20 @@ export function createWorkflow({
     }
   }
 
-  function updatePlanTasks({ planId, expectedEditVersion, tasks }) {
+  function taskOverride(studio, candidate) {
+    const tuple=allowedTuples(effectiveAllowed(read('studios',studio.id,'Студия'))).get(tupleKey(object(candidate,'модель задачи')));
+    if (!tuple) throw new Error('Выберите разрешённую модель и усилие для агента.');
+    return tuple;
+  }
+
+  function updatePlanTasks({ planId, expectedEditVersion, tasks, sprintReview }) {
     const result = transaction(() => {
       const draft = read('plans', planId, 'План');
       checkPlanEdit(draft, expectedEditVersion);
       if (draft.status !== 'pending') throw new Error('Эта версия плана уже закрыта.');
       if (!Array.isArray(tasks) || !tasks.length || tasks.length > draft.tasks.length) throw new Error('Некорректные изменения задач.');
       const studio = read('studios', draft.studioId, 'Студия');
+      if (sprintReview !== undefined && !['off','summary','hold'].includes(sprintReview)) throw new Error('Некорректный режим приёмки.');
       const roles = new Map([...draft.agents, ...studio.agents].map(a => [a.key ?? a.id, a]));
       const allowed = key => roles.has(key) && roles.get(key).rosterStatus !== 'retired' && roles.get(key).systemRole !== 'coach';
       const byKey = new Map(draft.tasks.map(t => [t.key, t]));
@@ -331,9 +352,12 @@ export function createWorkflow({
         if (typeof edit.requiresAcceptance !== 'boolean') throw new Error('Укажите принимающую сторону.');
         const title = field(edit.title, 'название задачи', 200);
         if (task.title !== title) editedTitles.add(task.key);
-        byKey.set(task.key, { ...task, title, agentKey:edit.agentKey, reviewerKey:edit.reviewerKey, requiresAcceptance:edit.requiresAcceptance });
+        const modelOverride = edit.modelOverride === undefined ? task.modelOverride :
+          edit.modelOverride === null ? undefined : taskOverride(studio,edit.modelOverride);
+        byKey.set(task.key, { ...task, ...(modelOverride ? {modelOverride} : {}), title, agentKey:edit.agentKey, reviewerKey:edit.reviewerKey, requiresAcceptance:edit.requiresAcceptance });
+        if (!modelOverride) delete byKey.get(task.key).modelOverride;
       }
-      return update('plans', { ...draft, tasks:[...byKey.values()], editedTaskTitles:[...editedTitles], editVersion:(draft.editVersion ?? 0)+1 });
+      return update('plans', { ...draft, tasks:[...byKey.values()], ...(sprintReview ? {sprintReview} : {}), editedTaskTitles:[...editedTitles], editVersion:(draft.editVersion ?? 0)+1 });
     });
     return changed(result);
   }
@@ -454,6 +478,19 @@ export function createWorkflow({
 
   async function execute(studio, job, task, signal) {
     const { purpose } = job;
+    if (task?.packageFinalRef && task.packageFinalRef!==studio.projectGit?.targetRef) throw new Error('Целевая ветка пакета изменилась.');
+    if (task?.packageTargetRef) {
+      if (task.packageTargetRef!=='refs/heads/hearth-packages/'+task.sprintId) throw new Error('Неизвестная ветка пакета.');
+      studio = {...studio,projectGit:{...studio.projectGit,targetRef:task.packageTargetRef}};
+    }
+    if (task?.packageMembers && purpose==='task') {
+      const members=task.packageMembers.map(id=>read('tasks',id,'Задача'));
+      if (members.some(t=>t.studioId!==studio.id || t.sprintId!==task.sprintId || t.stage!=='done')) throw new Error('Пакет содержит незавершённую работу.');
+      const manifest=members.map(t=>({taskId:t.id,title:t.title,revision:t.gitDelivery?.revision?.candidateOid ?? t.revision ?? 0,
+        artifactPath:t.artifactPath ?? null,summary:t.summary ?? '',targetOid:t.gitDelivery?.targetOid ?? null}));
+      const work=task.packageSourceRef ? await projectPipeline.preparePackage({studio,task,members,signal}) : {};
+      return {...work,packageManifest:manifest,summary:task.prompt,artifact:manifest.map(m=>m.title+'\n'+m.summary).join('\n\n')};
+    }
     if (purpose === 'git-check') return projectPipeline.evaluate({ studio, task, worktreeId: task.gitDelivery.worktreeId, attemptId: job.runAttemptId, signal });
     if (purpose === 'git-merge') return projectPipeline.merge({ studio, task, operationId: job.operationId, signal });
     if (purpose === 'publish') {
@@ -465,14 +502,16 @@ export function createWorkflow({
     const lesson = task?.kind === 'train';
     const agentId = purpose === 'task' ? task.agentId : purpose === 'review' ? task.reviewerId : purpose === 'training-exercise' ? task.training.targetAgentId : undefined;
     const agent = studio.agents.find(({ id }) => id === agentId);
+    let usedTraining;
     const runTracked = (request) => {
       const input = { ...request, onEvent: job.onEvent };
-      return trackedRun ? trackedRun({ studio, task, agent, attemptId: job.runAttemptId, request: input }) : run(input);
+      return trackedRun ? trackedRun({ studio, task, agent, attemptId: job.runAttemptId, usedTraining, request: input }) : run(input);
     };
-    const selected = recommendedTaskControls(studio, agent, task?.modelRecommendations?.[purpose])
+    const override = purpose==='task' && task?.modelOverride ? taskOverride(studio, task.modelOverride) : undefined;
+    const selected = override ?? recommendedTaskControls(studio, agent, task?.modelRecommendations?.[purpose])
       ?? await taskControls(studio, agent, task, { run: runTracked, signal, purpose });
     signal.throwIfAborted();
-    const { runtime, model, effort } = confirmTaskControls(studio, agent, selected);
+    const { runtime, model, effort } = override || confirmTaskControls(studio, agent, selected);
     let allowed = [];
     let prompt;
     let sources;
@@ -507,7 +546,7 @@ export function createWorkflow({
         const context = taskContext(studio, task, job.runAttemptId, decisions);
         prompt = runPrompt(studio, agent, task, decisions, {
           ...context, criteria: task.criteria, artifactPath: task.artifactTarget, previousArtifactPath: task.artifactPath,
-          training: training.context(studio, agent, task),
+          training: (usedTraining=training.context(studio, agent, task)),
           dependencies: task.dependencies.slice(0, 16).map((id) => {
             const { title, summary, artifactPath } = read('tasks', id, 'Задача');
             return { title, summary: summary?.slice(0, 1_000), artifactPath };
@@ -522,7 +561,7 @@ export function createWorkflow({
       case 'review':
         prompt = lesson ? training.reviewPrompt(studio, task) : reviewPrompt(studio, {
           ...task, artifact: task.artifact?.slice(0, task.artifactPath ? 1_000 : 16_000),
-        }, agent, training.context(studio, agent, task));
+        }, agent, (usedTraining=training.context(studio, agent, task)));
         break;
       case 'training-exercise':
         prompt = training.exercisePrompt(studio, task);
@@ -672,7 +711,8 @@ export function createWorkflow({
   function finishStep(studio, job, task, result, attemptId) {
     switch (job.purpose) {
       case 'plan': {
-        const draft = { id: randomUUID(), studioId: studio.id, kind: job.kind, status: 'pending', ...result, createdAt: now() };
+        const draft = { id: randomUUID(), studioId: studio.id, kind: job.kind, status: 'pending', ...result,
+          ...(job.previousPlanId && read('plans',job.previousPlanId,'План').status==='returned' ? {previousPlanId:job.previousPlanId} : {}), createdAt: now() };
         const plan = insert('plans', completeInitialRoster(draft, studio.agents));
         if (job.kind === 'sprint' && !studio.approveSprints) {
           approve(studio, plan);
@@ -699,6 +739,7 @@ export function createWorkflow({
           return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
         }
         const patch = { summary: result.summary, artifact: result.artifact, improvements: result.improvements,
+          ...(result.packageManifest ? {packageManifest:result.packageManifest} : {}),
           ...(task.deliveryMode === 'git' ? { gitDelivery: { worktreeId: result.worktreeId, status: 'work' } } : {}),
         };
         if (result.question) {
@@ -791,6 +832,10 @@ export function createWorkflow({
           }
           return routeParallelSprint(studio, task);
         }
+        // A final checkpoint is scheduled by the approved plan, even if the director considers the member work complete.
+        if (remaining.length===1 && remaining[0].packageMembers && ready.some(t=>t.id===remaining[0].id)) {
+          return routeTask(studio,remaining[0]);
+        }
         if (['next', 'train', 'hire'].includes(result.action)) {
           const next = result.taskKey === undefined ? ready[0] : ready.find(({ key }) => key === result.taskKey);
           if (!next) throw new Error('Директор выбрал недоступную задачу.');
@@ -823,7 +868,7 @@ export function createWorkflow({
     return schedule(studio, { purpose: 'git-merge', taskId: task.id, operationId }, 'Слияние принятой версии');
   }
 
-  function resumeInbox(item, task, answer, decision) {
+  function resumeInbox(item, task, answer, decision,reworkTaskId) {
     const studio = read('studios', task.studioId, 'Студия');
     const accepted = item.kind === 'acceptance' && decision === 'approve';
     if (item.kind === 'acceptance' && !['approve', 'revise'].includes(decision)) throw new Error('Укажите решение о приёмке.');
@@ -837,6 +882,11 @@ export function createWorkflow({
       if (accepted) {
         if (task.deliveryMode === 'git') readyToMerge(studio, task);
         else toDirector(studio, task);
+      } else if (item.kind==='acceptance' && task.packageMembers) {
+        const member = read('tasks',reworkTaskId ?? task.packageMembers.at(-1),'Задача');
+        if (!task.packageMembers.includes(member.id) || member.studioId!==task.studioId || member.sprintId!==task.sprintId) throw new Error('Выберите работу из этого пакета.');
+        update('tasks',{...task,stage:'backlog',status:'queued',revision:(task.revision??0)+1,review:note,packageManifest:undefined,updatedAt:now()});
+        nextTask(studio,{...member,revision:(member.revision??0)+1,failedReviews:0,review:note});
       } else {
         nextTask(studio, item.kind === 'acceptance' ? { ...task, revision: (task.revision ?? 0) + 1, failedReviews: 0, review: note } : task);
       }
@@ -974,14 +1024,21 @@ export function createWorkflow({
       let item;
       const finishedAttempt = dispatcher.finishAttempt({ attemptId, status, reason: ownerQuestion ? 'owner-question' : acceptance ? 'owner-acceptance' : undefined }, () => {
         const latest = read('studios', studioId, 'Студия');
-        item = finishStep(latest, job, task, result, attemptId);
+        item = withAttemptActor(attemptId,()=>finishStep(latest, job, task, result, attemptId));
         if (task) checkpoints?.save(checkpointInput(latest, currentTask(job), attemptId));
       });
       if (!finishedAttempt) return;
       changed();
       notifyInbox(item);
-      if ((job.purpose === 'git-merge' && !task.sprintId) || (job.purpose === 'director' && task.deliveryMode === 'git')) {
+      const heldForPackage = task && list('tasks').some(t=>t.studioId===studioId && t.packageMembers?.includes(task.id) && t.stage!=='done');
+      if (!heldForPackage && ((job.purpose === 'git-merge' && !task.sprintId) || (job.purpose === 'director' && task.deliveryMode === 'git'))) {
         void Promise.resolve().then(() => afterGitMerge?.(studioId, task)).catch(() => {});
+      }
+      if (job.purpose==='director' && task?.packageMembers && read('tasks',task.id,'Задача').stage==='done') {
+        for(const id of task.packageMembers) {
+          const member=read('tasks',id,'Задача');
+          if(member.gitDelivery?.status==='merged') void Promise.resolve().then(()=>afterGitMerge?.(studioId,member)).catch(()=>{});
+        }
       }
       if (job.purpose === 'director') planningService.maybeRequestGrooming({ studioId });
     } catch (error) {

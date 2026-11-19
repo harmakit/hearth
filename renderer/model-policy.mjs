@@ -1,3 +1,4 @@
+import {copy as uiCopy} from './copy.mjs';
 const presets = {
   codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -29,9 +30,9 @@ export function readPolicyRows(rows) {
   const seen = new Set();
   return rows.map(({ runtime, model, efforts }) => {
     const entry = { runtime, model: model.trim(), efforts };
-    if (!entry.model) throw new Error('Укажите модель или уберите незаполненную строку.');
+    if (!entry.model) throw new Error(uiCopy('Укажите модель или уберите незаполненную строку.'));
     const key = modelKey(entry);
-    if (seen.has(key)) throw new Error('Укажите каждую модель подключения только один раз.');
+    if (seen.has(key)) throw new Error(uiCopy('Укажите каждую модель подключения только один раз.'));
     seen.add(key);
     return entry;
   });

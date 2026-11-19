@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 const eligible = checks => checks.every(check => !check.required || check.status === 'PASS');
@@ -20,6 +20,7 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
 
   async function workScope({ studio, task }) {
     if (!studio.projectGit?.enabled) throw new Error('Разрешите работу с Git в настройках студии.');
+    if (task.packageTargetRef) await worktrees.prepareTarget({repository:studio.root,targetRef:task.packageTargetRef,baseRef:task.packageFinalRef,create:true});
     const tree = await worktrees.ensureWorktree({
       studioId: studio.id, taskId: task.id, repository: studio.root, targetRef: studio.projectGit.targetRef,
     });
@@ -84,6 +85,24 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
     }
     const candidate = await delivery.prepareCandidate({ worktree, revision: work.revision, signal });
     const last = await checkRevision({ studio, task, attemptId, worktree, capture: candidate, phase: 'candidate', signal });
+    if (git) {
+      const folder=await scratch();
+      try {
+        const refs=[candidate.revision.targetOid,candidate.revision.candidateOid];
+        let filename='reviewed-changes.diff.txt';
+        let contents;
+        try {
+          contents=await git(studio.root,['diff','--no-ext-diff','--no-textconv',...refs,'--'],{signal,maxBuffer:4*1024*1024});
+        } catch (error) {
+          if(error.code!=='ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error;
+          filename='reviewed-changes.stat.txt';
+          contents=await git(studio.root,['diff','--stat','--no-ext-diff','--no-textconv',...refs,'--'],{signal});
+        }
+        await writeFile(join(folder,filename),contents);
+        last.published.push(await evidence.recordEvidence({studioId:studio.id,taskId:task.id,attemptId,revision:candidate.revision,
+          kind:'review-diff',root:folder,sourcePath:filename}));
+      } finally { await rm(folder,{recursive:true,force:true}); }
+    }
     return {
       worktreeId, revision: candidate.revision, checks: [...first.records, ...last.records],
       evidence: [...first.published, ...last.published], status: eligible(last.records) ? 'review' : 'checks-blocked',
@@ -132,5 +151,31 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
     return delivery.integrate({ worktree, revision: result.revision, receipt: result.receipt, operationId, signal });
   }
 
-  return { workScope, evaluate, reviewScope, merge };
+  async function preparePackage({studio,task,members,signal}) {
+    const stage = task.packageSourceRef;
+    if (stage !== 'refs/heads/hearth-packages/'+task.sprintId) throw new Error('Неизвестная ветка пакета.');
+    const head=(await git(studio.root,['rev-parse','--verify',stage+'^{commit}'],{signal})).trim();
+    const versions=members.filter(m=>m.deliveryMode==='git').map(m=>m.gitDelivery?.targetOid);
+    if (!versions.includes(head)) throw new Error('Версия пакета изменилась после ревью.');
+    for(const oid of versions) {
+      if(!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)) throw new Error('Нет принятой версии задачи.');
+      await git(studio.root,['merge-base','--is-ancestor',oid,head],{signal});
+    }
+    const scoped=await workScope({studio,task});
+    try {
+      if ((await git(scoped.scope.root,['status','--porcelain'],{signal})).trim()) throw new Error('Рабочая копия пакета содержит несохранённые правки.');
+      const base=(await git(scoped.scope.root,['rev-parse','HEAD'],{signal})).trim();
+      const common=(await git(scoped.scope.root,['merge-base',base,head],{signal})).trim();
+      let candidate=head;
+      if (common===head) candidate=base;
+      else if (common!==base) {
+        const tree=(await git(scoped.scope.root,['merge-tree','--write-tree','--no-messages',base,head],{signal})).trim();
+        candidate=(await git(scoped.scope.root,['-c','user.name=Hearth Studio','-c','user.email=studio@hearth.invalid',
+          'commit-tree',tree,'-p',base,'-p',head,'-m','Prepare reviewed sprint package'],{signal})).trim();
+      }
+      await git(scoped.scope.root,['merge','--ff-only',candidate],{signal});
+      return {worktreeId:scoped.worktreeId};
+    } finally {await scoped.release();}
+  }
+  return { workScope, evaluate, reviewScope, merge, preparePackage };
 }

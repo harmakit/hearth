@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { createGitWorktrees } from '../app/git-worktrees.mjs';
+import { createGitWorktrees, git } from '../app/git-worktrees.mjs';
+import { createProjectPipeline } from '../app/project-pipeline.mjs';
 
 function run(repository, ...args) {
   return execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim();
@@ -52,6 +53,27 @@ test('reuses a registered worktree across requests and app restarts', async t =>
   assert.equal(await readFile(join(repository, 'project.txt'), 'utf8'), 'tracked\n');
   assert.equal(run(repository, 'rev-parse', 'HEAD'), originalOid);
   assert.equal(run(repository, 'status', '--porcelain'), '');
+});
+
+test('release preparation combines a reviewed package with an advanced target without changing the target',async t=>{
+  const {repository,root,options}=await fixture(t);
+  const stage='refs/heads/hearth-packages/sprint';
+  run(repository,'checkout','-qb',stage.slice(11));
+  await writeFile(join(repository,'chapter.txt'),'approved');
+  run(repository,'add','.');run(repository,'commit','-qm','chapter');
+  const approved=run(repository,'rev-parse','HEAD');
+  run(repository,'checkout','-q','main');
+  await writeFile(join(repository,'independent.txt'),'parallel');
+  run(repository,'add','.');run(repository,'commit','-qm','independent');
+  const original=run(repository,'rev-parse','main');
+  const trees=createGitWorktrees(options);
+  const pipeline=createProjectPipeline({git,storageDir:join(root,'scratch'),worktrees:trees});
+  const prepared=await pipeline.preparePackage({studio:{id:'studio',root:repository,projectGit:{enabled:true,targetRef:'refs/heads/main'}},
+    task:{id:'release',sprintId:'sprint',packageSourceRef:stage},members:[{deliveryMode:'git',gitDelivery:{targetOid:approved}}]});
+  const tree=await trees.getWorktree(prepared.worktreeId);
+  assert.equal(await readFile(join(tree.path,'chapter.txt'),'utf8'),'approved');
+  assert.equal(await readFile(join(tree.path,'independent.txt'),'utf8'),'parallel');
+  assert.equal(run(repository,'rev-parse','main'),original);
 });
 
 test('validates canonical repository and accepts only a local target branch', async t => {

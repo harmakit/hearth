@@ -44,6 +44,9 @@ if (profileOverride) {
 
 let window;
 let service;
+let nativeText = value => value;
+let nativeInbox = item => item.title;
+const {revealFile}=require('./reveal-file.cjs');
 let shuttingDown = false;
 let scheduleTimer;
 let power;
@@ -123,11 +126,11 @@ function broadcast(snapshot = service?.snapshot()) {
   }
 }
 
-function notify({ title, studioId, inboxId }) {
+function notify({ title, kind,studioId, inboxId }) {
   if (shuttingDown || !Notification.isSupported()) return;
   const notice = new Notification({
     title: "Hearth Studio",
-    body: title || "В студии новое сообщение",
+    body: nativeInbox({title,kind}) || nativeText("В студии новое сообщение"),
   });
   notifications.add(notice);
   notice.once("close", () => notifications.delete(notice));
@@ -144,7 +147,7 @@ function notify({ title, studioId, inboxId }) {
 }
 
 async function pickFolder() {
-  const options = { properties: ["openDirectory", "createDirectory"], title: "Выбрать или создать папку проекта" };
+  const options = { properties: ["openDirectory", "createDirectory"], title: nativeText("Выбрать или создать папку проекта") };
   const result = window && !window.isDestroyed()
     ? await dialog.showOpenDialog(window, options)
     : await dialog.showOpenDialog(options);
@@ -154,7 +157,7 @@ async function pickFolder() {
 async function pickBundle() {
   const options = {
     properties: ["openFile"],
-    title: "Открыть снимок Hearth Studio",
+    title: nativeText("Открыть снимок Hearth Studio"),
     filters: [{ name: "Шаблон или снимок Hearth Studio", extensions: ["json"] }],
   };
   const result = window && !window.isDestroyed() ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
@@ -164,7 +167,7 @@ async function pickBundle() {
 async function saveBundle(studioName, mode) {
   const filename = studioName.replace(/[/\\:\u0000-\u001f]/g, "-").slice(0, 100) || "Hearth";
   const options = {
-    title: "Экспорт студии",
+    title: nativeText("Экспорт студии"),
     defaultPath: filename + (mode === "template" ? "-template" : "-snapshot") + ".hearth.json",
     filters: [{ name: "Экспорт Hearth Studio", extensions: ["json"] }],
   };
@@ -173,6 +176,9 @@ async function saveBundle(studioName, mode) {
 }
 
 async function start() {
+  const {copy,setCopyLocale,inboxLabel} = await import('../renderer/copy.mjs');
+  nativeText = value => { setCopyLocale(service?.readAppLocale() ?? 'en'); return copy(value); };
+  nativeInbox = item => inboxLabel(item,nativeText);
   const [
     { createCommandRouter, isWithin, validateProjectRoot },
     { createStudioService },
@@ -318,14 +324,14 @@ async function start() {
   scheduleTimer.unref();
   powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
-    service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,
+    service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,readArtifact:artifacts.read,
     restart() {
       launchRequests.relaunch();
       app.quit();
       return true;
     },
     async pickAttachment({ studioId, taskId }) {
-      const result = await dialog.showOpenDialog(window, { title: "Добавить вложение", properties: ["openFile"] });
+      const result = await dialog.showOpenDialog(window, { title: nativeText("Добавить вложение"), properties: ["openFile"] });
       if (result.canceled || !result.filePaths[0]) return null;
       const chosen = result.filePaths[0];
       const attemptId = randomUUID();
@@ -341,21 +347,20 @@ async function start() {
       return true;
     },
     async revealEvidence(record) {
-      shell.showItemInFolder(await evidence.openEvidence(record));
-      return true;
+      return revealFile(shell,await evidence.openEvidence(record));
     },
     async copyEvidencePath(record) {
       require("electron").clipboard.writeText(await evidence.openEvidence(record));
       return true;
     },
     async saveEvidence(record) {
-      const result = await dialog.showSaveDialog(window, { title: "Сохранить доказательство", defaultPath: path.basename(record.sourcePath) });
+      const result = await dialog.showSaveDialog(window, { title: nativeText("Сохранить доказательство"), defaultPath: path.basename(record.sourcePath) });
       if (result.canceled || !result.filePath) return false;
       await writeFile(result.filePath, await evidence.readEvidence(record), { flag: "wx" });
       return true;
     },
     async saveDiagnostics(report) {
-      const result = await dialog.showSaveDialog(window, { title: "Сохранить диагностику", defaultPath: "hearth-diagnostics.json" });
+      const result = await dialog.showSaveDialog(window, { title: nativeText("Сохранить диагностику"), defaultPath: "hearth-diagnostics.json" });
       if (result.canceled || !result.filePath) return false;
       await writeFile(result.filePath, JSON.stringify(report, null, 2), { flag: "wx" });
       return true;
@@ -371,8 +376,7 @@ async function start() {
       return true;
     },
     async revealArtifact({ root, path }) {
-      shell.showItemInFolder(await artifacts.openable(root, path));
-      return true;
+      return revealFile(shell,await artifacts.openable(root, path));
     },
     async copyArtifactPath({ root, path }) {
       require("electron").clipboard.writeText(await artifacts.openable(root, path));
@@ -388,7 +392,7 @@ async function start() {
       if (shuttingDown) throw new Error("Hearth Studio завершает работу.");
       return { ok: true, value: await dispatch(command, payload) };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : "Не удалось выполнить команду." };
+      return { ok: false, error: nativeText(error instanceof Error ? error.message : "Не удалось выполнить команду.") };
     }
   });
   await openWindow();

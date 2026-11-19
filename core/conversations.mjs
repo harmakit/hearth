@@ -33,7 +33,7 @@ export function prepareInboxAnswer(item, input) {
   const attachmentIds = attachments(input.attachmentIds);
   const freeText = messageText(input.answer);
   const requestedDecision = identifier(input.decision, 'решение');
-  const answerKey = keyFor([answerVersion, choiceId, attachmentIds, freeText, requestedDecision]);
+  const answerKey = keyFor([answerVersion, choiceId, attachmentIds, freeText, requestedDecision,...(input.reworkTaskId ? [input.reworkTaskId] : [])]);
   if (!Number.isSafeInteger(answerVersion) || answerVersion < 1 || answerVersion !== version) {
     throw new Error('Версия вопроса изменилась. Откройте его заново.');
   }
@@ -74,7 +74,7 @@ export function createConversations({
       throw new Error('Беседа относится к другому адресату или задаче.');
     }
     const kind = input.kind ?? (agentId ? 'chat' : 'note');
-    if (!['chat', 'note'].includes(kind) || (kind === 'note' && agentId)) {
+    if (!['chat', 'note','comment'].includes(kind) || (kind === 'note' && agentId) || (kind === 'comment' && (!taskId || agentId))) {
       throw new Error('Записку можно адресовать директору.');
     }
     const operationKey = keyFor([agentId, taskId, kind, text, attachmentIds]);
@@ -97,14 +97,14 @@ export function createConversations({
         ?? insert('conversations', { id: randomUUID(), studioId: studio.id, agentId, taskId, createdAt });
       const message = insert('conversationMessages', {
         id: messageId, studioId: studio.id, conversationId: conversation.id, author: 'owner',
-        kind, status: 'queued', text, attachmentIds, operationId, operationKey, createdAt,
+        kind, status: kind==='comment' ? 'processed' : 'queued', text, attachmentIds, operationId, operationKey, createdAt,
       });
       return { message, created: true };
     });
 
     if (created) {
       changed(message);
-      queue(studio.id);
+      if (kind!=='comment') queue(studio.id);
     }
     return message;
   }
