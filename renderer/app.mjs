@@ -1,6 +1,7 @@
 import { agentActivity, actorState, buildRooms, languageChoices, pendingStudioPlan, roleDetails, roleNames, taskForAgent } from './workshop.mjs';
 import { paintRooms } from './room-art.mjs';
-import { publishedPaths, renderWork } from './work-view.mjs';
+import { taskFacts } from './owner-facts.mjs';
+import { publishedPaths, renderWork, registerRows } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey } from './model-policy.mjs';
 import { createModelCatalogEditor } from './model-catalog-editor.mjs';
@@ -60,6 +61,8 @@ let notificationTarget;
 let openingNotification = false;
 let workBusy = false;
 let workTab;
+let registryQuery = '';
+let registryStage = '';
 const expandedEpics = new Set();
 let advancedOpen = false;
 let catalogEditor;
@@ -120,6 +123,8 @@ function selectStudio(id) {
   selectedAgent = '';
   inboxScope = 'open';
   workTab = undefined;
+  registryQuery = '';
+  registryStage = '';
   expandedEpics.clear();
   advancedOpen = false;
   skillSearch = { topics: '', preview: {} };
@@ -132,6 +137,7 @@ async function refresh() {
     const snapshot = await bridge.request('snapshot');
     if (version !== snapshotVersion) return;
     const previousTraining = taskDialog && renderTrainingDetails(taskDialog, studio(), tasks());
+    const previousFacts = taskDialog && JSON.stringify(taskFacts(state, taskDialog.studioId, taskDialog.id));
     const previousEvidence = taskDialog && JSON.stringify(studioRows('evidence').filter(row => row.taskId === taskDialog.id));
     state = snapshot;
     if (snapshot.providers) Object.assign(providerState, snapshot.providers);
@@ -141,8 +147,9 @@ async function refresh() {
     render();
     updateWizardProvider();
     if (dialog.open && !dialogBusy && taskDialog) {
-      const latest = snapshot.tasks.find(task => task.id === taskDialog.id);
+      const latest = tasks().find(task => task.id === taskDialog.id && task.studioId === taskDialog.studioId);
       if (latest && (JSON.stringify(latest) !== JSON.stringify(taskDialog) ||
+          previousFacts !== JSON.stringify(taskFacts(snapshot, latest.studioId, latest.id)) ||
           previousTraining !== renderTrainingDetails(latest, studio(), tasks()) ||
           previousEvidence !== JSON.stringify(studioRows('evidence').filter(row => row.taskId === latest.id)))) openTask(latest);
     } else if (dialog.open && !dialogBusy && dialogMeeting) {
@@ -173,6 +180,9 @@ function render() {
   const inStudio = Object.hasOwn(studioViews, view);
   const picker = $('#studio-select');
   const focused = document.activeElement;
+  const registryControl = focused?.matches('[data-registry-query]') ? '[data-registry-query]'
+    : focused?.matches('[data-registry-stage]') ? '[data-registry-stage]' : '';
+  const registryCaret = registryControl === '[data-registry-query]' ? [focused.selectionStart, focused.selectionEnd] : null;
   const focusRoot = [content, $('#navigation'), $('#workspace-navigation')].find(container => container.contains(focused) && focused !== container);
   const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'enterStudio', 'workspaceInbox', 'providerEnabled', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab', 'assessDebt', 'message', 'meetingDetail', 'legacyAction', 'evidence'].includes(key));
   const autonomyFocused = focused?.getAttribute('name') === 'approveSprints';
@@ -193,6 +203,11 @@ function render() {
     ? ({ overview, work, inbox, workshop, skills, settings })[view]()
     : heading(views[view]) + empty('Создайте студию', 'Опишите проект, выберите рабочую папку и подключение директора.', button('Создать студию', 'data-open="studio"'));
   if (view === 'workshop' && current) paintRooms(content);
+  if (registryControl) {
+    const control = content.querySelector(registryControl);
+    control?.focus({ preventScroll: true });
+    if (registryCaret) control?.setSelectionRange(...registryCaret);
+  }
   if (libraryDetails?.size) for (const node of content.querySelectorAll('[data-library-detail]')) {
     node.open = libraryDetails.has(node.dataset.libraryDetail);
   }
@@ -212,7 +227,7 @@ function work() {
   const rows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
   return heading('Работа', studio().name, button('Новая задача', 'data-open="task"')) + renderWork({
     studio: studio(), tasks: tasks(), epics: rows('epics'), stories: rows('stories'),
-    sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab, expandedEpics,
+    sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab ?? 'registry', expandedEpics, registryQuery, registryStage,
     phases: rows('phases'),
     evidence: rows('evidence').filter(item => item.kind !== 'attachment'),
   });
@@ -539,7 +554,7 @@ function settings() {
       </div></section></div>`;
 }
 
-function dialogTo(title, body, submitLabel, submit, { adjustable = false } = {}) {
+function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusSummary = false } = {}) {
   dialogLoadVersion++;
   catalogEditor = undefined;
   dialogAttachments = undefined;
@@ -556,7 +571,7 @@ function dialogTo(title, body, submitLabel, submit, { adjustable = false } = {})
   configureDialogSize(adjustable);
   $('#dialog-body').scrollTop = 0;
   if (!dialog.open) dialog.showModal();
-  const initialFocus = dialogBodyFocus();
+  const initialFocus = focusSummary ? $('#dialog-title') : dialogBodyFocus();
   (initialFocus ?? dialog.querySelector('[data-close]'))?.focus();
 }
 
@@ -1316,7 +1331,6 @@ function newStudio() {
     wizardNames.map((name, index) => `<li${index === 0 ? ' aria-current="step"' : ''}>${name}</li>`).join('') + '</ol>' +
     step(0, input('Название студии', 'name', '', 'required maxlength="120"') +
       textarea('Что должно получиться?', 'brief', '', 'required placeholder="Опишите работу своими словами"') +
-      input('Для кого?', 'audience', '', 'placeholder="Кому предназначен результат"') +
       input('Какой первый результат хотите увидеть?', 'firstResult', '', 'placeholder="Например, черновик, прототип или первая подборка"')) +
     step(1, pathField() + '<p class="muted">Выберите существующую папку или создайте новую в окне выбора.</p>' +
       languageField('Язык отчётов', 'language', 'Русский') +
@@ -1325,9 +1339,9 @@ function newStudio() {
       Object.entries(runtimeNames).map(([id, label]) => option(id, providerState[id]?.enabled === false ? `${label} · отключён в приложении` : label, firstRuntime)).join('')) +
       '<div id="wizard-provider" class="stack compact" role="status"></div>' +
       '<p class="muted">Для запуска нужно рабочее подключение. Черновик можно сохранить в любом случае.</p>'),
-    'Создать студию', async ({ brief, audience, firstResult, runtime, ...values }) => {
+    'Создать студию', async ({ brief, firstResult, runtime, ...values }) => {
       if (!values.root) throw new Error('Выберите рабочую папку.');
-      const completeBrief = [brief, audience && `Аудитория — ${audience}`, firstResult && `Первый результат — ${firstResult}`].filter(Boolean).join('\n\n');
+      const completeBrief = [brief, firstResult && `Первый результат — ${firstResult}`].filter(Boolean).join('\n\n');
       const created = await bridge.request('createStudio', { ...values, brief: completeBrief, director: { runtime } });
       selectStudio(created.id);
       view = 'overview';
@@ -1425,7 +1439,8 @@ function taskEditor(agentId = '') {
 }
 
 function openTask(task) {
-  const latest = tasks().find(entry => entry.id === task.id) ?? task;
+  const latest = tasks().find(entry => entry.id === task.id && entry.studioId === task.studioId);
+  if (!latest) return;
   const entry = entries().find(item => item.taskId === latest.id && item.status === 'open' && ['question', 'acceptance'].includes(item.kind));
   const allTasks = tasks();
   const dependencies = pendingDependencies(latest, new Map(allTasks.map(item => [item.id, item])));
@@ -1447,9 +1462,12 @@ function openTask(task) {
     ? JSON.stringify(latest.artifact, null, 2) : latest.artifact;
   const block = (label, value) => value ? `<section class="inline-result"><h3>${label}</h3>${plain(value)}</section>` : '';
   const isOpen = taskDialog?.id === latest.id;
+  const expanded = isOpen ? Array.from($('#dialog-body').querySelectorAll('details[data-section][open]'), el => el.dataset.section) : [];
   const previousScroll = $('#dialog-body').scrollTop;
   const epic = taskEpic(latest);
-  const attempts = (state.attempts ?? []).filter(attempt => attempt.taskId === latest.id).slice(-10).reverse();
+  const facts = taskFacts(state, latest.studioId, latest.id);
+  const attempts = facts.attempts.reverse();
+  const eventNames = { created: 'Создана задача', 'attempt-start': 'Начат запуск', 'attempt-end': 'Запуск завершён', message: 'Сообщение', evidence: 'Сохранено доказательство' };
   const git = latest.gitDelivery;
   const importedGitCheck = latest.importedGitCheck;
   const links = (latest.links ?? []).filter(row => row.type !== 'blocks');
@@ -1464,6 +1482,9 @@ function openTask(task) {
     (epic ? `<div class="actions">${actionFor('К эпику', 'epic-link', epic.id)}<span class="muted">${safe(epic.title)}</span></div>` : '') +
     renderTrainingDetails(latest, studio(), allTasks) +
     prerequisiteBlock('task', latest.id) +
+    (facts.before.length || facts.after.length ? '<section class="inline-result"><h3>Зависимости</h3><ul class="legacy-list">' +
+      facts.before.map(row => related(row.id, 'Зависит от')).join('') +
+      facts.after.map(row => related(row.id, 'Ожидает эту задачу')).join('') + '</ul></section>' : '') +
     (latest.replacedBy || links.length ? `<section class="inline-result"><h3>Связанные задачи</h3><ul class="legacy-list">
       ${latest.replacedBy ? related(latest.replacedBy, 'Заменена задачей') : ''}
       ${links.map(row => related(row.taskId, { origin: 'Источник', debt: 'Связанное улучшение', replaces: 'Заменяет' }[row.type] ?? 'Связь')).join('')}</ul></section>` : '') +
@@ -1480,6 +1501,10 @@ function openTask(task) {
       ${latest.improvements.map(item => `<li><strong>${safe(item.title)}</strong>${plain(item.reason)}</li>`).join('')}</ul></section>` : '') +
     block('Ревью', latest.review) + block('Решение директора', latest.directorDecision) +
     block('Результат', artifact) +
+    (facts.messages.length ? `<details class="advanced" data-section="discussion"><summary>Обсуждение · ${facts.messages.length}</summary><ul class="legacy-list">${facts.messages.map(row =>
+      `<li><strong>${safe(row.author === 'owner' ? 'Владелец' : nameFor(current.agents.find(a => a.id === row.agentId)))}</strong> · ${safe(studioDate(row.createdAt))}${plain(row.text)}</li>`).join('')}</ul></details>` : '') +
+    (facts.history.length ? `<details class="advanced" data-section="history"><summary>Журнал · ${facts.history.length}</summary><ul class="legacy-list">${facts.history.map(row =>
+      `<li>${safe(studioDate(row.at))} · ${eventNames[row.type]}${row.detail ? ' · ' + safe(purposes[row.detail] || statuses[row.detail]?.[0] || row.detail) : ''}</li>`).join('')}</ul></details>` : '') +
     renderDelivery({
       checks: git?.checks ?? [],
       worktree: studioRows('worktrees').find(row => row.id === git?.worktreeId) ?? (git?.worktreeId ? { branchRef: git.branchRef ?? git.worktreeId, revision: git.revision } : null),
@@ -1487,21 +1512,24 @@ function openTask(task) {
       receipts: git?.receipt ? [git.receipt] : [],
       evidence: studioRows('evidence').filter(item => item.taskId === latest.id && item.kind !== 'attachment'),
     }) +
-    (attempts.length ? `<details class="advanced"><summary>Попытки запуска</summary><ul class="plan-list">${attempts.map(attempt => `<li>
+    (attempts.length ? `<details class="advanced" data-section="runs"><summary>Запуски · ${attempts.length} · ${facts.usage.total === null ? 'нет данных о расходе' : `${facts.usage.total.toLocaleString()} токенов · измерено ${facts.usage.measured} из ${attempts.length}`}</summary><ul class="plan-list">${attempts.map(attempt => `<li>
       <div class="row"><strong>${safe(purposes[attempt.purpose] || 'Запуск')}</strong>${status(attempt)}</div>
       ${attempt.startedAt ? `<small class="muted">${safe(new Date(attempt.startedAt).toLocaleString('ru-RU'))}</small>` : ''}
+      <p class="muted">Вход · ${attempt.usage.input ?? '—'}　Выход · ${attempt.usage.output ?? '—'}　Чтение кэша · ${attempt.usage.cacheRead ?? '—'}</p>
       ${attempt.error ? plain(attempt.error) : ''}</li>`).join('')}</ul></details>` : '') +
     `<div class="actions">
       ${actionFor('Связь по задаче', 'message-task', latest.id)}
       ${canEditBacklog ? actionFor('Изменить в бэклоге', 'backlog-edit', latest.id) : ''}
       ${latest.kind !== 'train' && latest.status === 'queued' && trainingForTask(latest).length ? actionFor('Добавить учебный допуск', 'task-prerequisite', latest.id) : ''}
-      ${latest.artifactPath ? actionFor('Открыть файл', 'artifact', latest.id, false) : ''}
+      ${latest.artifactPath ? actionFor('Открыть файл', 'artifact', latest.id, false) +
+        actionFor('Показать в папке', 'reveal-artifact', latest.id) + actionFor('Копировать путь', 'copy-artifact-path', latest.id) : ''}
       ${entry ? actionFor(entry.kind === 'acceptance' ? 'Открыть приёмку' : 'Ответить на вопрос', 'inbox', entry.id, false) : ''}
       ${canRun ? needsWorktreeReview ? actionFor('Сверить рабочее дерево', 'review-worktree', latest.id, false)
         : actionFor(startLabel, 'start-task', latest.id, false) : ''}
       ${canCancel ? actionFor('Отменить задачу', 'cancel-task', latest.id) : ''}
     </div>`, undefined, undefined, { adjustable: true });
   taskDialog = latest;
+  for (const detail of $('#dialog-body').querySelectorAll('details[data-section]')) detail.open = expanded.includes(detail.dataset.section);
   if (isOpen && previousFocus) Array.from(dialog.querySelectorAll('button')).find(node => Object.hasOwn(node.dataset, previousFocus))?.focus();
   if (isOpen) $('#dialog-body').scrollTop = previousScroll;
 }
@@ -1546,6 +1574,7 @@ function openInbox(item) {
   const selectedAttachments = [];
   const choices = questionOptions(item);
   const body = `<div>${badge(question ? 'Вопрос' : 'Ошибка', question ? 'warn' : 'attention')}</div>` + plain(item.body) +
+    (item.kind === 'error' && open && item.readAt ? '<p>Ошибка просмотрена и всё ещё требует решения.</p>' : '') +
     (question ? renderQuestionDetails(item) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
     (item.answer ? `<section class="inline-result"><h3>Ответ</h3>${plain(item.answer)}</section>` : '');
   inboxScope = open ? 'open' : 'resolved';
@@ -1558,7 +1587,7 @@ function openInbox(item) {
     ? (choices.length ? select('Выберите вариант', 'choiceId', option('', 'Свой ответ') + choices.map(choice => option(String(choice.id), choice.label ?? choice.title ?? choice.text ?? choice.id)).join('')) : '') +
       textarea('Ваш ответ', 'answer') + attachmentFields()
     : item.taskId ? actionFor('Открыть задачу', 'task', item.taskId) : ''),
-    question ? 'Отправить ответ' : 'Отметить просмотренной', open ? ({ answer, choiceId }) => {
+    question ? 'Отправить ответ' : 'Отметить просмотренной', open && (question || !item.readAt) ? ({ answer, choiceId }) => {
       if (question && !answer && !choiceId && !selectedAttachments.length) throw new Error('Выберите вариант, напишите ответ или приложите файл.');
       return bridge.request('answerInbox', answerPayload(item, {
         answer, choiceId, attachmentIds: selectedAttachments.map(row => row.id), operationId: op,
@@ -1579,7 +1608,7 @@ function openAcceptance(item, revise = false) {
     (pending ? revise ? textarea('Что нужно исправить?', 'answer', '', 'required')
       : actionFor('Вернуть на доработку', 'revise-result', item.id) : ''),
     revise ? 'Отправить на доработку' : 'Принять результат',
-    pending ? ({ answer }) => send(revise ? 'revise' : 'approve', answer) : undefined, { adjustable: true });
+    pending ? ({ answer }) => send(revise ? 'revise' : 'approve', answer) : undefined, { adjustable: true, focusSummary: !revise });
 }
 
 const listText = value => Array.isArray(value) ? value.join('\n') : value;
@@ -1632,7 +1661,7 @@ function openPlan(plan, revise = false) {
       ? (revise ? textarea('Что изменить в плане?', 'feedback', '', 'required') : '') + autonomyHint()
       : ''),
     revise && pending ? 'Отправить на доработку' : undefined, revise && pending ? ({ feedback }) =>
-      bridge.request('decidePlan', { planId: plan.id, decision: 'revise', feedback }) : undefined, { adjustable: true });
+      bridge.request('decidePlan', { planId: plan.id, decision: 'revise', feedback }) : undefined, { adjustable: true, focusSummary: !revise });
   if (pending && !revise) $('#dialog-actions').insertAdjacentHTML('beforeend',
     (plan.kind === 'initial' && plan.agents?.length ? actionFor('Изменить состав', 'edit-plan-team', plan.id) : '') +
     actionFor('Вернуть на доработку', 'revise-plan', plan.id) + actionFor('Подтвердить и запустить', 'approve-plan', plan.id, false));
@@ -1987,15 +2016,15 @@ async function workCommand(command, payload, success) {
   }
 }
 
-async function openArtifact(payload) {
+async function openArtifact(payload, command = 'openArtifact') {
   if (!dialog.open) {
-    await workCommand('openArtifact', payload);
+    await workCommand(command, payload);
     return;
   }
   dialogError();
   setDialogBusy(true);
   try {
-    await bridge.request('openArtifact', payload);
+    await bridge.request(command, payload);
   } catch (error) {
     dialogError(error.message || 'Не удалось открыть файл.');
   } finally {
@@ -2115,9 +2144,9 @@ function legacyAction(data, target) {
   else if (data.removeAttachment !== undefined) {
     dialogAttachments?.splice(Number(data.removeAttachment), 1);
     renderAttachmentFields();
-  } else if (data.evidence !== undefined || data.saveEvidence !== undefined) {
-    const evidenceId = data.evidence ?? data.saveEvidence;
-    if (studioRows('evidence').some(row => same(row.id, evidenceId))) void openLegacyFile(data.saveEvidence !== undefined ? 'saveEvidence' : 'openEvidence', evidenceId);
+  } else if (['evidence', 'saveEvidence', 'revealEvidence', 'copyEvidencePath'].some(key => Object.hasOwn(data, key))) {
+    const key = ['evidence', 'saveEvidence', 'revealEvidence', 'copyEvidencePath'].find(key => Object.hasOwn(data, key));
+    if (studioRows('evidence').some(row => same(row.id, data[key]))) void openLegacyFile(key === 'evidence' ? 'openEvidence' : key, data[key]);
   } else if (data.conversation !== undefined) withRow(studioRows('conversations'), data.conversation, conversation => messageEditor({ conversation }));
   else if (data.message !== undefined) messageEditor({ agentId: data.message });
   else if (data.messageNote !== undefined) messageEditor({ kind: 'note' });
@@ -2161,6 +2190,13 @@ async function openLegacyFile(command, evidenceId) {
   }
 }
 
+content.addEventListener('input', event => {
+  if (!event.target.matches('[data-registry-query], [data-registry-stage]')) return;
+  registryQuery = content.querySelector('[data-registry-query]').value;
+  registryStage = content.querySelector('[data-registry-stage]').value;
+  content.querySelector('[data-registry-rows]').innerHTML = registerRows(tasks(), studio(), studioRows('sprints'), registryQuery, registryStage);
+});
+
 document.addEventListener('click', event => {
   const target = event.target.closest('button');
   if (!target) return;
@@ -2173,6 +2209,10 @@ document.addEventListener('click', event => {
   else if (data.enterStudio !== undefined || data.workspaceInbox !== undefined) {
     selectStudio(data.enterStudio ?? data.workspaceInbox);
     route(data.workspaceInbox === undefined ? 'overview' : 'inbox');
+    if (data.decision) {
+      const decision = entries().find(item => same(item.id, data.decision));
+      if (decision) openInbox(decision);
+    }
   } else if (data.wizardNext !== undefined) moveWizard(1);
   else if (data.wizardBack !== undefined) moveWizard(-1);
   else if (data.view) route(data.view);
@@ -2202,9 +2242,9 @@ document.addEventListener('click', event => {
     const item = entries().find(entry => same(entry.id, data.reviseResult) && entry.kind === 'acceptance');
     if (item) openAcceptance(item, true);
   }
-  else if (data.artifact !== undefined) {
-    const task = tasks().find(item => same(item.id, data.artifact));
-    if (task) void openArtifact({ taskId: task.id });
+  else if (data.artifact !== undefined || data.revealArtifact !== undefined || data.copyArtifactPath !== undefined) {
+    const task = tasks().find(item => same(item.id, data.artifact ?? data.revealArtifact ?? data.copyArtifactPath));
+    if (task) void openArtifact({ taskId: task.id }, data.revealArtifact !== undefined ? 'revealArtifact' : data.copyArtifactPath !== undefined ? 'copyArtifactPath' : 'openArtifact');
   } else if (data.planFile !== undefined) {
     const plan = planById(data.planId);
     if (plan && publishedPaths(plan).includes(data.planFile)) void openArtifact({ planId: plan.id, path: data.planFile });

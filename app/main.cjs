@@ -340,6 +340,14 @@ async function start() {
       if (error) throw new Error("Не удалось открыть файл.");
       return true;
     },
+    async revealEvidence(record) {
+      shell.showItemInFolder(await evidence.openEvidence(record));
+      return true;
+    },
+    async copyEvidencePath(record) {
+      require("electron").clipboard.writeText(await evidence.openEvidence(record));
+      return true;
+    },
     async saveEvidence(record) {
       const result = await dialog.showSaveDialog(window, { title: "Сохранить доказательство", defaultPath: path.basename(record.sourcePath) });
       if (result.canceled || !result.filePath) return false;
@@ -360,6 +368,14 @@ async function start() {
     async openArtifact({ root, path }) {
       const error = await shell.openPath(await artifacts.openable(root, path));
       if (error) throw new Error("Не удалось открыть артефакт: " + error);
+      return true;
+    },
+    async revealArtifact({ root, path }) {
+      shell.showItemInFolder(await artifacts.openable(root, path));
+      return true;
+    },
+    async copyArtifactPath({ root, path }) {
+      require("electron").clipboard.writeText(await artifacts.openable(root, path));
       return true;
     },
   });

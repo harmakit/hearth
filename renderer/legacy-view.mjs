@@ -40,7 +40,7 @@ export function renderEvidence(evidence = []) {
   return section('Доказательства', list(evidence.map(item => `<strong>${safe(item.name ?? item.filename ?? item.sourcePath ?? item.kind ?? 'Файл')}</strong>
     <p class="muted">${[item.contentType, Number.isFinite(item.size) ? `${amounts.format(item.size)} байт` : '', item.digest].filter(Boolean).map(safe).join(' · ')}</p>
     ${recordRevision(item.revision)}<div class="actions">${!item.contentType || /^(?:text\/|image\/(?:jpeg|png|webp|gif)$|video\/|audio\/|application\/(?:json|pdf)$)/.test(item.contentType)
-    ? button('Открыть', 'evidence', item.id) : ''}${button('Сохранить копию', 'save-evidence', item.id)}</div>`)));
+    ? button('Открыть', 'evidence', item.id) : ''}${button('Показать в папке', 'reveal-evidence', item.id)}${button('Копировать путь', 'copy-evidence-path', item.id)}${button('Сохранить копию', 'save-evidence', item.id)}</div>`)));
 }
 
 export function renderDelivery({ checks = [], evidence = [], delivery, worktree, receipts = [] } = {}) {

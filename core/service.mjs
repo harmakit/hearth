@@ -830,7 +830,10 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       update('studio_inbox', { ...read('studio_inbox', inboxId, 'Сообщение'), ...response });
       return changed(result);
     }
-    if (item.kind === 'error') return changed(update(studioItem ? 'studio_inbox' : 'inbox', { ...item, status: 'resolved' }));
+    if (item.kind === 'error') {
+      return previous.readAt ? previous : changed(update(studioItem ? 'studio_inbox' : 'inbox',
+        { ...item, readAt: now() }));
+    }
     if (item.kind === 'meeting') {
       const meeting = read('meetings', item.meetingId, 'Встреча');
       if (decision !== 'approve') throw new Error('Подтвердите решение встречи или откройте её для пересмотра.');

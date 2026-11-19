@@ -55,3 +55,12 @@ test('studio names, paths, and action identifiers are escaped', () => {
   assert.match(html, /\/folder\/&lt;studio&gt;/);
   assert.doesNotMatch(html, /<img>/);
 });
+test('workspace opens the oldest blocking decision before other unread items', () => {
+  const html = renderWorkspaceHome({ studios: [{ id: 's', name: 'Docs' }], inbox: [
+    { id: 'first', studioId: 's', status: 'open', title: 'Other', createdAt: '2026-01-10' },
+    { id: 'later', studioId: 's', status: 'open', title: 'Later', blockedTaskIds: ['b'], createdAt: '2026-01-12' },
+    { id: 'block', studioId: 's', status: 'open', title: 'Missing example', blockedTaskIds: ['a'], createdAt: '2026-01-11' },
+  ] });
+  assert.match(html, /data-decision="block"/);
+  assert.match(html, /Missing example/);
+});

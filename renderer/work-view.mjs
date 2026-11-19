@@ -3,6 +3,7 @@ import { coachTitle, renderBoardTraining } from './coach-view.mjs';
 import { renderEvidence, renderRetrospective } from './legacy-view.mjs';
 
 const tabs = {
+  registry: 'Реестр задач',
   board: 'Доска', epics: 'Эпики и истории', sprints: 'Спринты', meetings: 'Встречи', artifacts: 'Артефакты', planning: 'Планирование',
 };
 const stages = {
@@ -300,10 +301,27 @@ function planningView(studio, phases, tasks) {
   </div>`;
 }
 
-export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set() } = {}) {
+export function registerRows(tasks, studio, sprints, query, stage) {
+  const owners = new Map((studio.agents ?? []).map(a => [a.id, a.name || a.roleTitle || a.role]));
+  const sprintNames = new Map(sprints.map(s => [s.id, s.title]));
+  const needle = query.trim().toLocaleLowerCase();
+  const rows = [];
+  for (const task of tasks) {
+    const owner = owners.get(task.agentId) || (task.agentId ? 'Неизвестный агент' : 'Директор');
+    const sprint = sprintNames.get(task.sprintId) || '';
+    const state = task.stage === 'replaced' ? 'replaced' : stageOf(task);
+    if (stage && state !== stage) continue;
+    if (![task.title, task.id, owner, sprint, task.prompt].join(' ').toLocaleLowerCase().includes(needle)) continue;
+    rows.push(`<tr><td>${taskLink(task, false)}</td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${safe(stages[state] || 'Заменена')}</td></tr>`);
+  }
+  return rows.join('') || '<tr><td colspan="4">По этим условиям задач нет.</td></tr>';
+}
+
+export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set(), registryQuery = '', registryStage = '' } = {}) {
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
   const views = {
+    registry: () => `<section><div class="actions"><input type="search" data-registry-query aria-label="Найти задачу" placeholder="Название, ID, агент, спринт" value="${safe(registryQuery)}"><select data-registry-stage aria-label="Этап"><option value="">Все этапы</option>${Object.entries({...stages, replaced: 'Заменена'}).map(([key,label]) => `<option value="${key}" ${registryStage === key ? 'selected' : ''}>${label}</option>`).join('')}</select></div><div class="registry-scroll"><table class="registry"><thead><tr><th>Задача</th><th>Ответственный</th><th>Спринт</th><th>Этап</th></tr></thead><tbody data-registry-rows>${registerRows(tasks, studio, sprints, registryQuery, registryStage)}</tbody></table></div></section>`,
     board: () => board(tasks, studio, byTask),
     epics: () => epicView(epics, stories, tasks, byTask, expandedEpics),
     sprints: () => sprintView(studio, sprints, plans, tasks, byTask),

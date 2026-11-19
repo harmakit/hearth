@@ -261,7 +261,7 @@ test('serializes one studio while another runs and records provider errors', asy
   assert.equal(saved.inbox[0].kind, 'error');
 });
 
-test('dismissing a provider error preserves the failed task and does not start another attempt', async (t) => {
+test('reading a provider error preserves the open blocker until retry', async (t) => {
   let runs = 0;
   const service = createStudioService({ dbPath: database(t), run: async () => {
     runs += 1;
@@ -272,10 +272,13 @@ test('dismissing a provider error preserves the failed task and does not start a
   service.startTask({ taskId: work.id });
   const { inbox: [error] } = await until(() => service.snapshot(), ({ inbox }) => inbox.length === 1);
   service.answerInbox({ inboxId: error.id, answer: 'Просмотрено' });
-  assert.equal(service.snapshot().inbox[0].status, 'resolved');
+  assert.equal(service.snapshot().inbox[0].status, 'open');
+  assert.ok(service.snapshot().inbox[0].readAt);
   assert.equal(service.snapshot().tasks[0].status, 'failed');
   await delay(20);
   assert.equal(runs, 1);
+  service.startTask({ taskId: work.id });
+  assert.equal(service.snapshot().inbox.find(item => item.id === error.id).status, 'resolved');
 });
 
 test('clears saved model controls and sends provider defaults', async (t) => {

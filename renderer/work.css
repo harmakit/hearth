@@ -4,6 +4,13 @@
   min-width: 0;
 }
 
+.registry-scroll { overflow-x: auto; }
+.registry { width: 100%; border-collapse: collapse; }
+.registry td, .registry th { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.registry th { font-size: .85em; }
+.registry td:first-child { width: 48%; }
+.registry .work-task-link { padding: 2px 0; min-height: 24px; }
+
 .work-view .work-tabs {
   display: flex;
   flex-wrap: wrap;

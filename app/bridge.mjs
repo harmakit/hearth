@@ -65,14 +65,15 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, openProject,
-  openEvidence, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, protectedRoots = [] }) {
+export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, revealArtifact, copyArtifactPath, openProject,
+  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, protectedRoots = [] }) {
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
-    if (command === "openEvidence" || command === "saveEvidence") {
+    const evidenceActions = { openEvidence, revealEvidence, copyEvidencePath, saveEvidence };
+    if (Object.hasOwn(evidenceActions, command)) {
       const record = service.findEvidence(payload);
-      return (command === "openEvidence" ? openEvidence : saveEvidence)(record);
+      return evidenceActions[command](record);
     }
     if (command === "pickAttachment") {
       const studio = service.snapshot().studios.find(({ id }) => id === payload.studioId);
@@ -104,7 +105,8 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       if (!studio) throw new Error("Студия не найдена.");
       return openProject(await directory(studio.root));
     }
-    if (command === "openArtifact") {
+    const artifactActions = { openArtifact, revealArtifact, copyArtifactPath };
+    if (Object.hasOwn(artifactActions, command)) {
       const state = service.snapshot();
       if (payload.planId) {
         const plan = state.plans?.find(entry => entry.id === payload.planId);
@@ -112,12 +114,12 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
         if (!studio || !plan.publishedFiles?.some(file => (typeof file === "string" ? file : file.path) === payload.path)) {
           throw new Error("Артефакт плана недоступен.");
         }
-        return openArtifact({ root: studio.root, path: payload.path });
+        return artifactActions[command]({ root: studio.root, path: payload.path });
       }
       const task = state.tasks.find(entry => entry.id === payload.taskId);
       const studio = task && state.studios.find(entry => entry.id === task.studioId);
       if (!task?.artifactPath || !studio) throw new Error("Артефакт для этой задачи недоступен.");
-      return openArtifact({ root: studio.root, path: task.artifactPath });
+      return artifactActions[command]({ root: studio.root, path: task.artifactPath });
     }
     if (command === "exportStudio") return transfer.exportStudio(service.snapshot(), payload);
     if (command === "importBundle" || command === "importLegacy") {

@@ -19,7 +19,13 @@ export function renderWorkspaceHome({ studios = [], tasks = [], inbox = [] }) {
   }
   for (const item of inbox) {
     const count = counts.get(String(item.studioId));
-    if (count && item.status === 'open') { count.open++; open++; }
+    if (!count || item.status !== 'open') continue;
+    count.open++; open++;
+    const blocking = Boolean(item.blockedTaskIds?.length || item.taskId || item.kind === 'plan');
+    const oldest = item.createdAt || '9999';
+    if (!count.decision || (blocking && !count.blocking) || (blocking === count.blocking && oldest < count.oldest)) {
+      Object.assign(count, { decision: item, blocking, oldest });
+    }
   }
   return `<header class="page-heading"><h1>Все студии</h1><div class="actions">${create}</div></header>
     <div class="stack"><dl class="workspace-summary panel padded" aria-label="Сводка по студиям">
@@ -33,6 +39,7 @@ export function renderWorkspaceHome({ studios = [], tasks = [], inbox = [] }) {
           <p class="muted">${safe(studio.manualPaused ? 'На паузе' : statuses[studio.lifecycle] ?? 'Без активных задач')}</p></header>
           ${studio.root ? `<p class="muted workspace-path">${safe(studio.root)}</p>` : ''}
           <dl class="workspace-card-metrics">${metrics(count.running, count.open)}</dl>
+          ${count.decision?.title ? `<div><button class="text-button" type="button" data-workspace-inbox="${id}" data-decision="${safe(count.decision.id)}">${safe(count.decision.title)}</button></div>` : ''}
           ${count.open ? `<div><button type="button" class="action secondary" data-workspace-inbox="${id}" aria-label="Входящие студии ${name}">Открыть входящие</button></div>` : ''}
         </article>`;
       }).join('')}</div></div>`;
