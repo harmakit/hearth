@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hearth · План и реестр задач</title>
+<style>
+:root{font:15px/1.52 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#2a2c24;background:#f4f3ee;--line:#d1d1c5;--quiet:#5c6054;--rust:#914329}
+*{box-sizing:border-box}body{margin:0}a{color:var(--rust)}button,select,input,textarea{font:inherit;color:inherit}button,select,input,textarea{border:1px solid var(--line);border-radius:5px;background:#fffef9;padding:.48rem .7rem}button,summary,select{cursor:pointer}button:hover{background:#f2eee4;border-color:#aaa798}button.primary{background:var(--rust);border-color:var(--rust);color:white}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid #aa5837;outline-offset:2px}
+header{background:#292b24;color:#fffef2;display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:12px clamp(16px,4vw,56px);border-bottom:3px solid #b9714d}header b{font:24px Georgia,serif}header small{color:#d9d6cb}header a{margin-left:auto;color:white}main{max-width:1440px;margin:auto;padding:clamp(16px,3.5vw,52px)}h1{font:500 clamp(34px,4vw,53px)/1.1 Georgia,serif;letter-spacing:-.04em;margin:.3em 0}h2{font:500 24px/1.2 Georgia,serif;margin:0 0 14px}h3{font-size:15px;margin:16px 0 6px}p{margin:6px 0 14px}small,.quiet,dt{color:var(--quiet)}nav,.actions,.filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap}nav{margin:18px 0 22px}nav button[aria-pressed=true]{background:#35392f;color:white}.cols{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(265px,.8fr);gap:18px;align-items:start}.panel{background:#fffef9;border:1px solid var(--line);border-radius:7px;padding:20px;min-width:0}.stack>*+*{margin-top:14px}label{display:grid;gap:4px;font-size:14px;font-weight:600}label input,label select,label textarea{font-weight:400;min-width:0}textarea{width:100%;min-height:70px}dl{display:grid;grid-template-columns:minmax(90px,.7fr) 1.4fr;gap:8px;margin:10px 0}dd{margin:0}.badge{display:inline-block;color:#46513a;background:#e5eadc;border-radius:3px;padding:2px 7px;font-size:13px}.step{padding:12px 0;border-top:1px solid var(--line)}.step p,.step small{margin:3px 0}.filters{align-items:end;margin-bottom:12px}.filters label:first-child{flex:1 1 175px}.filters select,.filters input{max-width:100%;width:100%}.table-scroll{overflow:auto;max-height:55vh;padding:3px}table{border-collapse:collapse;width:100%;font-size:14px}td,th{border-bottom:1px solid var(--line);padding:8px 6px;text-align:left}th{font-weight:500;color:var(--quiet);background:#f3f2eb;position:sticky;top:0}td button{border:0;background:transparent;text-align:left;padding:2px;color:var(--rust);text-decoration:underline;text-underline-offset:3px}tr.chosen{background:#faf0e7}code{font:12px ui-monospace,monospace;color:var(--quiet)}.inspector{position:sticky;top:16px}.note{padding:10px 12px;border-left:3px solid #a67953;background:#f6f1e7}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}[hidden]{display:none!important}@media(max-width:850px){.cols{grid-template-columns:1fr}.inspector{position:static}.table-scroll{max-height:42vh}td,th{padding:7px 3px}header a{margin-left:0}}
+</style>
+<header><b>Hearth Studio</b><small>Кликабельный макет · тестовые данные</small><a href="index.html">Макет приёмки</a></header>
+<main><h1 id="title">Первый запуск</h1><nav aria-label="Сценарии"><button id="start-tab">Первый запуск</button><button id="work-tab">Реестр задач</button></nav><div id="body"></div><p class="sr" id="live" aria-live="polite"></p></main>
+<script>
+const el=id=>document.getElementById(id);
+const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const roles=['Мира · редактор','Илья · инженер','Лев · рецензент'];
+const subjects=['первый запуск','глоссарий','сборка примеров','публикация','обратная связь','архив'];
+const actions=['Собрать источники','Подготовить текст','Сверить термины','Проверить команды','Исправить ссылки','Принять раздел'];
+const statuses=['В очереди','В работе','Ждёт задачу','На ревью'];
+const records=subjects.flatMap((subject,g)=>actions.map((action,i)=>{
+ const id=g*6+i+1, blocked=i===2;
+ return {id,title:action+' · '+subject,owner:roles[i%3],status:blocked?statuses[2]:statuses[[0,1,0,3,0,0][i]],
+   dependency:blocked?id-1:null,criteria:'Раздел «'+subject+'» сверен с источником, итог записан в руководство.', sprint:false};
+}));
+const starter=[
+ {title:'Собрать структуру руководства',owner:roles[0],criteria:'Для каждого раздела указаны читатель и ожидаемый результат.'},
+ {title:'Подготовить пример запуска',owner:roles[1],criteria:'Пример запускается по инструкции в чистой среде.'},
+ {title:'Провести независимое ревью',owner:roles[2],criteria:'Проверены структура и пример, записаны замечания или решение о приёмке.'}
+];
+let tab=location.hash==='#tasks'?'work':'start', stage='draft', version=0, brief='Подготовить руководство для первого запуска проекта.', audience='Новый участник команды', feedback='', selected=null, trail=[],search='',role='',state='',scope='',scroll=0;
+const opt=(v,t,sel)=>'<option value="'+safe(v)+'"'+(v===sel?' selected':'')+'>'+safe(t)+'</option>';
+function switchTab(to){tab=to;location.hash=to==='work'?'tasks':'start';render()}
+el('start-tab').onclick=()=>switchTab('start');el('work-tab').onclick=()=>switchTab('work');
+window.addEventListener('hashchange',()=>{tab=location.hash==='#tasks'?'work':'start';render()});
+function render(){
+ el('start-tab').setAttribute('aria-pressed',tab==='start');el('work-tab').setAttribute('aria-pressed',tab==='work');
+ el('title').textContent=tab==='start'?'Первый запуск студии':'Реестр задач';
+ if(tab==='work'){work();return}
+ const approved=stage==='active';
+ el('body').innerHTML='<div class="cols"><section class="panel stack">'+(stage==='draft'?
+ '<span class="badge">Черновик</span><h2>Редакция руководства</h2><form class="stack" id="brief-form"><label>Какой результат нужен?<textarea required name="brief">'+safe(brief)+'</textarea></label><label>Для кого?<input required name="audience" value="'+safe(audience)+'"></label><button class="primary">Получить первый план</button></form>':
+ '<span class="badge">'+(approved?'Спринт запущен':'Ждёт вашего подтверждения')+'</span><h2>Первый спринт · план v'+version+'</h2><p>'+safe(brief)+'</p><small>Аудитория · '+safe(audience)+'</small>'+
+ (feedback?'<p class="note">Условие владельца · '+safe(feedback)+'</p>':'')+
+ starter.map((t,i)=>'<div class="step"><strong>'+t.title+'</strong><p>'+t.owner+'</p><small>'+safe(t.criteria)+(i===2&&feedback?' Дополнительно проверить: '+safe(feedback):'')+'</small></div>').join('')+
+ (approved?'<button class="primary" id="see-sprint">Открыть задачи спринта</button>':
+ '<div class="actions"><button class="primary" id="approve">Утвердить и запустить</button><button id="revise">Уточнить план</button></div><form hidden id="revision" class="stack"><label>Что добавить к критериям ревью?<textarea required name="feedback"></textarea></label><button>Получить обновлённый план</button></form>'))+
+ '</section><aside class="panel"><h2>'+ (stage==='draft'?'Что произойдёт дальше':approved?'Что произошло':'Что вы утверждаете')+'</h2><p>'+
+ (stage==='draft'?'Директор предложит роли, задачи и критерии. Вы увидите их до запуска команды.':approved?'Созданы три задачи. В демонстрации редактор и инженер приступили к работе. Ревью ждёт оба результата.':'После подтверждения редактор и инженер смогут начать параллельно. Рецензент получит задачу после подготовки обоих результатов.')+
+ '</p><dl><dt>Команда</dt><dd>'+(stage==='draft'?'Состав в первом плане':'Редактор, инженер, рецензент')+'</dd><dt>Объём</dt><dd>'+(stage==='draft'?'Определится в плане':'3 задачи · до 2 одновременно')+'</dd></dl></aside></div>';
+ el('brief-form')?.addEventListener('submit',e=>{e.preventDefault();const f=e.target.elements;if(!f.brief.value.trim()||!f.audience.value.trim())return;brief=f.brief.value.trim();audience=f.audience.value.trim();stage='plan';version++;render()});
+ el('revise')?.addEventListener('click',()=>{el('revision').hidden=false;el('revision').elements.feedback.focus()});
+ el('revision')?.addEventListener('submit',e=>{e.preventDefault();const v=e.target.elements.feedback.value.trim();if(!v)return;feedback=v;version++;render()});
+ el('approve')?.addEventListener('click',()=>{if(stage!=='plan')return;stage='active';starter.forEach((t,i)=>records.push({...t,id:37+i,status:i===2?'Ждёт задачу':'В работе',dependency:i===2?[37,38]:null,sprint:true}));render()});
+ el('see-sprint')?.addEventListener('click',()=>{search=role=state='';scope='sprint';selected=37;trail=[];switchTab('work')});
+}
+function filtered(){return records.filter(t=>(!scope||t.sprint)&&(!role||t.owner===role)&&(!state||t.status===state)&&
+ ('T-'+t.id+' '+t.title+' '+t.owner).toLowerCase().includes(search.trim().toLowerCase()))}
+function rows(){const items=filtered();el('count').textContent='Показано '+items.length+' из '+records.length;el('rows').innerHTML=items.map(t=>'<tr class="'+(t.id===selected?'chosen':'')+'"><td><button data-id="'+t.id+'"><code>T-'+t.id+'</code> '+safe(t.title)+'</button></td><td>'+safe(t.owner.split(' · ')[0])+'</td><td>'+t.status+'</td></tr>').join('')||'<tr><td colspan="3">Совпадений нет. Измените фильтры или поиск.</td></tr>'}
+function inspect(){
+ const t=records.find(t=>t.id===selected);
+ if(!t){el('detail').innerHTML='<h2>Карточка задачи</h2><p class="quiet">Выберите задачу в списке.</p>';return}
+ const deps=Array.isArray(t.dependency)?t.dependency:t.dependency?[t.dependency]:[];
+ el('detail').innerHTML='<div class="actions"><code>T-'+t.id+'</code><span class="badge">'+t.status+'</span></div><h2 tabindex="-1" id="task-title">'+safe(t.title)+'</h2>'+
+ '<h3>Критерий результата</h3><p>'+safe(t.criteria)+(t.id===39&&feedback?' Дополнительно проверить: '+safe(feedback):'')+'</p>'+
+ (deps.length?'<h3>Что удерживает работу</h3><p>Ожидается результат '+(deps.length===1?'задачи':'обеих задач')+'.</p>'+deps.map(id=>'<button data-dep="'+id+'">T-'+id+' · '+safe(records.find(r=>r.id===id).title)+'</button>').join(''):'')+
+ '<form class="stack" id="assign"><label>Исполнитель<select name="owner">'+roles.map(r=>opt(r,r,t.owner)).join('')+'</select></label><button>Сохранить назначение</button><p id="saved" role="status"></p></form>'+
+ '<div class="actions"><button id="return">'+(trail.length?'← К исходной задаче':'Вернуться к списку')+'</button></div>';
+ el('assign').onsubmit=e=>{e.preventDefault();t.owner=e.target.elements.owner.value;rows();el('saved').textContent='Назначено · '+t.owner};
+ el('return').onclick=()=>{if(trail.length){selected=trail.pop();rows();inspect();el('task-title').focus();return}const prev=selected;selected=null;rows();inspect();(el('rows').querySelector('[data-id="'+prev+'"]')||el('query')).focus({preventScroll:true});el('scroll').scrollIntoView({block:'nearest'})};
+}
+function work(){
+ el('body').innerHTML='<div class="cols"><section class="panel"><div class="filters"><label>Поиск<input type="search" id="query" value="'+safe(search)+'" placeholder="Название, роль или T-ID"></label><label>Исполнитель<select id="role">'+opt('','Все',role)+roles.map(r=>opt(r,r,role)).join('')+'</select></label><label>Состояние<select id="state">'+opt('','Все',state)+statuses.map(s=>opt(s,s,state)).join('')+'</select></label>'+
+ (stage==='active'?'<label>Состав<select id="scope">'+opt('','Вся студия',scope)+opt('sprint','Первый спринт',scope)+'</select></label>':'')+'</div><p id="count" class="quiet" aria-live="polite"></p><div id="scroll" class="table-scroll"><table><thead><tr><th>Задача</th><th>Кто</th><th>Состояние</th></tr></thead><tbody id="rows"></tbody></table></div></section><aside id="detail" class="panel inspector"></aside></div>';
+ rows();inspect();el('scroll').scrollTop=scroll;el('scroll').onscroll=e=>{scroll=e.target.scrollTop};
+ function refilter(){search=el('query').value;role=el('role').value;state=el('state').value;scope=el('scope')?.value||'';selected=null;trail=[];rows();inspect();el('scroll').scrollTop=0}
+ el('query').oninput=refilter;el('role').onchange=el('state').onchange=refilter;if(el('scope'))el('scope').onchange=refilter;
+}
+el('body').onclick=e=>{const b=e.target.closest('[data-id],[data-dep]');if(!b)return;if(b.dataset.dep)trail.push(selected);else trail=[];selected=Number(b.dataset.dep||b.dataset.id);rows();inspect();el('task-title').focus({preventScroll:true});if(matchMedia('(max-width:850px)').matches)el('detail').scrollIntoView({block:'start'})};
+render();
+</script></html>

@@ -1,0 +1,1351 @@
+<div id="hearth-demo" lang="ru">
+  <aside class="rail" aria-label="Студии и навигация">
+    <div class="wordmark">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Hearth <span>Studio</span></span>
+    </div>
+    <label class="studio-picker">
+      <span class="visually-hidden">Выбрать студию</span>
+      <select id="hearth-studio-select">
+        <option value="game">Hearth · Игра</option>
+        <option value="book">Бумажный берег</option>
+      </select>
+      <i data-lucide="chevrons-up-down" aria-hidden="true"></i>
+    </label>
+    <nav class="main-nav" aria-label="Разделы студии">
+      <button type="button" data-view="overview" aria-current="page"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>Обзор</span></button>
+      <button type="button" data-view="inbox"><i data-lucide="inbox" aria-hidden="true"></i><span>Входящие</span><span class="nav-count" id="hearth-inbox-count"></span></button>
+      <button type="button" data-view="workshop"><i data-lucide="armchair" aria-hidden="true"></i><span>Мастерская</span></button>
+      <button type="button" data-view="settings"><i data-lucide="settings-2" aria-hidden="true"></i><span>Настройки</span></button>
+    </nav>
+    <div class="rail-footer"><span class="demo-dot"></span> Тестовые данные</div>
+  </aside>
+  <div class="app-body">
+    <header class="app-header">
+      <div class="breadcrumb"><span id="hearth-studio-crumb"></span><i data-lucide="chevron-right" aria-hidden="true"></i><span id="hearth-view-crumb"></span></div>
+      <button class="action secondary compact" type="button" data-chat="director"><i data-lucide="square-pen" aria-hidden="true"></i>Написать</button>
+    </header>
+    <main id="hearth-content" aria-label="Рабочая область студии"></main>
+  </div>
+  <p class="visually-hidden" id="hearth-announcement" aria-live="polite"></p>
+  <dialog id="hearth-dialog" aria-labelledby="hearth-dialog-title"></dialog>
+</div>
+
+<style>
+  #hearth-demo {
+    color-scheme: light dark;
+    --paper: light-dark(#f8f5ed, #211e19);
+    --surface: light-dark(#fffcf5, #2c2821);
+    --contrast: light-dark(#f0eade, #352f26);
+    --ink: light-dark(#28231e, #f8eee0);
+    --muted: light-dark(#65594c, #c8b9a4);
+    --line: light-dark(#e1d7c8, #4b4034);
+    --accent: light-dark(#913f28, #eea888);
+    --accent-text: light-dark(#fffaf2, #231b15);
+    --accent-soft: light-dark(#f4e5d9, #402c23);
+    --green: light-dark(#426247, #b3cf9f);
+    --green-soft: light-dark(#e6eddf, #30392a);
+    --yellow: light-dark(#855619, #edbd78);
+    --yellow-soft: light-dark(#f4ead6, #40331f);
+    --rail: light-dark(#27221d, #1c1916);
+    --rail-ink: #f7eee2;
+    --rail-muted: #c5b5a3;
+    --rail-line: #483b31;
+    display: grid;
+    grid-template-columns: 174px minmax(0, 1fr);
+    min-height: 676px;
+    background: var(--paper);
+    color: var(--ink);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+    container-type: inline-size;
+  }
+  #hearth-demo *, #hearth-demo *::before, #hearth-demo *::after { box-sizing: border-box; }
+  #hearth-demo h1, #hearth-demo h2, #hearth-demo h3, #hearth-demo p { margin: 0; }
+  #hearth-demo h1 { font-size: 31px; font-weight: 680; letter-spacing: -.045em; line-height: 1.15; }
+  #hearth-demo h2 { font-size: 17px; font-weight: 670; letter-spacing: -.025em; line-height: 1.25; }
+  #hearth-demo h3 { font-size: 15px; font-weight: 660; line-height: 1.32; }
+  #hearth-demo p { overflow-wrap: anywhere; }
+  #hearth-demo button, #hearth-demo input, #hearth-demo textarea, #hearth-demo select { font: inherit; }
+  #hearth-demo button { color: inherit; cursor: pointer; }
+  #hearth-demo button:disabled { cursor: default; opacity: .55; }
+  #hearth-demo :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  #hearth-demo .rail :focus-visible { outline-color: #ffb698; }
+  #hearth-demo [hidden] { display: none !important; }
+  #hearth-demo svg.lucide { width: 16px; height: 16px; flex: 0 0 16px; vertical-align: middle; }
+  #hearth-demo .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  #hearth-demo .rail {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 19px 12px 14px;
+    background: var(--rail);
+    color: var(--rail-ink);
+  }
+  #hearth-demo .wordmark { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 670; letter-spacing: -.035em; }
+  #hearth-demo .wordmark > span:last-child > span { font-weight: 430; color: var(--rail-muted); }
+  #hearth-demo .brand-mark {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    border-radius: 8px;
+    background: #983f27;
+    color: #ffefe1;
+  }
+  #hearth-demo .brand-mark::before {
+    content: "";
+    width: 16px;
+    height: 19px;
+    background: #ffdec4;
+    clip-path: polygon(50% 0, 69% 0, 69% 24%, 88% 24%, 88% 48%, 100% 48%, 100% 80%, 81% 80%, 81% 100%, 19% 100%, 19% 80%, 0 80%, 0 52%, 19% 52%, 19% 39%, 38% 39%, 38% 24%, 50% 24%);
+  }
+  #hearth-demo .studio-picker { position: relative; display: block; margin: 24px 0 14px; }
+  #hearth-demo .studio-picker select {
+    width: 100%;
+    min-width: 0;
+    appearance: none;
+    padding: 9px 24px 9px 10px;
+    background: #332b24;
+    color: var(--rail-ink);
+    border: 1px solid var(--rail-line);
+    border-radius: 7px;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  #hearth-demo .studio-picker svg { position: absolute; right: 7px; top: 12px; width: 13px; height: 13px; color: var(--rail-muted); pointer-events: none; }
+  #hearth-demo .main-nav { display: grid; gap: 3px; }
+  #hearth-demo .main-nav button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 39px;
+    width: 100%;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 7px 8px;
+    text-align: left;
+    color: var(--rail-muted);
+    font-size: 13px;
+  }
+  #hearth-demo .main-nav button:hover { background: #352d25; color: var(--rail-ink); }
+  #hearth-demo .main-nav button[aria-current="page"] { background: #43352b; color: var(--rail-ink); border-color: #584235; }
+  #hearth-demo .nav-count { margin-inline-start: auto; font-size: 11px; font-weight: 650; color: #ffcead; }
+  #hearth-demo .rail-footer { display: flex; align-items: center; gap: 7px; margin-top: auto; padding: 16px 5px 2px; color: var(--rail-muted); font-size: 11px; }
+  #hearth-demo .demo-dot { width: 6px; height: 6px; border-radius: 50%; background: #bc8d67; }
+  #hearth-demo .app-body { min-width: 0; }
+  #hearth-demo .app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 60px;
+    padding: 8px 25px;
+    border-bottom: 1px solid var(--line);
+  }
+  #hearth-demo .breadcrumb { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  #hearth-demo .breadcrumb > span:last-child { color: var(--ink); }
+  #hearth-demo .breadcrumb svg { width: 12px; height: 12px; flex-basis: 12px; }
+  #hearth-demo #hearth-content { padding: 23px 25px 25px; min-width: 0; }
+  #hearth-demo .page-heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 9px; margin-bottom: 20px; }
+  #hearth-demo .page-heading p { margin-top: 4px; }
+  #hearth-demo .muted { color: var(--muted); }
+  #hearth-demo .small { font-size: 12px; }
+  #hearth-demo .mini { font-size: 11px; }
+  #hearth-demo .strong { font-weight: 640; }
+  #hearth-demo .action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    max-width: 100%;
+    min-height: 38px;
+    padding: 7px 12px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-weight: 620;
+    font-size: 13px;
+    text-align: center;
+    transition: filter .14s ease, background-color .14s ease;
+  }
+  #hearth-demo .action:not(:disabled):hover { filter: brightness(1.11); }
+  #hearth-demo .action.secondary { color: var(--ink); background: var(--surface); border-color: var(--line); }
+  #hearth-demo .action.compact { min-height: 34px; padding: 6px 9px; white-space: nowrap; }
+  #hearth-demo .action.text-action { background: transparent; color: var(--accent); padding-inline: 0; }
+  #hearth-demo .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  #hearth-demo .panel { min-width: 0; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); }
+  #hearth-demo .panel-pad { padding: 15px; }
+  #hearth-demo .split { display: grid; grid-template-columns: minmax(0, 1.64fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+  #hearth-demo .stack { display: grid; align-content: start; gap: 15px; min-width: 0; }
+  #hearth-demo .section-label { margin-bottom: 8px; }
+  #hearth-demo .status {
+    display: inline-flex;
+    width: fit-content;
+    align-items: center;
+    gap: 5px;
+    border-radius: 5px;
+    padding: 3px 7px;
+    color: var(--muted);
+    background: var(--contrast);
+    font-size: 11px;
+    font-weight: 610;
+    line-height: 1.3;
+  }
+  #hearth-demo .status.good { color: var(--green); background: var(--green-soft); }
+  #hearth-demo .status.warn { color: var(--yellow); background: var(--yellow-soft); }
+  #hearth-demo .status.attention { color: var(--accent); background: var(--accent-soft); }
+  #hearth-demo .status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: currentColor; }
+  #hearth-demo .decision { display: grid; gap: 8px; background: var(--accent-soft); padding: 15px; }
+  #hearth-demo .decision h2 { font-size: 18px; }
+  #hearth-demo .decision .actions { margin-top: 3px; }
+  #hearth-demo .decision-line, #hearth-demo .report-meta, #hearth-demo .row-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #hearth-demo .decision-line > span:first-child { display: flex; align-items: center; gap: 6px; color: var(--accent); }
+  #hearth-demo .report-frame { overflow: hidden; }
+  #hearth-demo .report-body { padding: 12px 14px 11px; display: grid; gap: 5px; }
+  #hearth-demo .report-body .actions { justify-content: space-between; gap: 3px; }
+  #hearth-demo .artwork { display: block; width: 100%; image-rendering: pixelated; aspect-ratio: 3.35; object-fit: cover; background: #242b25; }
+  #hearth-demo .excerpt { padding: 16px 18px; background: var(--contrast); color: var(--ink); font: 16px/1.55 Georgia, serif; }
+  #hearth-demo .workshop-link { display: grid; gap: 9px; padding: 14px; }
+  #hearth-demo .workshop-link .action { justify-self: start; }
+  #hearth-demo .work-list, #hearth-demo .role-list { display: grid; }
+  #hearth-demo .work-row {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 7px minmax(0, 1fr) 14px;
+    align-items: start;
+    gap: 9px;
+    padding: 11px 9px;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+  }
+  #hearth-demo .work-row:hover { background: var(--contrast); }
+  #hearth-demo .work-row > span:nth-child(2) { display: grid; gap: 3px; }
+  #hearth-demo .work-row > .status-dot { margin-top: 6px; color: var(--green); }
+  #hearth-demo .work-row > .status-dot.warn { color: var(--yellow); }
+  #hearth-demo .work-row > svg { margin-top: 2px; color: var(--muted); }
+  #hearth-demo .segment { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-bottom: 12px; }
+  #hearth-demo .segment button {
+    min-height: 34px;
+    padding: 5px 9px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  #hearth-demo .segment button[aria-pressed="true"], #hearth-demo .segment button:hover { background: var(--contrast); border-color: var(--line); color: var(--ink); }
+  #hearth-demo .inbox-layout { display: grid; grid-template-columns: minmax(164px, .85fr) minmax(0, 1.45fr); align-items: start; gap: 13px; }
+  #hearth-demo .inbox-list { display: grid; gap: 6px; }
+  #hearth-demo .inbox-entry, #hearth-demo .role-row, #hearth-demo .provider-row {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    padding: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--ink);
+    text-align: left;
+  }
+  #hearth-demo .inbox-entry[aria-pressed="true"], #hearth-demo .role-row[aria-pressed="true"], #hearth-demo .provider-row[aria-pressed="true"] {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+  }
+  #hearth-demo .inbox-entry:hover, #hearth-demo .role-row:hover, #hearth-demo .provider-row:hover { border-color: var(--accent); }
+  #hearth-demo .inspector { display: grid; gap: 11px; padding: 15px; }
+  #hearth-demo .inspector > header { display: grid; gap: 6px; }
+  #hearth-demo .inspector > header h2 { font-size: 19px; }
+  #hearth-demo .detail-line { display: grid; gap: 3px; border-top: 1px solid var(--line); padding-top: 9px; }
+  #hearth-demo .choice {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 8px 9px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  #hearth-demo .choice input, #hearth-demo .check input { accent-color: var(--accent); }
+  #hearth-demo .choice:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+  #hearth-demo .choices { display: grid; padding: 0; border: 0; margin: 0; gap: 5px; min-width: 0; }
+  #hearth-demo .choices legend { padding: 0; margin-bottom: 5px; }
+  #hearth-demo .choice input { flex: 0 0 auto; margin: 4px 0 0; }
+  #hearth-demo .notice { padding: 9px 10px; border-radius: 6px; background: var(--contrast); }
+  #hearth-demo .notice.good { background: var(--green-soft); color: var(--green); }
+  #hearth-demo .notice.warn { background: var(--yellow-soft); color: var(--yellow); }
+  #hearth-demo .workshop-heading .actions { align-self: center; }
+  #hearth-demo .workshop-heading .page-heading { margin-bottom: 0; }
+  #hearth-demo .workshop-heading { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 17px; }
+  #hearth-demo .work-map {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+    gap: 8px;
+    border: 1px solid #44382c;
+    border-bottom: 7px solid #48362a;
+    border-radius: 10px;
+    padding: 8px;
+    background: #28231d;
+  }
+  #hearth-demo .work-map:has(> .work-room:nth-child(4):last-child) {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, max(200px, calc((100% - 8px) / 2))), 1fr));
+  }
+  #hearth-demo .work-room {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 3px solid #594234;
+    border-radius: 5px 5px 3px 3px;
+    background: #46352a;
+    color: #f7e9d3;
+    box-shadow: 0 2px 0 #171712;
+  }
+  #hearth-demo .room-header { display: flex; min-height: 39px; align-items: center; gap: 6px; padding: 4px 7px; }
+  #hearth-demo .room-name { flex: 1 1 auto; font-size: 12px; font-weight: 650; line-height: 1.25; overflow-wrap: anywhere; }
+  #hearth-demo .room-count { font-size: 11px; color: #d5bf9f; white-space: nowrap; }
+  #hearth-demo .room-edit {
+    display: grid;
+    place-items: center;
+    flex: 0 0 30px;
+    min-height: 29px;
+    border-radius: 4px;
+    border: 1px solid #81664c;
+    background: #594535;
+    color: #f7e9d3;
+    font-size: 16px;
+    line-height: 1;
+  }
+  #hearth-demo .room-edit:hover { background: #76573d; }
+  #hearth-demo .room-edit:focus-visible { outline-color: #ffcc96; }
+  #hearth-demo .room-floor { flex: 1 0 auto; min-height: 158px; position: relative; isolation: isolate; }
+  #hearth-demo .room-art { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; z-index: -1; }
+  #hearth-demo .room-occupants {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 69px 4px 10px;
+  }
+  #hearth-demo .map-pin {
+    display: grid;
+    justify-items: center;
+    width: min(31%, 83px);
+    min-width: 54px;
+    min-height: 43px;
+    padding: 3px 2px;
+    color: #fff7e7;
+    background: #33271a25;
+    border: 1px solid transparent;
+    border-radius: 5px;
+  }
+  #hearth-demo .map-pin:hover, #hearth-demo .map-pin[aria-pressed="true"] { background: #30261d91; border-color: #ffcc96; box-shadow: 0 0 0 2px #1f1c18b0; }
+  #hearth-demo .map-pin:only-child { width: max-content; min-width: 72px; }
+  #hearth-demo .map-pin:focus-visible { outline-color: #ffcc96; }
+  #hearth-demo .map-pin span { font-size: 11px; background: #29221be8; padding: 2px 3px; line-height: 1.24; border-radius: 3px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  #hearth-demo .map-pin canvas { width: 46px; height: 46px; image-rendering: pixelated; }
+  #hearth-demo .role-row canvas { width: 26px; height: 32px; image-rendering: pixelated; }
+  #hearth-demo .room-empty { align-self: center; border-radius: 4px; background: #33261fd9; color: #f5e7d7; padding: 2px 6px; font-size: 11px; }
+  #hearth-demo .room-warning { color: var(--accent); }
+  #hearth-demo .action.danger-action { background: transparent; border-color: var(--line); color: var(--accent); }
+  #hearth-demo .workshop-detail { margin-top: 12px; }
+  #hearth-demo .role-list, #hearth-demo .provider-list { display: grid; gap: 6px; }
+  #hearth-demo .role-row { grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 8px; }
+  #hearth-demo .role-row > span { display: grid; gap: 2px; }
+  #hearth-demo .provider-row { grid-template-columns: 36px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 64px; }
+  #hearth-demo .provider-row > span:last-child { display: grid; gap: 2px; }
+  #hearth-demo .provider-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 7px; color: var(--ink); background: var(--contrast); }
+  #hearth-demo .provider-icon.claude { background: var(--accent-soft); color: var(--accent); }
+  #hearth-demo .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 12px; }
+  #hearth-demo .field { display: grid; align-content: start; gap: 4px; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 620; }
+  #hearth-demo .field input, #hearth-demo .field select, #hearth-demo .field textarea {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    min-height: 37px;
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--ink);
+    font-weight: 430;
+    font-size: 13px;
+  }
+  #hearth-demo .field textarea { min-height: 65px; resize: vertical; }
+  #hearth-demo .checks { display: flex; align-items: stretch; flex-wrap: wrap; gap: 5px 10px; }
+  #hearth-demo .check { display: inline-flex; align-items: center; min-height: 32px; gap: 4px; font-size: 12px; }
+  #hearth-demo .check input { margin: 0; }
+  #hearth-demo .model-row { padding: 8px 0; border-top: 1px solid var(--line); }
+  #hearth-demo .model-row > .check { font-weight: 630; }
+  #hearth-demo .model-row > .checks { margin-inline-start: 16px; }
+  #hearth-demo .empty { display: grid; gap: 6px; padding: 17px; }
+  #hearth-demo .mono { font: 12px/1.55 ui-monospace, SFMono-Regular, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+  #hearth-demo dialog {
+    width: min(500px, calc(100% - 28px));
+    max-height: calc(100% - 24px);
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: 0 12px 60px #20140b48;
+  }
+  #hearth-demo dialog::backdrop { background: #21180e87; }
+  #hearth-demo .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+  #hearth-demo .dialog-body { display: grid; gap: 10px; padding: 14px 16px 16px; }
+  #hearth-demo .dialog-body .artwork { border-radius: 6px; }
+  #hearth-demo .dialog-body ul { margin: 0; padding-inline-start: 20px; }
+  #hearth-demo .chat-line { padding: 8px 10px; border-radius: 7px; background: var(--contrast); }
+  #hearth-demo .chat-line.owner { background: var(--accent-soft); }
+  #hearth-demo .chat-line .mini { margin-bottom: 2px; }
+  #hearth-demo .flow-spaced { display: grid; gap: 9px; }
+  @container (max-width: 790px) {
+    #hearth-demo .app-header { padding-inline: 17px; }
+    #hearth-demo #hearth-content { padding-inline: 17px; }
+    #hearth-demo .split { gap: 10px; }
+  }
+  @container (max-width: 670px) {
+    #hearth-demo .split { grid-template-columns: minmax(0, 1fr); }
+    #hearth-demo .inbox-layout { grid-template-columns: minmax(0, 1fr); }
+    #hearth-demo .inbox-list, #hearth-demo .provider-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr)); }
+  }
+  @container (max-width: 560px) {
+    #hearth-demo .rail { grid-column: 1 / -1; padding: 9px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 9px; }
+    #hearth-demo .studio-picker { margin: 0; }
+    #hearth-demo .main-nav { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; }
+    #hearth-demo .main-nav button { min-width: 0; justify-content: center; padding: 5px 2px; gap: 3px; font-size: 11px; }
+    #hearth-demo .main-nav button svg { width: 12px; height: 12px; flex-basis: 12px; }
+    #hearth-demo .nav-count { margin: 0; }
+    #hearth-demo .rail-footer { display: none; }
+    #hearth-demo .app-body { grid-column: 1 / -1; }
+    #hearth-demo .app-header { min-height: 51px; padding-inline: 12px; }
+    #hearth-demo #hearth-content { padding: 16px 12px; }
+    #hearth-demo h1 { font-size: 25px; }
+    #hearth-demo .page-heading { margin-bottom: 13px; }
+  }
+  @container (max-width: 485px) {
+    #hearth-demo .work-map, #hearth-demo .work-map:has(> .work-room:nth-child(4):last-child) {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 152px), 1fr)); gap: 5px; padding: 5px;
+    }
+    #hearth-demo .room-header { padding-inline: 4px; }
+    #hearth-demo .room-count { display: none; }
+  }
+  @container (max-width: 385px) {
+    #hearth-demo .main-nav button svg { display: none; }
+  }
+  @media (pointer: coarse) {
+    #hearth-demo button, #hearth-demo .field input, #hearth-demo .field select { min-height: 44px; }
+    #hearth-demo .field input, #hearth-demo .field select, #hearth-demo .field textarea { font-size: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) { #hearth-demo * { transition: none !important; } }
+</style>
+
+<script>
+(() => {
+  "use strict";
+  const root = document.getElementById("hearth-demo");
+  const content = root.querySelector("#hearth-content");
+  const dialog = root.querySelector("#hearth-dialog");
+  const studioSelect = root.querySelector("#hearth-studio-select");
+  const viewNames = { overview: "Обзор", inbox: "Входящие", workshop: "Мастерская", settings: "Настройки" };
+  const runtimes = {
+    codex: {
+      name: "Codex", icon: "terminal", transport: "Codex App Server · локальный CLI", auth: "ChatGPT",
+      models: [{ id: "sol", name: "GPT-6.1 Sol", levels: ["low", "medium", "high", "xhigh"] },
+        { id: "luna", name: "GPT-6 Luna", levels: ["low", "medium", "high"] }]
+    },
+    claude: {
+      name: "Claude Code", icon: "asterisk", transport: "Claude Agent SDK · локальный CLI", auth: "Ключ Anthropic",
+      models: [{ id: "sonnet", name: "Claude Sonnet", levels: ["low", "medium", "high"] },
+        { id: "opus", name: "Claude Opus", levels: ["medium", "high", "max"] }]
+    }
+  };
+  const effortNames = { low: "Низкий", medium: "Средний", high: "Высокий", xhigh: "Очень высокий", max: "Максимальный" };
+  const datasets = {
+    game: {
+      name: "Hearth · Игра", focus: "Первый уровень и путь к очагу",
+      roles: [
+        { id: "director", name: "Директор", room: "Планирование", workspaceStyle: "planning", job: "Уточняет сценарий первого уровня", tone: "#ba6743" },
+        { id: "maker", name: "Разработчик", room: "Разработка", workspaceStyle: "workshop", job: "Проверяет переход к очагу", tone: "#5f9b81" },
+        { id: "library", name: "Библиотекарь", room: "Библиотека", workspaceStyle: "archive", job: "Сверяет гайд по обучению игрока", tone: "#8c8cc4" }
+      ],
+      report: {
+        id: "H-24", title: "Сборка «Лесная тропа»", description: "Огонь у очага читается с поворота тропы.",
+        checks: ["Пройден путь от старта до очага.", "Проверены три ракурса камеры.", "Текст подсказки ждёт решения владельца."]
+      },
+      inbox: [
+        { id: "question", kind: "question", time: "14:42", from: "Директор · H-27", title: "Оставить подсказку у очага?",
+          body: "На первом прохождении игрок замечает огонь, но не сразу понимает, что у очага можно восстановиться.",
+          impact: "Правка обучения ждёт ответа. Проверка сборки продолжается.",
+          options: ["Оставить короткую подсказку при первом подходе", "Показать только иконку взаимодействия"] },
+        { id: "approval", kind: "approval", time: "14:28", from: "Разработчик · H-24", title: "Разрешить обновление снимков?",
+          body: "Для сравнения нового освещения разработчик просит заменить три эталонных снимка.",
+          impact: "Область записи — game/qa/snapshots/ в тестовой копии.",
+          command: "game/qa/snapshots/campfire-{01,02,03}.png" },
+        { id: "connection", kind: "connection", time: "14:15", from: "Библиотекарь · H-26", title: "Claude Code ждёт подключения",
+          body: "У библиотекаря выбран Claude Code. Демо-подключение выключено.",
+          impact: "Сверка гайда ожидает подключения. Задачи разработки продолжаются." }
+      ],
+      initial: { director: { runtime: "codex", model: "sol", effort: "medium" },
+        overrides: { maker: { mode: "fixed", runtime: "codex", model: "luna", effort: "low" },
+          library: { mode: "fixed", runtime: "claude", model: "sonnet", effort: "medium" } } }
+    },
+    book: {
+      name: "Бумажный берег", focus: "Редактура третьей главы",
+      roles: [
+        { id: "director", name: "Директор", room: "Планирование", workspaceStyle: "planning", job: "Согласует финал третьей главы", tone: "#ba6743" },
+        { id: "maker", name: "Редактор", room: "Редактура", workspaceStyle: "editorial", job: "Проверяет ритм диалога", tone: "#5f9b81" },
+        { id: "library", name: "Библиотекарь", room: "Библиотека", workspaceStyle: "archive", job: "Сверяет хронологию персонажей", tone: "#8c8cc4" }
+      ],
+      report: {
+        id: "B-12", title: "Глава 3 · Возвращение", description: "Первая редактура фрагмента у причала.",
+        excerpt: "У причала пахло мокрым деревом. Лида узнала лодку по синей полосе и только потом заметила, что в ней кто-то спит.",
+        checks: ["Сокращён диалог в начале сцены.", "Имена и даты сверены с хронологией.", "Финальная реплика вынесена на решение."]
+      },
+      inbox: [
+        { id: "question", kind: "question", time: "13:51", from: "Директор · B-13", title: "Как закончить сцену у причала?",
+          body: "В черновике есть два варианта финала. Редактор предлагает оставить читателю возможность самому догадаться.",
+          impact: "Концовка ждёт решения. Редактура остального текста продолжается.",
+          options: ["Оставить открытый финал", "Добавить реплику Лиды"] },
+        { id: "approval", kind: "approval", time: "13:12", from: "Редактор · B-12", title: "Разрешить запись правок в рукопись?",
+          body: "Редактор подготовил версию главы после сверки и просит сохранить её рядом с черновиком.",
+          impact: "Будет создана отдельная версия проекта.",
+          command: "manuscript/chapter-03.revision.md" },
+        { id: "connection", kind: "connection", time: "12:40", from: "Директор · B-13", title: "Claude Code ждёт подключения",
+          body: "Для директора выбран Claude Code. Демо-подключение выключено.",
+          impact: "Новые поручения директора ждут подключения. Редактор на Codex может продолжить." }
+      ],
+      initial: { director: { runtime: "claude", model: "opus", effort: "high" },
+        overrides: { maker: { mode: "fixed", runtime: "codex", model: "luna", effort: "low" },
+          library: { mode: "dynamic", runtime: "codex", model: "luna", effort: "low" } } }
+    }
+  };
+  const kindNames = { question: ["Вопрос", "warn", "message-circle"], approval: ["Разрешение", "attention", "shield-check"], connection: ["Подключение", "attention", "unplug"] };
+  const roomStyles = {
+    common: { label: "Общая", rug: ["#795c42", "#987859"] },
+    planning: { label: "Планирование", rug: ["#733b33", "#905448"] },
+    workshop: { label: "Разработка", rug: ["#38564e", "#567b6f"] },
+    archive: { label: "Библиотека", rug: ["#42475f", "#696d87"] },
+    editorial: { label: "Редактура", rug: ["#655139", "#84724d"] },
+    art: { label: "Ателье", rug: ["#5c4359", "#80637a"] }
+  };
+
+  function initialWorkshop(studioKey) {
+    const roles = datasets[studioKey].roles;
+    return {
+      rooms: roles.map(role => ({ id: "home-" + role.id, name: role.room, style: role.workspaceStyle })),
+      roomByRole: Object.fromEntries(roles.map(role => [role.id, "home-" + role.id])),
+      nextRoom: 1
+    };
+  }
+
+  function defaultState() {
+    const studios = {};
+    for (const [key, dataset] of Object.entries(datasets)) {
+      studios[key] = {
+        ...structuredClone(dataset.initial),
+        responses: {}, queued: [], workshop: initialWorkshop(key),
+        allowed: Object.fromEntries(Object.values(runtimes).flatMap(runtime => runtime.models.map(model => [model.id, [...model.levels]])))
+      };
+    }
+    return {
+      version: 1, studio: "game", view: "overview", studios,
+      connections: { codex: true, claude: false }
+    };
+  }
+  function readSaved(saved) {
+    if (saved?.version !== 1 || !datasets[saved.studio] || !viewNames[saved.view] || !saved.studios?.game || !saved.studios?.book) return defaultState();
+    const restored = structuredClone(saved);
+    for (const key of Object.keys(datasets)) {
+      restored.studios[key].workshop ??= initialWorkshop(key);
+    }
+    return restored;
+  }
+
+  let state = readSaved(window.openai?.widgetState?.privateContent);
+  let inboxScope = "open";
+  let itemId = "question";
+  let roleId = "director";
+  let editRooms = false;
+  let settingsTab = "connect";
+  let runtimeId = "codex";
+  let preferenceRuntime = "codex";
+  let feedback = "";
+  let feedbackType = "good";
+  let chatRole = "director";
+  let chatMode = "ask";
+  let chatDraft = "";
+  const messages = {};
+
+  const studio = () => datasets[state.studio];
+  const config = () => state.studios[state.studio];
+  const workshop = () => config().workshop;
+  const getRoom = (id) => workshop().rooms.find(room => room.id === id);
+  const roomFor = (roleId) => getRoom(workshop().roomByRole[roleId]);
+  const getRole = (id) => studio().roles.find(role => role.id === id) ?? studio().roles[0];
+  const getModel = (id) => Object.values(runtimes).flatMap(runtime => runtime.models).find(model => model.id === id);
+  const icon = (name) => '<i data-lucide="' + name + '" aria-hidden="true"></i>';
+  const safe = (value) => String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+  const option = (id, label, selected) => '<option value="' + id + '"' + (selected === id ? ' selected' : '') + '>' + safe(label) + '</option>';
+  const status = (label, tone = "") => '<span class="status ' + tone + '"><span class="status-dot"></span>' + safe(label) + '</span>';
+  const pressed = (on) => ' aria-pressed="' + Boolean(on) + '"';
+  const act = (text, attrs, style = "", glyph = "") => '<button type="button" class="action ' + style + '" ' + attrs + '>' + (glyph ? icon(glyph) : "") + safe(text) + '</button>';
+
+  function save() {
+    window.openai?.setWidgetState?.({ privateContent: state, modelContent: { studio: studio().name, view: viewNames[state.view] } })?.catch(() => {});
+  }
+  function updateIcons() {
+    window.lucide?.createIcons?.({ attrs: { width: 16, height: 16 } });
+  }
+  function announce(message) {
+    root.querySelector("#hearth-announcement").textContent = message;
+  }
+  function heading(title, description, marker = "") {
+    return '<div class="page-heading"><div><h1>' + title + '</h1><p class="muted">' + safe(description) + '</p></div>' + marker + '</div>';
+  }
+  function resultFor(entry) {
+    if (entry.kind === "connection" && state.connections.claude) return "Демо-подключение доступно";
+    return config().responses[entry.id] ?? "";
+  }
+  function openEntries() {
+    return studio().inbox.filter(entry => !resultFor(entry));
+  }
+  function activeChoice(role) {
+    const override = config().overrides[role.id];
+    if (!override || override.mode === "inherit") return config().director;
+    if (override.mode === "dynamic") {
+      for (const [runtime, provider] of Object.entries(runtimes)) {
+        if (!state.connections[runtime]) continue;
+        const model = provider.models.find(candidate => config().allowed[candidate.id].length);
+        if (model) return { runtime, model: model.id, effort: config().allowed[model.id][0], dynamic: true };
+      }
+      return { ...config().director, dynamic: true };
+    }
+    return override;
+  }
+  function roleStatus(role) {
+    const runtime = activeChoice(role).runtime;
+    if (!state.connections[runtime]) return ["Ждёт подключения", "warn"];
+    if (role.id === "director" && !config().responses.question) return ["Ждёт решения", "warn"];
+    return ["В работе", "good"];
+  }
+  function castSummary() {
+    const active = studio().roles.filter(role => roleStatus(role)[1] === "good").length;
+    const waiting = studio().roles.length - active;
+    return [active + " в работе", waiting ? waiting + " в ожидании" : ""].filter(Boolean).join(" · ");
+  }
+  function reportArt() {
+    const report = studio().report;
+    return report.excerpt
+      ? '<p class="excerpt">«' + safe(report.excerpt) + '»</p>'
+      : '<canvas class="artwork" width="420" height="130" data-art="forest" role="img" aria-label="Кадр тестовой сборки: тропа и огонь в сумеречном лесу"></canvas>';
+  }
+
+  function renderOverview() {
+    const question = studio().inbox[0];
+    const answer = resultFor(question);
+    const report = studio().report;
+    const upcoming = studio().roles.map(role => {
+      const [label, tone] = roleStatus(role);
+      return '<button type="button" class="work-row" data-to-role="' + role.id + '"><span class="status-dot ' + tone + '"></span><span><strong class="small">' + safe(role.job) + '</strong><span class="mini muted">' + safe(role.name + " · " + label) + '</span></span>' + icon("chevron-right") + '</button>';
+    }).join("");
+    const queued = (config().queued ?? []).slice(-3).reverse().map((task) =>
+      '<button type="button" class="work-row" data-to-role="' + task.role + '"><span class="status-dot warn"></span><span><strong class="small">' +
+      safe(task.text) + '</strong><span class="mini muted">' + safe(getRole(task.role).name + " · В очереди") + '</span></span>' + icon("chevron-right") + '</button>').join("");
+    return heading("Обзор студии", studio().focus, status("Демо-студия")) +
+      '<div class="split"><div class="stack">' +
+        '<section class="panel decision"><div class="decision-line"><span class="small strong">' + icon(answer ? "check-circle-2" : "message-circle") + (answer ? "Решение принято" : "Нужен ваш ответ") + '</span><span class="mini muted">' + question.time + '</span></div>' +
+        '<h2>' + safe(question.title) + '</h2><p class="small">' + safe(answer || question.impact) + '</p>' +
+        '<div class="actions">' + act(answer ? "Посмотреть решение" : "Ответить", 'data-to-item="question"', answer ? "secondary" : "", answer ? "" : "arrow-right") + '</div></section>' +
+        '<section><h2 class="section-label">Последний результат</h2><div class="panel report-frame">' + reportArt() +
+          '<div class="report-body"><div class="report-meta"><h3>' + safe(report.title) + '</h3>' + status("На проверку", "good") + '</div>' +
+          '<p class="small muted">' + safe(report.description) + '</p><div class="actions">' + act("Открыть отчёт", 'data-report', "text-action", "file-text") +
+          '<span class="mini muted">' + report.id + ' · сегодня</span></div></div></div></section>' +
+      '</div><aside class="stack"><section class="panel workshop-link"><div class="row-heading"><h2>Мастерская</h2>' + icon("armchair") + '</div>' +
+      '<p class="small muted">' + safe(castSummary()) + '</p>' + act("Открыть карту", 'data-view="workshop"', "secondary compact", "arrow-right") + '</section>' +
+      '<section><h2 class="section-label">Сейчас в работе</h2><div class="work-list">' + upcoming + '</div></section>' +
+      (queued ? '<section><h2 class="section-label">В очереди</h2><div class="work-list">' + queued + '</div></section>' : "") + '</aside></div>';
+  }
+
+  function renderInbox() {
+    const active = openEntries();
+    const resolved = studio().inbox.filter(entry => resultFor(entry));
+    const entries = inboxScope === "open" ? active : resolved;
+    const item = entries.find(entry => entry.id === itemId) ?? entries[0];
+    itemId = item?.id ?? null;
+    const scopes = '<div class="segment" aria-label="Состояние входящих">' +
+      '<button type="button" data-scope="open"' + pressed(inboxScope === "open") + '>Открытые · ' + active.length + '</button>' +
+      '<button type="button" data-scope="done"' + pressed(inboxScope === "done") + '>Решённые · ' + resolved.length + '</button></div>';
+    const list = entries.map(entry => {
+      const [kind, tone] = kindNames[entry.kind];
+      return '<button type="button" class="inbox-entry" data-item="' + entry.id + '"' + pressed(itemId === entry.id) + '><span class="row-heading">' +
+        status(kind, tone) + '<span class="mini muted">' + entry.time + '</span></span><strong>' + safe(entry.title) + '</strong><span class="mini muted">' + safe(entry.from) + '</span></button>';
+    }).join("");
+    return heading("Входящие", studio().name) + scopes + (item
+      ? '<div class="inbox-layout"><div class="inbox-list" aria-label="Сообщения">' + list + '</div>' + inboxDetail(item) + '</div>'
+      : '<section class="panel empty"><h2>' + (inboxScope === "open" ? "Всё разобрано" : "Решённых сообщений пока нет") + '</h2></section>');
+  }
+  function inboxDetail(item) {
+    const [kind, tone] = kindNames[item.kind];
+    const result = resultFor(item);
+    let controls = "";
+    if (result) controls = '<p class="notice good">' + safe(result) + '</p>';
+    else if (item.kind === "question") {
+      controls = '<fieldset class="choices"><legend class="small strong">Решение</legend>' + item.options.map((choice, index) =>
+        '<label class="choice"><input type="radio" name="hearth-answer" value="' + index + '"' + (index === 0 ? ' checked' : '') + '><span>' + safe(choice) +
+        (index === 0 ? '<span class="mini muted"><br>Рекомендация директора</span>' : '') + '</span></label>').join("") + '</fieldset>' +
+        '<div class="actions">' + act("Отправить решение", 'data-resolve="question"', "", "send") + '</div>';
+    } else if (item.kind === "approval") {
+      controls = '<p class="notice mono">' + safe(item.command) + '</p><div class="actions">' +
+        act("Разрешить один раз", 'data-resolve="approve"', "", "check") + act("Отклонить", 'data-resolve="decline"', "secondary") + '</div>';
+    } else {
+      controls = '<div class="actions">' + act("Открыть подключения", 'data-to-provider="claude"', "", "arrow-right") + '</div>';
+    }
+    return '<article class="panel inspector"><header><div class="row-heading">' + status(kind, tone) + '<span class="mini muted">' + safe(item.from) + '</span></div><h2>' + safe(item.title) +
+      '</h2></header><p>' + safe(item.body) + '</p><div class="detail-line"><span class="small strong">Что зависит от ответа</span><p class="small muted">' + safe(item.impact) + '</p></div>' + controls + '</article>';
+  }
+
+  function renderRoom(room, chosen) {
+    const residents = studio().roles.filter(role => workshop().roomByRole[role.id] === room.id);
+    const pins = residents.map(role =>
+      '<button class="map-pin" type="button" data-role="' + role.id + '"' + pressed(chosen.id === role.id) + ' aria-label="На карте: ' + safe(role.name) +
+      '"><canvas width="23" height="23" data-seat="' + role.id + '" aria-hidden="true"></canvas><span>' + safe(role.name) + '</span></button>').join("");
+    return '<section class="work-room" data-room="' + room.id + '" aria-label="' + safe(room.name) + '"><div class="room-header"><h2 class="room-name">' + safe(room.name) +
+      '</h2><span class="room-count" aria-label="Агенты в комнате — ' + residents.length + '">' + residents.length + '</span>' +
+      (editRooms ? '<button type="button" class="room-edit" data-edit-room="' + room.id + '" aria-label="Настроить комнату «' + safe(room.name) + '»">⋯</button>' : "") +
+      '</div><div class="room-floor"><canvas class="room-art" width="138" height="96" data-room-art="' + room.style +
+      '" aria-hidden="true"></canvas><div class="room-occupants">' + (pins || '<span class="room-empty">Свободна</span>') + '</div></div></section>';
+  }
+
+  function renderWorkshop() {
+    const roles = studio().roles;
+    const chosen = getRole(roleId);
+    const choice = activeChoice(chosen);
+    const selectedRoom = roomFor(chosen.id);
+    const [stateLabel, tone] = roleStatus(chosen);
+    const rooms = workshop().rooms;
+    const cards = rooms.map(room => renderRoom(room, chosen)).join("");
+    const assignment = editRooms ? '<div class="detail-line">' + field("Комната", "room-assignment",
+      option("unassigned", "Без комнаты", selectedRoom?.id ?? "unassigned") + rooms.map(room => option(room.id, room.name, selectedRoom?.id)).join("")) + '</div>' : "";
+    const team = roles.map(role => {
+      const label = roomFor(role.id)?.name ?? "Без комнаты";
+      return '<button class="role-row" type="button" data-role="' + role.id + '"' + pressed(chosen.id === role.id) + '><canvas width="13" height="16" data-avatar="' +
+        role.id + '" aria-hidden="true"></canvas><span><strong>' + safe(role.name) + '</strong><span class="mini muted">' + safe(label + " · " + roleStatus(role)[0]) +
+        '</span></span></button>';
+    }).join("");
+    return '<div class="workshop-heading">' + heading("Мастерская", castSummary()) + '<div class="actions">' +
+      (editRooms ? act("Добавить комнату", 'data-add-room', "", "plus") : "") +
+      act(editRooms ? "Готово" : "Планировка", 'data-layout' + pressed(editRooms), "secondary compact", editRooms ? "check" : "panels-top-left") + '</div></div>' +
+      (cards ? '<div class="work-map" role="group" aria-label="Карта мастерской">' + cards + '</div>' :
+        '<section class="panel empty"><h2>В мастерской пока нет комнат</h2><p class="small muted">Добавьте комнату в режиме планировки.</p></section>') +
+      '<div class="split workshop-detail"><article class="panel inspector"><header><div class="row-heading"><h2>' + safe(chosen.name) + '</h2>' + status(stateLabel, tone) +
+      '</div><p class="small muted">' + safe(selectedRoom?.name ?? "Без комнаты") + '</p></header>' + assignment + '<div class="detail-line"><strong>' + safe(chosen.job) + '</strong><p class="small muted">' +
+      safe(runtimes[choice.runtime].name + " · " + getModel(choice.model).name + " · " + effortNames[choice.effort]) + '</p></div><div class="actions">' +
+      act("Открыть задачу", 'data-task="' + chosen.id + '"', "", "clipboard-list") +
+      act("Написать", 'data-chat="' + chosen.id + '"', "secondary", "square-pen") +
+      (stateLabel === "Ждёт решения" ? act("К вопросу", 'data-to-item="question"', "secondary") : "") +
+      (stateLabel === "Ждёт подключения" ? act("К подключению", 'data-to-provider="' + choice.runtime + '"', "secondary") : "") +
+      '</div></article><section><h2 class="section-label">Роли</h2><div class="role-list">' + team + '</div></section></div>';
+  }
+
+  const settingLabels = { connect: "Подключения", models: "Модели студии", roles: "Агенты" };
+  function renderSettings() {
+    const tabs = Object.entries(settingLabels).map(([id, label]) =>
+      '<button type="button" data-setting-tab="' + id + '"' + pressed(settingsTab === id) + '>' + label + '</button>').join("");
+    const section = settingsTab === "connect" ? renderConnections() : settingsTab === "models" ? renderModels() : renderOverrides();
+    return heading("Настройки", settingsTab === "connect" ? "Подключения приложения" : studio().name) +
+      '<div class="segment" aria-label="Разделы настроек">' + tabs + '</div>' + section;
+  }
+  function feedbackNotice() {
+    return feedback ? '<p class="notice small ' + feedbackType + '" role="status">' + safe(feedback) + '</p>' : "";
+  }
+  function renderConnections() {
+    const provider = runtimes[runtimeId];
+    const connected = state.connections[runtimeId];
+    const list = Object.entries(runtimes).map(([id, runtime]) =>
+      '<button type="button" class="provider-row" data-provider="' + id + '"' + pressed(runtimeId === id) +
+      '><span class="provider-icon ' + id + '">' + icon(runtime.icon) + '</span><span><strong>' + runtime.name +
+      '</strong><span class="small muted">' + (state.connections[id] ? "Подключён · демо" : "Отключён · демо") + '</span></span></button>').join("");
+    return '<div class="inbox-layout"><div class="provider-list" aria-label="Провайдеры">' + list + '</div><section class="panel inspector"><header><div class="row-heading"><h2>' + provider.name + '</h2>' +
+      status(connected ? "Подключён · демо" : "Отключён · демо", connected ? "good" : "warn") + '</div><p class="small muted">' + provider.transport + '</p></header>' +
+      '<div class="detail-line"><strong class="small">Вход</strong><p>' + provider.auth + '</p><p class="small muted">В прототипе используются тестовые ответы.</p></div>' +
+      '<div class="actions">' + act("Проверить подключение", 'data-probe', "", "activity") +
+      act(connected ? "Выключить демо" : "Включить демо", 'data-toggle-connection', "secondary") + '</div>' + feedbackNotice() + '</section></div>';
+  }
+  function field(label, control, options) {
+    return '<label class="field"><span>' + label + '</span><select data-field="' + control + '">' + options + '</select></label>';
+  }
+  function selectionFields(choice, stem) {
+    const eligible = runtimes[choice.runtime].models.filter(model => config().allowed[model.id].length);
+    return field("Подключение", stem + "-runtime", Object.entries(runtimes).map(([id, runtime]) => option(id, runtime.name, choice.runtime)).join("")) +
+      field("Модель", stem + "-model", eligible.map(model => option(model.id, model.name, choice.model)).join("")) +
+      field("Reasoning", stem + "-effort", config().allowed[choice.model].map(level => option(level, effortNames[level], choice.effort)).join(""));
+  }
+  function renderModels() {
+    const choice = config().director;
+    const segments = Object.entries(runtimes).map(([id, runtime]) =>
+      '<button type="button" data-allow-runtime="' + id + '"' + pressed(preferenceRuntime === id) + '>' + runtime.name + '</button>').join("");
+    const models = runtimes[preferenceRuntime].models.map(model => {
+      const levels = config().allowed[model.id];
+      const check = '<label class="check"><input type="checkbox" data-model-switch="' + model.id + '"' + (levels.length ? ' checked' : '') + '>' + model.name + '</label>';
+      const levelFields = model.levels.map(level => '<label class="check"><input type="checkbox" data-level="' + level +
+        '" data-model="' + model.id + '"' + (levels.includes(level) ? ' checked' : '') + (levels.length ? '' : ' disabled') + '>' + effortNames[level] + '</label>').join("");
+      return '<div class="model-row">' + check + '<div class="checks" aria-label="Reasoning для ' + model.name + '">' + levelFields + '</div></div>';
+    }).join("");
+    return '<div class="stack"><section class="panel inspector"><header><div class="row-heading"><h2>Директор</h2>' +
+      status(state.connections[choice.runtime] ? "Подключение доступно" : "Ждёт подключения", state.connections[choice.runtime] ? "good" : "warn") +
+      '</div></header><div class="form-grid">' + selectionFields(choice, "director") + '</div></section>' +
+      '<section class="panel inspector"><header><h2>Доступные модели</h2><p class="small muted">Директор выбирает модель и reasoning из этого списка.</p></header>' +
+      '<div><div class="segment" aria-label="Подключение для списка моделей">' + segments + '</div>' + models + '</div></section>' + feedbackNotice() + '</div>';
+  }
+  function renderOverrides() {
+    const roles = studio().roles.filter(role => role.id !== "director");
+    if (!roles.some(role => role.id === roleId)) roleId = roles[0].id;
+    const chosen = getRole(roleId);
+    const override = config().overrides[chosen.id];
+    const active = activeChoice(chosen);
+    const list = roles.map(role => '<button type="button" class="role-row" data-role="' + role.id + '"' + pressed(role.id === chosen.id) +
+      '><canvas width="13" height="16" data-avatar="' + role.id + '" aria-hidden="true"></canvas><span><strong>' + safe(role.name) +
+      '</strong><span class="mini muted">' + safe(roleStatus(role)[0]) + '</span></span></button>').join("");
+    return '<div class="inbox-layout"><div class="role-list">' + list + '</div><section class="panel inspector"><header><h2>' + safe(chosen.name) + '</h2></header>' +
+      field("Правило выбора", "role-mode", option("inherit", "Унаследовать настройки директора", override.mode) +
+        option("fixed", "Фиксированная модель", override.mode) + option("dynamic", "Директор выбирает для задачи", override.mode)) +
+      (override.mode === "fixed" ? '<div class="form-grid">' + selectionFields(override, "role") + '</div>' : "") +
+      '<div class="detail-line"><strong class="small">' + (active.dynamic ? "Пример следующего запуска" : "Действующая настройка") + '</strong><p class="small muted">' +
+      safe(runtimes[active.runtime].name + " · " + getModel(active.model).name + " · " + effortNames[active.effort]) + '</p></div>' + feedbackNotice() + '</section></div>';
+  }
+
+  function render({ focus = "", scrollDetail = false } = {}) {
+    studioSelect.value = state.studio;
+    root.querySelector("#hearth-studio-crumb").textContent = studio().name;
+    root.querySelector("#hearth-view-crumb").textContent = viewNames[state.view];
+    root.querySelector("#hearth-inbox-count").textContent = openEntries().length || "";
+    for (const button of root.querySelectorAll(".main-nav [data-view]")) {
+      if (button.dataset.view === state.view) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    }
+    const views = { overview: renderOverview, inbox: renderInbox, workshop: renderWorkshop, settings: renderSettings };
+    content.innerHTML = views[state.view]();
+    paintContent(content);
+    updateIcons();
+    if (focus) {
+      const target = content.querySelector(focus);
+      target?.focus({ preventScroll: true });
+      if (scrollDetail && root.clientWidth <= 670) target?.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function route(view) {
+    state.view = view;
+    feedback = "";
+    render();
+    save();
+    announce(viewNames[view]);
+  }
+  function goToItem(id) {
+    itemId = id;
+    const entry = studio().inbox.find(row => row.id === id);
+    inboxScope = resultFor(entry) ? "done" : "open";
+    route("inbox");
+    content.querySelector('.inbox-entry[aria-pressed="true"]')?.focus();
+  }
+  function goToProvider(id) {
+    runtimeId = id;
+    settingsTab = "connect";
+    route("settings");
+    content.querySelector('.provider-row[aria-pressed="true"]')?.focus();
+  }
+  function resolve(kind) {
+    const entry = studio().inbox.find(row => row.id === itemId);
+    if (!entry || resultFor(entry)) return;
+    let response;
+    if (kind === "question") {
+      const answer = content.querySelector('input[name="hearth-answer"]:checked');
+      response = entry.options[Number(answer?.value)];
+    } else response = kind === "approve" ? "Разрешено один раз · демо" : "Разрешение отклонено · демо";
+    if (!response) return;
+    config().responses[entry.id] = response;
+    inboxScope = "done";
+    render({ focus: '.inbox-entry[aria-pressed="true"]' });
+    save();
+    announce(kind === "question" ? "Решение сохранено. Задача возвращена в работу." : response);
+  }
+  function setFeedback(message, type = "good") {
+    feedback = message;
+    feedbackType = type;
+  }
+  function applyChoice(value, fieldName, target) {
+    if (fieldName === "runtime") {
+      const first = runtimes[value].models.find(model => config().allowed[model.id].length);
+      if (!first) {
+        setFeedback("Разрешите хотя бы одну модель этого подключения.", "warn");
+        return false;
+      }
+      const levels = config().allowed[first.id];
+      Object.assign(target, { runtime: value, model: first.id, effort: levels.includes("medium") ? "medium" : levels[0] });
+    } else if (fieldName === "model") {
+      target.model = value;
+      if (!config().allowed[value].includes(target.effort)) target.effort = config().allowed[value][0];
+    } else target.effort = value;
+    setFeedback("Настройка сохранена для следующих запусков.");
+    return true;
+  }
+  function applyAllowed(modelId, levels) {
+    const assigned = [config().director, ...Object.values(config().overrides).filter(override => override.mode === "fixed")];
+    if (assigned.some(choice => choice.model === modelId && !levels.includes(choice.effort))) {
+      setFeedback("Этот вариант выбран для директора или агента. Сначала измените его настройку.", "warn");
+      return false;
+    }
+    config().allowed[modelId] = getModel(modelId).levels.filter(level => levels.includes(level));
+    setFeedback("Список моделей обновлён.");
+    return true;
+  }
+  function openDialog(title, body) {
+    dialog.innerHTML = '<header class="dialog-head"><h2 id="hearth-dialog-title">' + safe(title) + '</h2>' +
+      act("Закрыть", 'data-close-dialog', "secondary compact", "x") + '</header><div class="dialog-body">' + body + '</div>';
+    if (!dialog.open) dialog.showModal();
+    paintContent(dialog);
+    updateIcons();
+  }
+  function openReport() {
+    const report = studio().report;
+    openDialog(report.title, '<div class="row-heading">' + status("На проверку", "good") + '<span class="small muted">' + report.id + '</span></div>' + reportArt() +
+      '<p>' + safe(report.description) + '</p><h3>Что проверили</h3><ul>' + report.checks.map(check => '<li>' + safe(check) + '</li>').join("") +
+      '</ul><div class="actions">' + act("К решению по задаче", 'data-report-to-question', "secondary", "arrow-right") + '</div>');
+  }
+  function openTask(id) {
+    const role = getRole(id);
+    const choice = activeChoice(role);
+    const [label, tone] = roleStatus(role);
+    const queued = (config().queued ?? []).filter(task => task.role === id);
+    openDialog(role.job, '<div class="row-heading">' + status(label, tone) + '<span class="small muted">' + safe(role.name) + '</span></div>' +
+      '<div class="detail-line"><h3>Исполнитель</h3><p class="small muted">' + safe(runtimes[choice.runtime].name + " · " + getModel(choice.model).name) + '</p></div>' +
+      (queued.length ? '<h3>Поручения в очереди</h3><ul>' + queued.map(task => '<li>' + safe(task.text) + '</li>').join("") + '</ul>' : "") +
+      '<div class="actions">' + (id === "maker" ? act("Открыть отчёт", 'data-report', "secondary", "file-text") : "") +
+      (id === "director" ? act("К решению", 'data-report-to-question', "secondary", "arrow-right") : "") +
+      act("Написать", 'data-chat="' + id + '"', "secondary", "square-pen") + '</div>');
+  }
+  function openRoomDialog(id) {
+    const room = getRoom(id);
+    const name = room?.name ?? "Комната " + workshop().nextRoom;
+    const styles = Object.entries(roomStyles).map(([key, style]) => option(key, style.label, room?.style ?? "common")).join("");
+    const occupants = room ? studio().roles.filter(role => workshop().roomByRole[role.id] === id) : [];
+    openDialog(room ? "Настройки комнаты" : "Новая комната", '<label class="field"><span>Название</span><input id="hearth-room-name" required maxlength="42" value="' + safe(name) +
+      '"></label><label class="field"><span>Обстановка</span><select id="hearth-room-style">' + styles + '</select></label>' +
+      '<p class="small room-warning" id="hearth-room-error" role="alert" hidden></p>' +
+      (occupants.length ? '<p class="small muted">После удаления этой комнаты её агенты перейдут в «Без комнаты».</p>' : "") +
+      '<div class="actions">' + act(room ? "Сохранить" : "Добавить", 'data-save-room="' + (room?.id ?? "new") + '"', "", room ? "check" : "plus") +
+      (room ? act("Удалить комнату", 'data-remove-room="' + room.id + '"', "danger-action") : "") + '</div>');
+    dialog.querySelector("#hearth-room-name").select();
+  }
+  function saveRoom(id) {
+    const name = dialog.querySelector("#hearth-room-name").value.trim();
+    const style = dialog.querySelector("#hearth-room-style").value;
+    const error = dialog.querySelector("#hearth-room-error");
+    if (!name || workshop().rooms.some(room => room.id !== id && room.name.toLowerCase() === name.toLowerCase())) {
+      error.textContent = name ? "В этой студии уже есть комната с таким названием." : "Введите название комнаты.";
+      error.hidden = false;
+      dialog.querySelector("#hearth-room-name").focus();
+      return;
+    }
+    const room = getRoom(id);
+    const edited = room ?? { id: "room-" + workshop().nextRoom++, name, style };
+    if (room) Object.assign(room, { name, style });
+    else workshop().rooms.push(edited);
+    dialog.close();
+    render({ focus: '[data-edit-room="' + edited.id + '"]' });
+    save();
+    announce(room ? "Настройки комнаты сохранены." : "Комната добавлена.");
+  }
+  function removeRoom(id) {
+    workshop().rooms = workshop().rooms.filter(room => room.id !== id);
+    for (const role of studio().roles) {
+      if (workshop().roomByRole[role.id] === id) workshop().roomByRole[role.id] = "unassigned";
+    }
+    dialog.close();
+    render({ focus: "[data-add-room]" });
+    save();
+    announce("Комната удалена. Её агенты остались в студии.");
+  }
+  function chatKey() { return state.studio + "/" + chatRole; }
+  function renderChat() {
+    const role = getRole(chatRole);
+    const thread = messages[chatKey()] ?? [];
+    const lines = thread.map(message => '<div class="chat-line ' + (message.owner ? 'owner' : '') + '"><p class="mini muted">' +
+      (message.owner ? "Вы" : safe(role.name) + " · демо") + '</p><p>' + safe(message.text) + '</p></div>').join("");
+    openDialog("Разговор", '<div class="flow-spaced">' +
+      field("Кому", "chat-role", studio().roles.map(entry => option(entry.id, entry.name, chatRole)).join("")) +
+      '<div class="segment" aria-label="Режим сообщения"><button type="button" data-chat-mode="ask"' + pressed(chatMode === "ask") +
+      '>Спросить сейчас</button><button type="button" data-chat-mode="queue"' + pressed(chatMode === "queue") + '>Поставить в очередь</button></div>' +
+      (lines ? '<div class="flow-spaced" aria-label="Сообщения">' + lines + '</div>' : '<p class="small muted">' + safe(role.job) + '</p>') +
+      '<label class="field"><span>Сообщение</span><textarea name="message" required maxlength="500">' + safe(chatDraft) + '</textarea></label>' +
+      '<div class="actions">' + act(chatMode === "queue" ? "Добавить поручение" : "Отправить", 'data-send-chat', "", "send") + '</div></div>');
+  }
+
+  root.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button || !root.contains(button)) return;
+    const data = button.dataset;
+    if (data.view) route(data.view);
+    else if (data.toItem) goToItem(data.toItem);
+    else if (data.toRole) { roleId = data.toRole; route("workshop"); }
+    else if (data.toProvider) goToProvider(data.toProvider);
+    else if ("layout" in data) {
+      editRooms = !editRooms;
+      render({ focus: "[data-layout]" });
+    } else if ("addRoom" in data) openRoomDialog();
+    else if (data.editRoom) openRoomDialog(data.editRoom);
+    else if (data.saveRoom) saveRoom(data.saveRoom);
+    else if (data.removeRoom) removeRoom(data.removeRoom);
+    else if (data.scope) {
+      inboxScope = data.scope;
+      render({ focus: '[data-scope="' + data.scope + '"]' });
+    } else if (data.item) {
+      itemId = data.item;
+      render({ focus: root.clientWidth <= 670 ? ".inspector button" : '[data-item="' + data.item + '"]', scrollDetail: true });
+    } else if (data.resolve) resolve(data.resolve);
+    else if (data.role) {
+      roleId = data.role;
+      feedback = "";
+      render({ focus: (button.classList.contains("map-pin") ? ".map-pin" : ".role-row") + '[data-role="' + data.role + '"]' });
+    } else if (data.settingTab) {
+      settingsTab = data.settingTab;
+      feedback = "";
+      render({ focus: '[data-setting-tab="' + settingsTab + '"]' });
+    } else if (data.provider) {
+      runtimeId = data.provider;
+      feedback = "";
+      render({ focus: '[data-provider="' + runtimeId + '"]' });
+    } else if (data.allowRuntime) {
+      preferenceRuntime = data.allowRuntime;
+      feedback = "";
+      render({ focus: '[data-allow-runtime="' + preferenceRuntime + '"]' });
+    } else if ("probe" in data) {
+      setFeedback(state.connections[runtimeId] ? "Проверка пройдена · тестовый ответ получен." : "Включите демо-подключение и повторите проверку.", state.connections[runtimeId] ? "good" : "warn");
+      render({ focus: "[data-probe]" });
+    } else if ("toggleConnection" in data) {
+      state.connections[runtimeId] = !state.connections[runtimeId];
+      setFeedback(state.connections[runtimeId] ? "Демо-подключение включено." : "Демо-подключение выключено.", state.connections[runtimeId] ? "good" : "warn");
+      render({ focus: "[data-toggle-connection]" });
+      save();
+    } else if ("report" in data) openReport();
+    else if (data.task) openTask(data.task);
+    else if ("reportToQuestion" in data) {
+      dialog.close();
+      goToItem("question");
+    } else if (data.chat) { chatRole = data.chat; chatDraft = ""; chatMode = "ask"; renderChat(); }
+    else if (data.chatMode) {
+      chatDraft = dialog.querySelector("textarea").value;
+      chatMode = data.chatMode;
+      renderChat();
+      dialog.querySelector('[data-chat-mode="' + chatMode + '"]').focus();
+    } else if ("sendChat" in data) sendChat();
+    else if ("closeDialog" in data) dialog.close();
+  });
+  root.addEventListener("change", (event) => {
+    const element = event.target;
+    if (element === studioSelect) {
+      state.studio = studioSelect.value;
+      itemId = "question";
+      roleId = "director";
+      editRooms = false;
+      inboxScope = "open";
+      route("overview");
+      return;
+    }
+    const data = element.dataset;
+    let focus = "";
+    let changed = false;
+    if (data.field === "room-assignment") {
+      workshop().roomByRole[roleId] = element.value;
+      const label = getRoom(element.value)?.name ?? "Без комнаты";
+      render({ focus: '[data-field="room-assignment"]' });
+      save();
+      announce("Комната для роли «" + getRole(roleId).name + "»: " + label);
+      return;
+    }
+    if (data.field === "chat-role") {
+      chatDraft = dialog.querySelector("textarea").value;
+      chatRole = element.value;
+      renderChat();
+      dialog.querySelector('[data-field="chat-role"]').focus();
+      return;
+    }
+    if (data.field === "role-mode") {
+      const override = config().overrides[roleId];
+      if (element.value === "fixed" && !config().allowed[override.model].includes(override.effort)) Object.assign(override, config().director);
+      override.mode = element.value;
+      setFeedback("Правило выбора сохранено.");
+      changed = true;
+      focus = '[data-field="role-mode"]';
+    } else if (data.field) {
+      const [scope, fieldName] = data.field.split("-");
+      changed = applyChoice(element.value, fieldName, scope === "director" ? config().director : config().overrides[roleId]);
+      focus = '[data-field="' + data.field + '"]';
+    } else if (data.modelSwitch) {
+      const model = getModel(data.modelSwitch);
+      changed = applyAllowed(model.id, element.checked ? [...model.levels] : []);
+      focus = '[data-model-switch="' + model.id + '"]';
+    } else if (data.level) {
+      const model = getModel(data.model);
+      const levels = config().allowed[model.id].filter(level => level !== data.level);
+      if (element.checked) levels.push(data.level);
+      changed = applyAllowed(model.id, levels);
+      focus = levels.length ? '[data-model="' + model.id + '"][data-level="' + data.level + '"]' : '[data-model-switch="' + model.id + '"]';
+    }
+    if (!focus) return;
+    render({ focus });
+    if (changed) save();
+  });
+  function sendChat() {
+    const field = dialog.querySelector("textarea");
+    const message = field.value.trim();
+    if (!message) {
+      field.value = "";
+      field.reportValidity();
+      field.focus();
+      return;
+    }
+    const role = getRole(chatRole);
+    const thread = messages[chatKey()] ?? [];
+    thread.push({ owner: true, text: message });
+    const connected = state.connections[activeChoice(role).runtime];
+    const reply = chatMode === "queue"
+      ? (connected ? "Поручение добавлено в тестовую очередь." : "Поручение добавлено. Продолжение ждёт демо-подключения.")
+      : (connected ? "Сейчас моя задача — " + role.job.charAt(0).toLowerCase() + role.job.slice(1) + ". Это тестовый ответ." : "Демо-подключение выключено. Можно поставить поручение в очередь.");
+    thread.push({ owner: false, text: reply });
+    if (chatMode === "queue") {
+      config().queued = [...(config().queued ?? []), { role: chatRole, text: message }].slice(-8);
+      render();
+      save();
+    }
+    messages[chatKey()] = thread.slice(-6);
+    chatDraft = "";
+    renderChat();
+    dialog.querySelector("textarea").focus();
+    announce(reply);
+  }
+
+  /* Pixel-art assets are painted procedurally so the demo does not need a network. */
+  function paintContent(area) {
+    for (const canvas of area.querySelectorAll("canvas[data-art], canvas[data-avatar], canvas[data-seat], canvas[data-room-art]")) {
+      const context = canvas.getContext("2d");
+      if (!context) continue;
+      if (canvas.dataset.art === "forest") paintForest(context);
+      else if (canvas.dataset.roomArt) paintRoom(context, canvas.dataset.roomArt);
+      else if (canvas.dataset.seat) paintSeat(context, getRole(canvas.dataset.seat));
+      else paintAvatar(context, getRole(canvas.dataset.avatar).tone, canvas.dataset.avatar);
+    }
+  }
+  function drawRect(context, color, x, y, width, height) {
+    context.fillStyle = color;
+    context.fillRect(x, y, width, height);
+  }
+  function paintAvatar(context, coat, role) {
+    const pixel = (color, x, y, w, h) => drawRect(context, color, x, y, w, h);
+    pixel("#211a16", 2, 14, 9, 2);
+    pixel("#36291f", 3, 10, 7, 4);
+    pixel(coat, 2, 7, 9, 5);
+    pixel("#eca975", 3, 2, 7, 6);
+    pixel("#ffd09e", 5, 3, 5, 4);
+    pixel("#31211b", 4, 4, 1, 1);
+    pixel("#31211b", 8, 4, 1, 1);
+    pixel(role === "director" ? "#695147" : "#4d392e", 2, 1, 9, 2);
+    pixel(role === "library" ? "#bab7db" : "#ab7757", 4, 0, 5, 1);
+    pixel("#fdd6a9", 2, 9, 1, 2);
+    pixel("#fdd6a9", 10, 9, 1, 2);
+    pixel("#cf9970", 5, 8, 3, 1);
+  }
+  function paintSeat(context, role) {
+    const pixel = (color, x, y, w, h) => drawRect(context, color, x, y, w, h);
+    pixel("#2c211c", 2, 18, 20, 3);
+    pixel("#55392a", 2, 9, 10, 11);
+    pixel("#ae7a50", 1, 9, 12, 6);
+    if (role.workspaceStyle === "planning" || role.workspaceStyle === "editorial") {
+      pixel("#eee1b6", 3, 10, 7, 4);
+      pixel("#b48654", 5, 11, 2, 2);
+    } else if (role.workspaceStyle === "workshop") {
+      pixel("#332e32", 3, 6, 8, 7);
+      pixel("#88bec3", 4, 7, 6, 4);
+      pixel("#d6af80", 4, 13, 6, 1);
+    } else {
+      pixel("#bb754c", 2, 11, 9, 3);
+      pixel("#cfa26d", 3, 10, 7, 1);
+      pixel("#77947c", 4, 8, 7, 2);
+    }
+    context.save();
+    context.translate(10, 5);
+    paintAvatar(context, role.tone, role.id);
+    context.restore();
+  }
+  function randomSeries() {
+    let seed = 7723;
+    return () => {
+      seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+  }
+  function paintForest(context) {
+    const pixel = (color, x, y, w, h) => drawRect(context, color, x, y, w, h);
+    const random = randomSeries();
+    pixel("#354139", 0, 0, 420, 130);
+    pixel("#4a5340", 0, 30, 420, 33);
+    pixel("#596149", 0, 57, 420, 17);
+    const trees = (color, trunk, scale, base, gap) => {
+      for (let x = -8; x < 425; x += gap + Math.round(random() * gap)) {
+        const height = Math.round((16 + random() * 31) * scale);
+        pixel(trunk, x - 1, base - height + 5, 3, height + 3);
+        for (let y = 0; y < height - 3; y += 3) {
+          const halfWidth = Math.round((y / 2.7 + 1) * scale);
+          pixel(color, x - halfWidth, base - height + y, halfWidth * 2, 3);
+        }
+      }
+    };
+    trees("#4d5b46", "#556149", .76, 63, 8);
+    trees("#303e34", "#374137", .9, 76, 10);
+    pixel("#344032", 0, 76, 420, 54);
+    for (let y = 74; y < 130; y += 2) {
+      const center = Math.round(247 - (y - 74) * 1.2);
+      const width = Math.round(13 + (y - 74) * .98);
+      pixel(y < 95 ? "#655c41" : "#72654a", center - width, y, width * 2, 2);
+    }
+    for (let index = 0; index < 630; index++) {
+      const x = Math.floor(random() * 420);
+      const y = 77 + Math.floor(random() * 53);
+      pixel(["#53604a", "#262f29", "#66624a", "#454b39"][index % 4], x, y, 1 + index % 4, 1);
+    }
+    trees("#202d27", "#292d25", 1.1, 94, 19);
+    for (const x of [14, 46, 382, 412]) {
+      pixel("#202721", x, 0, 7, 119);
+      for (let y = 0; y < 43; y += 4) pixel("#202721", x - 22, y, 45 - y, 3);
+    }
+    pixel("#6b5332", 253, 99, 49, 3);
+    pixel("#8a6137", 260, 95, 33, 5);
+    pixel("#b67941", 267, 97, 22, 4);
+    pixel("#2e2a20", 268, 99, 20, 4);
+    pixel("#6b3c24", 273, 96, 12, 4);
+    pixel("#be5e30", 275, 89, 9, 8);
+    pixel("#ea9142", 277, 85, 5, 10);
+    pixel("#ffcb70", 278, 87, 3, 8);
+    pixel("#fff2a2", 278, 92, 3, 4);
+    pixel("#dc7b42", 283, 80, 1, 2);
+    pixel("#d48b52", 275, 79, 1, 1);
+    paintFigure(context, 232, 107);
+  }
+  function paintFigure(context, x, y) {
+    drawRect(context, "#2c2821", x - 3, y + 4, 9, 2);
+    drawRect(context, "#3b4f43", x - 1, y - 5, 7, 10);
+    drawRect(context, "#2e392e", x, y - 9, 5, 5);
+    drawRect(context, "#d2ad79", x + 3, y - 6, 2, 2);
+    drawRect(context, "#b46b44", x, y - 5, 3, 5);
+  }
+  function paintRoom(context, style) {
+    const pixel = (color, x, y, w, h) => drawRect(context, color, x, y, w, h);
+    const rug = roomStyles[style].rug;
+    pixel("#3a2b23", 0, 0, 138, 96);
+    for (let y = 13; y < 92; y += 5) {
+      pixel(y % 3 ? "#9b6d4e" : "#875b41", 2, y, 134, 4);
+      for (let x = 10 + y % 13; x < 130; x += 23) pixel("#76503c", x, y, 1, 3);
+    }
+    pixel("#694932", 2, 10, 134, 4);
+    pixel("#5e422f", 2, 2, 134, 2);
+    for (const x of [12, 124]) {
+      pixel("#7f573a", x - 3, 2, 7, 8);
+      pixel("#e1a665", x, 3, 3, 5);
+      pixel("#ffe2a7", x + 1, 4, 1, 3);
+    }
+    pixel(rug[0], 13, 45, 112, 43);
+    pixel(rug[1], 16, 48, 106, 37);
+    for (let x = 19; x < 118; x += 9) {
+      pixel("#b48d66", x, 50, 2, 2);
+      pixel("#b48d66", x, 82, 2, 2);
+    }
+    for (const x of [3, 127]) {
+      pixel("#59372b", x, 38, 8, 7);
+      pixel("#aa734c", x + 1, 38, 6, 4);
+      pixel("#3f5d48", x, 33, 8, 6);
+      pixel("#77936a", x + 2, 31, 5, 7);
+    }
+    pixel("#a7724b", 59, 91, 20, 5);
+    const table = (x, y, width, height) => {
+      pixel("#5b3a2a", x, y + 2, width, height + 3);
+      pixel("#aa7651", x, y, width, height);
+      pixel("#c18c5d", x + 1, y + 1, width - 2, 1);
+    };
+    const papers = (x, y, width, height) => {
+      pixel("#d6b486", x, y, width + 1, height + 1);
+      pixel("#f4dbad", x + 1, y, width - 1, height);
+      for (let i = 2; i < height - 1; i += 2) pixel("#b49e7d", x + 3, y + i, width - 5, 1);
+    };
+    if (style === "planning") {
+      table(32, 20, 74, 15);
+      papers(45, 22, 29, 10);
+      pixel("#536e63", 49, 24, 8, 4);
+      pixel("#a46446", 64, 26, 6, 3);
+      pixel("#5f4732", 82, 25, 14, 2);
+    } else if (style === "workshop") {
+      table(34, 23, 70, 13);
+      for (const x of [42, 74]) {
+        pixel("#302d2b", x, 16, 22, 13);
+        pixel("#456966", x + 2, 18, 18, 8);
+        pixel("#9abeaa", x + 4, 20, 13, 2);
+        pixel("#d8ad79", x + 3, 31, 16, 2);
+      }
+    } else if (style === "archive") {
+      table(27, 17, 84, 20);
+      pixel("#594031", 30, 19, 78, 14);
+      for (let x = 33, book = 0; x < 106; x += 5, book++) {
+        const height = 8 + book % 4;
+        pixel(["#c7955d", "#6e8d75", "#be754b", "#7d7998"][book % 4], x, 32 - height, 3, height);
+      }
+      pixel("#c08a5b", 28, 33, 82, 2);
+    } else if (style === "editorial") {
+      table(34, 21, 70, 15);
+      papers(44, 23, 18, 10);
+      papers(68, 24, 20, 9);
+      pixel("#ab6248", 89, 24, 1, 8);
+      pixel("#5e7460", 92, 24, 6, 6);
+    } else if (style === "art") {
+      pixel("#a16e49", 53, 19, 3, 21);
+      pixel("#a16e49", 80, 19, 3, 21);
+      pixel("#ba8558", 51, 13, 34, 20);
+      pixel("#dfbd91", 53, 14, 30, 17);
+      pixel("#768b72", 56, 21, 23, 6);
+      pixel("#b78065", 67, 17, 9, 5);
+      table(89, 27, 19, 8);
+      pixel("#c1846d", 92, 28, 3, 4);
+      pixel("#8e9a68", 98, 28, 3, 4);
+    } else {
+      table(49, 21, 40, 15);
+      pixel("#684f3b", 56, 23, 24, 9);
+      pixel("#d09e66", 57, 24, 22, 7);
+      pixel("#fbdeb1", 63, 25, 5, 4);
+      pixel("#b14e3b", 71, 25, 5, 4);
+    }
+  }
+  window.addEventListener("openai:set_globals", (event) => {
+    const saved = event.detail?.globals?.widgetState?.privateContent;
+    if (saved?.version === 1 && saved !== state) {
+      state = readSaved(saved);
+      render();
+    }
+  });
+  render();
+})();
+</script>
