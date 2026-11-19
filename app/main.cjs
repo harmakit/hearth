@@ -63,12 +63,16 @@ else {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("before-quit", event => {
-    if (!service || shuttingDown) return;
+    if (!service) return;
     event.preventDefault();
+    if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(scheduleTimer);
     power?.close();
-    Promise.resolve().then(() => service.close()).catch(console.error).finally(() => app.quit());
+    // Finish outside the current native quit event, after Hearth's own shutdown.
+    Promise.resolve().then(() => service.close()).catch(console.error).finally(() => {
+      setImmediate(() => app.exit(0));
+    });
   });
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.once(signal, () => app.quit());
