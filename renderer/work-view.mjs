@@ -22,7 +22,7 @@ const planStatuses = {
 };
 const sprintStatuses = { active: 'В работе', completed: 'Завершён' };
 const meetingKinds = {
-  planning: 'Планирование', retrospective: 'Ретроспектива', review: 'Обзор результатов', grooming: 'Груминг', topic: 'Обсуждение',
+  planning: 'Планирование', retrospective: 'Ретроспектива', review: 'Обзор результатов', grooming: 'Разбор очереди задач', topic: 'Обсуждение',
 };
 const meetingStages = { positions: 'Позиции участников', facilitation: 'Обсуждение', objections: 'Возражения', owner_review: 'Ждёт решения владельца', resolved: 'Решение сохранено', held: 'Приостановлена' };
 const meetingDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' });
@@ -53,7 +53,7 @@ function bulletBlock(title, value) {
 function taskLink(task, showStage = true) {
   return `<button type="button" class="work-task-link" data-task="${safe(task.id)}">
     <strong>${safe(nameOf(task, 'Задача без названия'))}</strong>
-    ${task.kind === 'debt' ? '<span class="debt-label">Техдолг</span>' : ''}
+    ${task.kind === 'debt' ? '<span class="debt-label">Улучшение</span>' : ''}
     ${showStage ? `<span>${stages[stageOf(task)]}</span>` : ''}
   </button>`;
 }
@@ -131,7 +131,7 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
       const taskCount = epicStories.reduce((count, story) => count + (tasksByStory.get(story.id)?.length ?? 0), directTasks.length);
       return `<details class="work-record work-epic" name="studio-epics" data-epic-section="${safe(epic.id)}"${expandedEpics.has(epic.id) ? ' open' : ''}>
         <summary>
-          <strong>${safe(nameOf(epic, 'Эпик без названия'))}</strong>
+          <strong>${safe(epic.kind === 'debt' && nameOf(epic) === 'Техдолг' ? 'Улучшения проекта' : nameOf(epic, 'Эпик без названия'))}</strong>
           <span class="work-muted">Историй: ${epicStories.length} · Задач: ${taskCount}</span>
         </summary>
         <div class="work-epic-body">
@@ -173,7 +173,7 @@ function sprintView(studio, sprints, plans, tasks, byTask) {
     return `<article class="work-record">
       <header><h2>${safe(nameOf(sprint, plan?.title || 'Спринт без названия'))}</h2>
         <div class="work-record-statuses">
-          ${sprint.debtSprint || plan?.debtSprint ? '<span class="debt-label">Спринт техдолга</span>' : ''}
+          ${sprint.debtSprint || plan?.debtSprint ? '<span class="debt-label">Спринт улучшений</span>' : ''}
           ${lifecycle ? `<span class="work-muted">${lifecycle}</span>` : ''}
           ${status ? `<span class="work-approval" data-plan-status="${safe(plan?.status ?? sprint.approvalStatus)}">${status}</span>` : ''}
         </div>
@@ -202,7 +202,7 @@ function sprintView(studio, sprints, plans, tasks, byTask) {
     ${upcoming.map(plan => `<article class="work-record">
       <header><h2>${safe(nameOf(plan, 'План спринта'))}</h2>
         <div class="work-record-statuses">
-          ${plan.debtSprint ? '<span class="debt-label">Спринт техдолга</span>' : ''}
+          ${plan.debtSprint ? '<span class="debt-label">Спринт улучшений</span>' : ''}
           <span class="work-approval" data-plan-status="${safe(plan.status)}">${safe(lookup(planStatuses, plan.status) ?? plan.status)}</span>
         </div>
       </header>
@@ -285,9 +285,11 @@ function planningView(studio, phases, tasks) {
         ${task.status !== 'running' ? `<div class="actions">${action('Изменить', 'backlog-edit', task.id)}${backlog.length > 1 ? action('Заменить', 'backlog-replace', task.id) : ''}</div>` : ''}
       </li>`).join('')}</ul>` : '<p class="work-muted">Здесь будут задачи вне спринта.</p>'}
     </section>
-    <section class="work-record"><header><h2>Груминг</h2>${grooming?.status === 'open' ? action('Завершить груминг', 'resolve-grooming', grooming.id) : action('Начать груминг', 'open', 'request-grooming')}</header>
+    <section class="work-record"><header><h2>Подготовка задач к спринту</h2>${grooming?.status === 'open' ? action('Завершить разбор', 'resolve-grooming', grooming.id) : action('Разобрать очередь', 'open', 'request-grooming')}</header>
       ${grooming ? `<p class="work-muted">${grooming.status === 'open' ? 'Открыт' : 'Завершён'} · Готовых задач: ${safe(grooming.readyTasks)} · Порог: ${safe(grooming.threshold)}</p>`
-        : '<p class="work-muted">Запустите груминг, чтобы проверить очередь к следующему спринту.</p>'}</section>
+        : '<p class="work-muted">Директор уточняет карточки и зависимости, чтобы подготовить задачи к следующему спринту.</p>'}
+      ${grooming?.result ? textBlock('Что изменилось', grooming.result) : ''}
+      ${grooming?.error ? textBlock('Ошибка подготовки', grooming.error) : ''}</section>
     <section class="work-record"><header><h2>Фазы проекта</h2>${action('Добавить фазу', 'open', 'phase')}</header>
       ${phases.length ? phases.map(phase => `<article class="work-story"><h3>${safe(phase.title)}</h3>
         ${textBlock('Цель', phase.goal)}${bulletBlock('Условия завершения', (phase.criteria ?? []).map(row => row.description))}

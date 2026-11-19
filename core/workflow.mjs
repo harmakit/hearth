@@ -663,7 +663,7 @@ export function createWorkflow({
           update('tasks', { ...task, ...result, status: 'queued', activeAgentId: undefined, updatedAt: now() });
           return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
         }
-        const patch = { summary: result.summary, artifact: result.artifact,
+        const patch = { summary: result.summary, artifact: result.artifact, improvements: result.improvements,
           ...(task.deliveryMode === 'git' ? { gitDelivery: { worktreeId: result.worktreeId, status: 'work' } } : {}),
         };
         if (result.question) {
@@ -699,7 +699,8 @@ export function createWorkflow({
       case 'git-merge': {
         const gitDelivery = { ...task.gitDelivery, ...result, status: 'merged' };
         if (!task.sprintId) {
-          update('tasks', { ...task, gitDelivery, status: 'completed', stage: 'done', updatedAt: now() });
+          const completed = update('tasks', { ...task, gitDelivery, status: 'completed', stage: 'done', updatedAt: now() });
+          planningService.addReportedImprovements(completed);
           return state(studio, 'idle', 'Изменения слиты');
         }
         return toDirector(studio, task, { gitDelivery });
@@ -741,7 +742,8 @@ export function createWorkflow({
         const remaining = sprintTasks(task).filter(({ id, stage }) => id !== task.id && stage !== 'done');
         const ready = readyAfter(task);
         const summary = result.summary === undefined ? '' : field(result.summary, 'решение директора');
-        update('tasks', { ...task, stage: 'done', status: 'completed', activeAgentId: undefined, directorDecision: summary, updatedAt: now() });
+        const completed = update('tasks', { ...task, stage: 'done', status: 'completed', activeAgentId: undefined, directorDecision: summary, updatedAt: now() });
+        planningService.addReportedImprovements(completed);
         for (const candidate of ready) {
           if (candidate.stage === 'backlog') update('tasks', { ...candidate, stage: 'ready', updatedAt: now() });
         }

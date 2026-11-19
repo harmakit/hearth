@@ -9,12 +9,14 @@
     <link rel="stylesheet" href="./work.css">
     <link rel="stylesheet" href="./detail.css">
     <link rel="stylesheet" href="./model-policy.css">
+    <link rel="stylesheet" href="./workspace.css">
     <script type="module" src="./app.mjs"></script>
   </head>
   <body>
     <div class="shell">
       <aside class="rail" aria-label="Навигация студии">
         <div class="wordmark"><span class="brand-mark" aria-hidden="true"></span><span>Hearth <span>Studio</span></span></div>
+        <nav id="workspace-navigation" aria-label="Приложение"></nav>
         <div class="studio-controls">
           <label class="picker"><span>Студия</span><select id="studio-select" disabled><option>Загрузка…</option></select></label>
           <button class="rail-button" type="button" data-open="studio"><span aria-hidden="true">＋</span> Новая студия</button>
@@ -24,7 +26,6 @@
       <div class="workspace">
         <header class="topbar">
           <div id="breadcrumb" class="breadcrumb">Hearth Studio</div>
-          <label class="theme-picker"><span>Тема</span><select id="theme-select"><option value="system">Системная</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label>
         </header>
         <div id="notice" class="notice" role="status" hidden></div>
         <main id="content" tabindex="-1"><p class="muted">Загружаем студии…</p></main>

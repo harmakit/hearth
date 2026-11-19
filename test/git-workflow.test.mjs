@@ -45,7 +45,7 @@ test('Git work goes through scoped implementation, checks, exact review, owner a
     },
   });
   t.after(() => { cleanupRelease.resolve(); return service.close(); });
-  const { id: studioId } = service.createStudio({ name: 'Git', root: '/test' });
+  const { id: studioId } = service.createStudio({ name: 'Git', root: '/test', groomingPolicy: { enabled: false } });
   await service.configureProject({ studioId, enabled: true, targetRef: 'delivery', profile: { id: 'project', checks: [] } });
   service.initializeStudio({ studioId });
   const draft = await until(service, state => state.plans[0]);

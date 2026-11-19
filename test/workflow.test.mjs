@@ -10,7 +10,11 @@ import { productionSnapshot, trainingReply } from './fixtures/training.mjs';
 
 function createStudioService({ run, ...settings }) {
   const service = createService({ ...settings, run: (request) => trainingReply(request) ?? run(request) });
-  return { ...service, snapshot: () => productionSnapshot(service.snapshot()) };
+  return {
+    ...service,
+    createStudio: input => service.createStudio({ wipLimit: 1, groomingPolicy: { enabled: false }, ...input }),
+    snapshot: () => productionSnapshot(service.snapshot()),
+  };
 }
 
 const draft = {

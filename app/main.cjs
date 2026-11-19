@@ -265,6 +265,7 @@ async function start() {
   const { findSkills } = createGitHubSkillFinder();
   service = createStudioService({
     dbPath: path.join(dataDir, "studio.sqlite3"),
+    inspectRuntime: inspect,
     run: async request => run({ ...request, projectRoot: await validateRoot(request.projectRoot) }),
     writeArtifact: artifacts.write,
     findSkills,
@@ -288,6 +289,7 @@ async function start() {
     onChange: broadcast,
     notify,
   });
+  void service.refreshProviders();
   const transfer = createTransferController({
     service, artifacts, evidenceStore: evidence, pickBundle, saveBundle, journalDir: path.join(dataDir, "import-journal"),
   });
@@ -305,7 +307,7 @@ async function start() {
   scheduleTimer.unref();
   powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
-    service, selectFolder: pickFolder, inspect, previewImport, findSkills, transfer, protectedRoots,
+    service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,
     restart() {
       app.relaunch();
       app.quit();

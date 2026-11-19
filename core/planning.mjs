@@ -25,6 +25,14 @@ function integer(value, min, max, label) {
   return value;
 }
 
+export function normalizeGroomingPolicy({ enabled, threshold = null, nextSprintCapacity = 1 }) {
+  if (typeof enabled !== 'boolean') throw new Error('Укажите, включена ли автоматическая подготовка задач.');
+  return {
+    enabled, threshold: threshold === null ? null : integer(threshold, 1, 200, 'запас готовых задач'),
+    nextSprintCapacity: integer(nextSprintCapacity, 0, 200, 'ёмкость следующего спринта'),
+  };
+}
+
 export function taskLinks(task) {
   return distinctLinks([...(task.links ?? []), ...(task.dependencies ?? []).map((taskId) => ({ type: 'blocks', taskId }))]);
 }
@@ -169,9 +177,29 @@ export function createPlanning({
 
   function getDebtEpic(studioId) {
     return records('epics', studioId).find(({ kind }) => kind === 'debt') ?? insert('epics', {
-      id: randomUUID(), studioId, kind: 'debt', title: 'Техдолг', description: 'Долгосрочные задачи по поддержке студии',
+      id: randomUUID(), studioId, kind: 'debt', title: 'Улучшения проекта', description: 'Устраняют препятствия для дальнейшей работы студии.',
       priority: 0, sprintIds: [], history: [], createdAt: now(),
     });
+  }
+
+  function addReportedImprovements(source) {
+    if (!source.improvements?.length || source.stage !== 'done') return;
+    const { studioId } = source;
+    const titleKey = title => title.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+    const seen = new Set(records('tasks', studioId).filter(task =>
+      task.kind === 'debt' && task.links?.some(link => link.type === 'origin' && link.taskId === source.id))
+      .map(task => titleKey(task.title)));
+    for (const { title, reason, acceptance } of source.improvements) {
+      const key = titleKey(title);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const date = now();
+      insert('tasks', {
+        id: randomUUID(), studioId, kind: 'debt', epicId: getDebtEpic(studioId).id, title, prompt: reason,
+        criteria: acceptance, links: [{ type: 'origin', taskId: source.id }], dependencies: [],
+        stage: 'backlog', status: 'queued', summary: '', artifact: '', createdAt: date, updatedAt: date,
+      });
+    }
   }
 
   function selectPlanStructure(studio, plan) {
@@ -410,11 +438,7 @@ export function createPlanning({
   }
 
   function updateGrooming({ studioId, enabled, threshold = null, nextSprintCapacity = 1 }) {
-    if (typeof enabled !== 'boolean') throw new Error('Укажите, включён ли автоматический груминг.');
-    const settings = {
-      enabled, threshold: threshold === null ? null : integer(threshold, 1, 200, 'порог груминга'),
-      nextSprintCapacity: integer(nextSprintCapacity, 0, 200, 'ёмкость следующего спринта'),
-    };
+    const settings = normalizeGroomingPolicy({ enabled, threshold, nextSprintCapacity });
     return changed(transaction(() => update('studios', { ...getStudio(studioId), groomingPolicy: settings })));
   }
 
@@ -454,7 +478,7 @@ export function createPlanning({
   }
 
   return {
-    reviseBacklog, closeSprint, calculateRetrospective, finalizeSprint, selectPlanStructure, attachPlanStructure, getDebtEpic,
+    reviseBacklog, closeSprint, calculateRetrospective, finalizeSprint, selectPlanStructure, attachPlanStructure, getDebtEpic, addReportedImprovements,
     createPhase, updatePhase, proposePhaseTransition, decidePhaseTransition,
     updateGrooming, resolveGrooming, requestGrooming: (input) => openGrooming(input, 'manual'),
     maybeRequestGrooming: (input) => openGrooming(input, 'automatic'),

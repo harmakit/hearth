@@ -201,7 +201,7 @@ test('a failed lookup stays visible until retried, then a verified no-match guid
     },
   });
   t.after(() => service.close());
-  const { id: studioId } = service.createStudio({ name: 'Retry', root: '/project' });
+  const { id: studioId } = service.createStudio({ name: 'Retry', root: '/project', wipLimit: 1 });
   const hire = service.addAgent({ studioId, name: 'Editor', trainingTopics: ['outline'] });
   const work = service.createTask({ studioId, agentId: hire.id, title: 'Read', prompt: 'Check the draft.' });
   service.startTask({ taskId: work.id });
@@ -292,7 +292,7 @@ test('standalone training waits behind a workflow task awaiting owner acceptance
     },
   });
   t.after(() => service.close());
-  const { id: studioId } = service.createStudio({ root: '/project', name: 'Held review' });
+  const { id: studioId } = service.createStudio({ root: '/project', name: 'Held review', wipLimit: 1, groomingPolicy: { enabled: false } });
   service.initializeStudio({ studioId });
   const { plans: [plan] } = await until(service.snapshot, ({ plans }) => plans.length);
   service.decidePlan({ planId: plan.id, decision: 'approve' });

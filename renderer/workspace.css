@@ -1,0 +1,30 @@
+.workspace-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: auto auto;
+  gap: 6px 16px;
+  margin: 0;
+}
+.workspace-summary dt { grid-row: 2; color: var(--muted); font-size: 13px; }
+.workspace-summary dd { grid-row: 1; margin: 0; font-size: clamp(22px, 4vw, 32px); font-weight: 630; }
+.workspace-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 14px; }
+.workspace-card { align-content: start; min-width: 0; }
+.workspace-card header p { margin-top: 2px; font-size: 13px; }
+.workspace-studio-name {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+}
+.workspace-studio-name:hover { color: var(--accent); text-decoration: underline; }
+.workspace-card-metrics { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; margin: 0; }
+.workspace-card-metrics dt, .workspace-path { font-size: 13px; color: var(--muted); }
+.workspace-card-metrics dd { margin: 0; font-weight: 630; }
+.workspace-path { overflow-wrap: anywhere; }
+.field-hint { color: var(--muted); font-size: 13px; }
+.settings .panel > .settings-row { padding-top: 0; border-top: 0; }
+.settings .panel > .settings-row + .settings-row { padding-top: 10px; border-top: 1px solid var(--line); }
+.field-hint + .settings-row { padding-top: 10px; border-top: 1px solid var(--line); }

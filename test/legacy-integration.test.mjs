@@ -93,3 +93,27 @@ test('a carried task is reusable by the next plan with its prior owner decision'
   assert.equal(carried.points, 3);
   assert.equal(carried.carryoverHistory[0].fromSprintId, first.id);
 });
+
+test('an accepted result records distinct improvement proposals in the backlog without starting them', async t => {
+  const finding = { title: 'Обновить инструкцию', reason: 'Она ссылается на старые пути.', acceptance: 'Все ссылки работают.' };
+  const service = createStudioService({ dbPath: ':memory:', run: request => trainingReply(request) ?? json({
+    plan: { ...initialPlan, tasks: [{ ...initialPlan.tasks[0], requiresAcceptance: true }] },
+    task: { summary: 'Готово', improvements: [finding, finding] },
+    review: { pass: true, summary: 'Проверено' },
+    director: { action: 'finish' },
+    grooming: { summary: 'Очередь готова', edits: [] },
+  }[request.purpose]) });
+  t.after(() => service.close());
+  const studio = service.createStudio({ name: 'Queue', root: '/project' });
+  await approveInitial(service, studio.id);
+  const firstReview = await until(service, ({ inbox }) => inbox.find(({ kind }) => kind === 'acceptance'));
+  service.answerInbox({ inboxId: firstReview.id, decision: 'revise', answer: 'Уточнить результат' });
+  const approval = await until(service, ({ inbox }) => inbox.find(({ kind, status, id }) => kind === 'acceptance' && status === 'open' && id !== firstReview.id));
+  assert.equal(service.snapshot().tasks.filter(({ kind }) => kind === 'debt').length, 0);
+  service.answerInbox({ inboxId: approval.id, decision: 'approve' });
+  await until(service, ({ sprints }) => sprints[0]?.status === 'completed');
+  const items = service.snapshot().tasks.filter(({ kind }) => kind === 'debt');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].status, 'queued');
+  assert.deepEqual(items[0].links, [{ type: 'origin', taskId: approval.taskId }]);
+});

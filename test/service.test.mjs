@@ -27,7 +27,7 @@ function database(t) {
 }
 
 function studio(service, name = 'Буквы') {
-  return service.createStudio({ name, root: project, language: 'Русский', brief: 'Бережная редактура' });
+  return service.createStudio({ name, root: project, language: 'Русский', brief: 'Бережная редактура', wipLimit: 1 });
 }
 
 function task(service, studioId, agentId) {

@@ -35,3 +35,18 @@
   padding-inline: 6px;
   overflow-wrap: anywhere;
 }
+.catalog-group header { padding: 10px 12px; background: var(--surface-raised); }
+.catalog-group header h3 { font-size: 14px; }
+.catalog-models { list-style: none; padding: 0 12px; margin: 0; }
+.catalog-model { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); gap: 8px; align-items: start; padding: 10px 0; }
+.catalog-model + .catalog-model { border-top: 1px solid var(--line); }
+.catalog-choice { min-width: 0; }
+.catalog-choice strong, .catalog-choice small { display: block; overflow-wrap: anywhere; }
+.catalog-choice small, .catalog-model summary { color: var(--muted); font-size: 12px; }
+.catalog-model details { min-width: 0; }
+.catalog-model details[open] { grid-column: 1 / -1; margin-left: 23px; }
+.catalog-model .policy-efforts { margin-top: 7px; }
+@media (max-width: 640px) {
+  .catalog-model { grid-template-columns: minmax(0, 1fr); }
+  .catalog-model details { margin-left: 23px; }
+}

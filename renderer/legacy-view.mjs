@@ -104,7 +104,7 @@ export function renderRetrospective(facts) {
   if (!facts) return '';
   const counts = [
     ['План', facts.planned], ['Принято', facts.accepted], ['Перенесено', facts.carried], ['Блокировки', facts.blocked],
-    ['Замены', facts.replaced], ['Незавершённый техдолг', facts.debt],
+    ['Замены', facts.replaced], ['Открытые улучшения', facts.debt],
   ];
   return `<details class="legacy-record"><summary>Факты ретроспективы</summary>
     <p class="muted">Методика: версия ${safe(facts.methodVersion)}</p>

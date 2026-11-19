@@ -120,7 +120,7 @@ test('a published file survives interruption before the workflow records it and 
     await rm(directory, { recursive: true, force: true });
   });
   const diagnostics = () => service.snapshot().attempts.map(({ purpose, status, error }) => ({ purpose, status, error }));
-  const { id: studioId } = service.createStudio({ name: 'Recovery', root });
+  const { id: studioId } = service.createStudio({ name: 'Recovery', root, groomingPolicy: { enabled: false } });
   service.initializeStudio({ studioId });
   const plan = await until(() => service.snapshot().plans[0], diagnostics);
   service.decidePlan({ planId: plan.id, decision: 'approve' });
