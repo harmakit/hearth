@@ -470,3 +470,22 @@ test('requires the exact current name and removes only that studio while no atte
   assert.equal(restored.wasStudioDeleted(first.id), true);
   assert.equal(restored.wasStudioDeleted(second.id), false);
 });
+test('durable task transitions are scoped and paginated after restart', async t => {
+  const dbPath = database(t);
+  let service = createStudioService({ dbPath, run: async () => ({text:'Готово'}) });
+  const first = studio(service);
+  const other = studio(service, 'Другой проект');
+  const work = task(service, first.id);
+  service.startTask({taskId:work.id});
+  await until(service.snapshot, snapshot => snapshot.tasks.find(row => row.id === work.id).status === 'completed');
+  await service.close();
+  service = createStudioService({ dbPath, run: async () => ({text:'Готово'}) });
+  t.after(()=>service.close());
+  const read = extra=>service.taskHistory({studioId:first.id,taskId:work.id,limit:1,...extra});
+  const page = read();
+  assert.equal(page.rows[0].toStatus, 'completed');
+  assert.ok(page.nextBefore);
+  const prior = read({before:page.nextBefore});
+  assert.equal(prior.rows[0].toStatus, 'running');
+  assert.throws(()=>read({studioId:other.id}), /студии/);
+});

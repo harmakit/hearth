@@ -288,7 +288,7 @@ export function createWorkflow({
         ...(taskRecommendation || reviewRecommendation ? { modelRecommendations: { task: taskRecommendation, review: reviewRecommendation } } : {}),
       };
       if (!carried) return insert('tasks', record);
-      return update('tasks', { ...record, title: carried.title, prompt: carried.prompt, createdAt: carried.createdAt, lifecycle: undefined });
+      return update('tasks', { ...record, title: plan.editedTaskTitles?.includes(task.key) ? task.title : carried.title, prompt: carried.prompt, createdAt: carried.createdAt, lifecycle: undefined });
     });
     insert('meetings', {
       id: randomUUID(), studioId, sprintId: sprint.id, kind: 'planning', title: 'Планирование спринта',
@@ -305,9 +305,43 @@ export function createWorkflow({
     return result;
   }
 
-  function updatePlanAgents({ planId, agents }) {
+  function checkPlanEdit(plan, expected) {
+    if (expected !== undefined && expected !== (plan.editVersion ?? 0)) {
+      throw new Error('План изменился. Откройте актуальную версию перед сохранением.');
+    }
+  }
+
+  function updatePlanTasks({ planId, expectedEditVersion, tasks }) {
     const result = transaction(() => {
       const draft = read('plans', planId, 'План');
+      checkPlanEdit(draft, expectedEditVersion);
+      if (draft.status !== 'pending') throw new Error('Эта версия плана уже закрыта.');
+      if (!Array.isArray(tasks) || !tasks.length || tasks.length > draft.tasks.length) throw new Error('Некорректные изменения задач.');
+      const studio = read('studios', draft.studioId, 'Студия');
+      const roles = new Map([...draft.agents, ...studio.agents].map(a => [a.key ?? a.id, a]));
+      const allowed = key => roles.has(key) && roles.get(key).rosterStatus !== 'retired' && roles.get(key).systemRole !== 'coach';
+      const byKey = new Map(draft.tasks.map(t => [t.key, t]));
+      const editedTitles = new Set(draft.editedTaskTitles ?? []);
+      const seen = new Set();
+      for (const edit of tasks) {
+        const task = byKey.get(edit?.key);
+        if (!task || seen.has(task.key)) throw new Error('Неизвестная или повторяющаяся задача.');
+        seen.add(task.key);
+        if (!allowed(edit.agentKey) || !allowed(edit.reviewerKey) || edit.agentKey === edit.reviewerKey) throw new Error('Выберите исполнителя и отдельного проверяющего.');
+        if (typeof edit.requiresAcceptance !== 'boolean') throw new Error('Укажите принимающую сторону.');
+        const title = field(edit.title, 'название задачи', 200);
+        if (task.title !== title) editedTitles.add(task.key);
+        byKey.set(task.key, { ...task, title, agentKey:edit.agentKey, reviewerKey:edit.reviewerKey, requiresAcceptance:edit.requiresAcceptance });
+      }
+      return update('plans', { ...draft, tasks:[...byKey.values()], editedTaskTitles:[...editedTitles], editVersion:(draft.editVersion ?? 0)+1 });
+    });
+    return changed(result);
+  }
+
+  function updatePlanAgents({ planId, agents, expectedEditVersion }) {
+    const result = transaction(() => {
+      const draft = read('plans', planId, 'План');
+      checkPlanEdit(draft, expectedEditVersion);
       if (draft.kind !== 'initial' || draft.status !== 'pending') throw new Error('Изменить команду можно только в первоначальном плане, который ожидает согласования.');
       const studio = read('studios', draft.studioId, 'Студия');
       const plan = completeInitialRoster(draft, studio.agents);
@@ -337,16 +371,17 @@ export function createWorkflow({
         byKey.set(patch.key, updated);
         agentEdits.set(patch.key, [...editedFields]);
       }
-      return update('plans', { ...plan, agents: [...byKey.values()], agentEdits: Object.fromEntries(agentEdits) });
+      return update('plans', { ...plan, agents: [...byKey.values()], agentEdits: Object.fromEntries(agentEdits), editVersion:(draft.editVersion ?? 0)+1 });
     });
     return changed(result);
   }
 
-  function decidePlan({ studioId, planId, decision, feedback, comment }) {
+  function decidePlan({ studioId, planId, decision, feedback, comment, expectedEditVersion }) {
     const plan = read('plans', planId, 'План');
     if (studioId && studioId !== plan.studioId) throw new Error('План принадлежит другой студии.');
     if (!['approve', 'revise'].includes(decision)) throw new Error('Неизвестное решение по плану.');
     const target = decision === 'approve' ? 'approved' : 'returned';
+    checkPlanEdit(plan, expectedEditVersion);
     if (plan.status === target) return plan;
     if (plan.status !== 'pending') throw new Error('Эта версия плана уже закрыта.');
     const studio = read('studios', plan.studioId, 'Студия');
@@ -1039,7 +1074,7 @@ export function createWorkflow({
   }
 
   return {
-    initializeStudio, startNextSprint, decidePlan, updatePlanAgents, setStudioRunning, resumeInbox, startStandaloneTraining, startGitTask,
+    initializeStudio, startNextSprint, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, resumeInbox, startStandaloneTraining, startGitTask,
     queue, hasDispatchWork, activeWork, reconcileWork, resolveReconciliation, cancelTask, retryTask,
   };
 }

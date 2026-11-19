@@ -1,9 +1,10 @@
-import { access, realpath, stat } from "node:fs/promises";
+import { access, mkdir, realpath, stat } from "node:fs/promises";
+import { git } from "./git-worktrees.mjs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "assessDebtPolicy", "addAgent", "updateAgent", "createTask",
-  "updateProviderPreference",
+  "updateProviderPreference", "updatePlanTasks", "taskHistory",
   "startTask", "cancelTask", "answerInbox",
   "initializeStudio", "startNextSprint", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
   "configureProject", "previewCleanup", "applyCleanup", "reviseBacklog", "closeSprint", "createPhase", "updatePhase",
@@ -47,6 +48,10 @@ async function hasLegacyStudio(root) {
 
 export async function validateProjectRoot(candidate, protectedRoots = []) {
   const root = await directory(candidate);
+  return validateLocation(root, protectedRoots);
+}
+
+async function validateLocation(root, protectedRoots) {
   for (const candidate of protectedRoots) {
     const protectedRoot = await realpath(candidate).catch(() => candidate);
     if (isWithin(protectedRoot, root) || isWithin(root, protectedRoot)) {
@@ -57,6 +62,34 @@ export async function validateProjectRoot(candidate, protectedRoots = []) {
     throw new Error("В этой папке работает прежняя версия Hearth. Для неё доступен предварительный просмотр импорта.");
   }
   return root;
+}
+
+async function newProjectFolder(parentPath, requestedName, protectedRoots) {
+  const name = typeof requestedName === 'string' && requestedName.trim();
+  if (!name || name === '.' || name === '..' || name.toLowerCase() === '.git' ||
+      /[<>:"/\\|?*\u0000-\u001f]|[. ]$/u.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(name)) {
+    throw new Error('Укажите имя новой папки без пути.');
+  }
+  const parent = await directory(parentPath);
+  const root = await validateLocation(join(parent, name), protectedRoots);
+  for (let dir = parent; ; dir = dirname(dir)) {
+    try {
+      await access(join(dir, '.git'));
+      throw new Error('Выберите место вне существующего Git-репозитория.');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (dirname(dir) === dir) break;
+  }
+  await mkdir(root); // Exclusive creation protects pre-existing directories, even empty ones.
+  try {
+    await git(root, ['init','--template=','--initial-branch=main','.']);
+    await git(root, ['-c','user.name=Hearth Studio','-c','user.email=studio@hearth.invalid',
+      'commit','--allow-empty','-m','Initialize Hearth project history']);
+    const targetRef = 'refs/heads/hearth-studio/delivery';
+    await git(root, ['branch',targetRef.slice('refs/heads/'.length),'HEAD']);
+    return {root,targetRef};
+  } catch (error) {
+    throw new Error('Папка создана, но подготовить Git не удалось. Откройте её как существующую: '+root+' — '+error.message);
+  }
 }
 
 function isRecord(value) {
@@ -130,6 +163,11 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
     }
     if (!serviceCommands.has(command)) throw new Error("Неизвестная команда приложения.");
     if (command === "snapshot") return service.snapshot();
+    if (command === "createStudio" && payload.newFolderName !== undefined) {
+      const {newFolderName, ...input} = payload;
+      const {root,targetRef} = await newProjectFolder(input.root, newFolderName, protectedRoots);
+      return service.createStudio({...input, root}, {targetRef});
+    }
     if (command === "createStudio" || (command === "updateStudio" && Object.hasOwn(payload, "root"))) {
       payload = { ...payload, root: await validateProjectRoot(payload.root, protectedRoots) };
     }

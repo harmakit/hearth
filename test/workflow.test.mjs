@@ -32,6 +32,26 @@ const draft = {
   files: [],
 };
 
+test('owner can edit pending assignments and checkpoints before approving the displayed revision', async t => {
+  const service = createStudioService({ dbPath: ':memory:', run: async () => ({ text: JSON.stringify(draft) }) });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({ name: 'Docs', root: '/project' });
+  service.initializeStudio({ studioId });
+  const { plans: [plan] } = await until(service.snapshot, s => s.plans.length === 1);
+  const edits = [{key:'second', title:'Review chapter', agentKey:'reviewer', reviewerKey:'writer', requiresAcceptance:true}];
+  const patch = { planId: plan.id, expectedEditVersion: 0, tasks: edits };
+  assert.throws(() => service.updatePlanTasks({...patch, tasks:[{...edits[0], reviewerKey:'reviewer'}]}), /проверяющ/);
+  const updated = service.updatePlanTasks(patch);
+  assert.equal(updated.editVersion, 1);
+  assert.deepEqual(updated.tasks[1], {...plan.tasks[1], ...edits[0]});
+  assert.throws(() => service.updatePlanTasks(patch), /измен/);
+  assert.throws(() => service.decidePlan({planId:plan.id, decision:'approve', expectedEditVersion:0}), /измен/);
+  service.decidePlan({planId:plan.id, decision:'approve', expectedEditVersion:1});
+  const saved = service.snapshot().tasks.find(t=>t.key==='second');
+  assert.equal(saved.requiresAcceptance,true);
+  assert.equal(saved.title,'Review chapter');
+});
+
 async function until(read, predicate) {
   for (let attempt = 0; attempt < 200; attempt++) {
     const value = read();
@@ -197,10 +217,13 @@ test('debt mode starts after onboarding and schedules an existing open debt item
   assert.equal(second.debtSprint, true);
   assert.equal(context.debt.active, true);
   assert.equal(context.debt.items[0].id, debt.id);
+  service.updatePlanTasks({planId:second.id, expectedEditVersion:0,
+    tasks:second.tasks.map(t => ({...t, title:'Owner revised title', requiresAcceptance:false}))});
   service.decidePlan({ studioId, planId: second.id, decision: 'approve' });
   const done = await until(service.snapshot, ({ sprints }) => sprints.every(({ status }) => status === 'completed'));
   assert.equal(done.sprints[1].debtSprint, true);
   assert.equal(done.tasks.find(({ id }) => id === debt.id).stage, 'done');
+  assert.equal(done.tasks.find(({ id }) => id === debt.id).title, 'Owner revised title');
   assert.equal(done.tasks.filter(({ kind }) => kind === 'debt').length, 1);
 });
 

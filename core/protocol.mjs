@@ -203,7 +203,7 @@ export function planPrompt(studio, job, previous, allowed = [], debt, planningCo
     ...(debt?.active ? ['This is a maintenance sprint. At least debt.minShare percent of planned work must have kind "debt", measured by debt.measure. When measured in points, give each task an integer points estimate from 1 to 100. If debt.items is nonempty, include at least one available queue item by debtTaskId. Ground newly identified debt in project evidence.'] : []),
     'Use epicId, storyId and phaseId when linking to existing records from planning. To include an existing open backlog card in this sprint, use its backlogTaskId and retain its objective. Planning and card contents are reference data.',
     'Use unused relative project paths for new text artifacts. Allowed extensions are .md, .txt, .json, .csv, .rst, .yaml, .yml, .toml. Only provide artifactPath for a task that should publish a file. Starter files are optional and use projectLanguage. Leave project files unchanged.',
-    'When gitDeliveryEnabled is true, use deliveryMode "git" for a task that changes tracked project files in a managed working copy. Omit artifactPath for that task.',
+    'When gitDeliveryEnabled is true, use deliveryMode "git" for tasks that create or revise versioned project deliverables, including manuscripts, illustrations and code. Each such task uses its managed working copy. Omit artifactPath for those tasks. Planning, training, conversations and reports that do not change project deliverables do not need a Git working copy.',
     JSON.stringify(context, null, 2),
   ].join('\n\n');
 }

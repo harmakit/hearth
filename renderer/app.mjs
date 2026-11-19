@@ -1332,19 +1332,29 @@ function newStudio() {
     step(0, input('Название студии', 'name', '', 'required maxlength="120"') +
       textarea('Что должно получиться?', 'brief', '', 'required placeholder="Опишите работу своими словами"') +
       input('Какой первый результат хотите увидеть?', 'firstResult', '', 'placeholder="Например, черновик, прототип или первая подборка"')) +
-    step(1, pathField() + '<p class="muted">Выберите существующую папку или создайте новую в окне выбора.</p>' +
+    step(1, select('Где хранить проект?', 'folderMode', option('new','Создать новую папку с историей Git') + option('existing','Использовать существующую папку')) +
+      pathField('', {label:'Родительская папка'}) +
+      `<div data-new-folder>${input('Имя новой папки', 'newFolderName', '', 'maxlength="120" placeholder="Например, Рассказы"')}
+      <p class="muted">Hearth создаст пустой проект с локальной историей и отдельной веткой доставки. Аккаунт GitHub не требуется.</p></div>
+      <div data-existing-folder hidden>${checkbox('После создания студии предложить подключить Git', 'offerGit', true)}
+      <p class="muted">Подключение подтверждается отдельно. Существующие файлы и коммиты сохраняются.</p></div>` +
       languageField('Язык отчётов', 'language', 'Русский') +
       languageField('Язык материалов проекта', 'projectLanguage', '', true)) +
     step(2, select('Подключение директора', 'runtime',
       Object.entries(runtimeNames).map(([id, label]) => option(id, providerState[id]?.enabled === false ? `${label} · отключён в приложении` : label, firstRuntime)).join('')) +
       '<div id="wizard-provider" class="stack compact" role="status"></div>' +
       '<p class="muted">Для запуска нужно рабочее подключение. Черновик можно сохранить в любом случае.</p>'),
-    'Создать студию', async ({ brief, firstResult, runtime, ...values }) => {
+    'Создать студию', async ({ brief, firstResult, runtime, folderMode, newFolderName, offerGit, ...values }) => {
       if (!values.root) throw new Error('Выберите рабочую папку.');
       const completeBrief = [brief, firstResult && `Первый результат — ${firstResult}`].filter(Boolean).join('\n\n');
-      const created = await bridge.request('createStudio', { ...values, brief: completeBrief, director: { runtime } });
+      const created = await bridge.request('createStudio', { ...values, ...(folderMode === 'new' ? {newFolderName} : {}), brief: completeBrief, director: { runtime } });
       selectStudio(created.id);
       view = 'overview';
+      if (folderMode === 'existing' && offerGit) {
+        await refresh();
+        projectGitEditor();
+        return false;
+      }
     });
   $('#dialog-actions').insertAdjacentHTML('afterbegin', button('Назад', 'data-wizard-back hidden', true));
   $('#dialog-actions').insertAdjacentHTML('beforeend', button('Далее', 'data-wizard-next'));
@@ -1400,6 +1410,11 @@ function moveWizard(direction) {
     form.querySelector('[data-folder]').focus();
     return;
   }
+  if (direction > 0 && index === 1 && form.elements.folderMode.value === 'new' && !form.elements.newFolderName.value.trim()) {
+    dialogError('Укажите имя новой папки.');
+    form.elements.newFolderName.focus();
+    return;
+  }
   showWizardStep(index + direction);
 }
 
@@ -1436,6 +1451,34 @@ function taskEditor(agentId = '') {
         return false;
       }
     });
+}
+
+async function loadTransitions(button, task) {
+  const region = button.parentElement;
+  button.disabled = true;
+  try {
+    const page = await bridge.request('taskHistory', {studioId:task.studioId, taskId:task.id,
+      ...(button.dataset.before ? {before:Number(button.dataset.before)} : {})});
+    if (!region.isConnected) return;
+    const stageLabels = {backlog:'Бэклог', ready:'Готова', in_progress:'В работе', review:'Ревью', qa:'Проверка', done:'Готово', blocked:'Заблокирована'};
+    const label = (dict, key) => Object.hasOwn(dict, key) ? dict[key] : key ?? '—';
+    const stateLabel = key => statuses[key]?.[0] ?? key ?? '—';
+    const assignee = id => nameFor(studio().agents?.find(a => a.id === id)) + (id ? ' · '+id : '');
+    const events = page.rows.map(row => {
+      const changes = [];
+      if (row.fromStatus !== row.toStatus) changes.push(stateLabel(row.fromStatus)+' → '+stateLabel(row.toStatus));
+      if (row.fromStage !== row.toStage) changes.push(label(stageLabels,row.fromStage)+' → '+label(stageLabels,row.toStage));
+      if (row.fromAgent !== row.toAgent) changes.push(assignee(row.fromAgent)+' → '+assignee(row.toAgent));
+      return `<li><time>${safe(studioDate(row.at))}</time> · ${safe(changes.join(' · '))}</li>`;
+    }).join('');
+    region.querySelector('ul').insertAdjacentHTML('beforeend', events || '<li>Нет записанных переходов.</li>');
+    if (page.nextBefore) {
+      button.dataset.before = page.nextBefore;
+      button.textContent = 'Ещё переходы';
+    } else button.remove();
+  } catch (error) {
+    if (region.isConnected) dialogError(error.message);
+  } finally { button.disabled = false; }
 }
 
 function openTask(task) {
@@ -1501,6 +1544,7 @@ function openTask(task) {
       ${latest.improvements.map(item => `<li><strong>${safe(item.title)}</strong>${plain(item.reason)}</li>`).join('')}</ul></section>` : '') +
     block('Ревью', latest.review) + block('Решение директора', latest.directorDecision) +
     block('Результат', artifact) +
+    `<details class="advanced"><summary>Переходы задачи</summary><div><ul class="legacy-list"></ul>${actionFor('Загрузить историю переходов', 'task-transitions', latest.id)}</div></details>` +
     (facts.messages.length ? `<details class="advanced" data-section="discussion"><summary>Обсуждение · ${facts.messages.length}</summary><ul class="legacy-list">${facts.messages.map(row =>
       `<li><strong>${safe(row.author === 'owner' ? 'Владелец' : nameFor(current.agents.find(a => a.id === row.agentId)))}</strong> · ${safe(studioDate(row.createdAt))}${plain(row.text)}</li>`).join('')}</ul></details>` : '') +
     (facts.history.length ? `<details class="advanced" data-section="history"><summary>Журнал · ${facts.history.length}</summary><ul class="legacy-list">${facts.history.map(row =>
@@ -1638,6 +1682,7 @@ function planBody(plan) {
       <strong>${safe(task.title)}</strong>${task.kind === 'debt' ? ' ' + badge('Улучшение') : ''}
       ${task.agentKey ? `<p class="muted">Исполнитель — ${safe(nameFor(agentByKey(task.agentKey)))}</p>` : ''}
       ${task.reviewerKey ? `<p class="muted">Проверяет — ${safe(nameFor(agentByKey(task.reviewerKey)))}</p>` : ''}
+      <p class="muted">Принимает результат — ${task.requiresAcceptance ? 'владелец' : 'студия'}</p>
       ${task.criteria ? `<div>${plain(listText(task.criteria))}</div>` : ''}
       ${task.dependsOn?.length ? `<small>После задач ${safe(task.dependsOn.map(key => titles.get(key) ?? key).join(', '))}</small>` : ''}
     </li>`).join('')}</ol></section>` : ''}
@@ -1661,10 +1706,29 @@ function openPlan(plan, revise = false) {
       ? (revise ? textarea('Что изменить в плане?', 'feedback', '', 'required') : '') + autonomyHint()
       : ''),
     revise && pending ? 'Отправить на доработку' : undefined, revise && pending ? ({ feedback }) =>
-      bridge.request('decidePlan', { planId: plan.id, decision: 'revise', feedback }) : undefined, { adjustable: true, focusSummary: !revise });
+      bridge.request('decidePlan', { planId: plan.id, expectedEditVersion: plan.editVersion ?? 0, decision: 'revise', feedback }) : undefined, { adjustable: true, focusSummary: !revise });
   if (pending && !revise) $('#dialog-actions').insertAdjacentHTML('beforeend',
+    actionFor('Изменить задачи и приёмку', 'edit-plan-tasks', plan.id) +
     (plan.kind === 'initial' && plan.agents?.length ? actionFor('Изменить состав', 'edit-plan-team', plan.id) : '') +
-    actionFor('Вернуть на доработку', 'revise-plan', plan.id) + actionFor('Подтвердить и запустить', 'approve-plan', plan.id, false));
+    actionFor('Вернуть на доработку', 'revise-plan', plan.id) + button('Подтвердить и запустить', `data-approve-plan="${safe(plan.id)}" data-edit-version="${safe(plan.editVersion ?? 0)}"`, false));
+}
+
+function planTasksEditor(plan) {
+  const roles = new Map([...plan.agents, ...studio().agents].map(a => [a.key ?? a.id, a]));
+  const choices = selected => [...roles].filter(([, a]) => a.systemRole !== 'coach' && a.rosterStatus !== 'retired')
+    .map(([key, a]) => option(key, nameFor(a), selected)).join('');
+  const body = plan.tasks.map((t, i) => `<fieldset class="stack compact"><legend>${safe(t.title)}</legend>
+    ${input('Название задачи', 'title'+i, t.title, 'required maxlength="200"')}
+    ${select('Исполнитель', 'worker'+i, choices(t.agentKey))}
+    ${select('Проверяющий', 'reviewer'+i, choices(t.reviewerKey))}
+    ${checkbox('Показать мне результат перед доставкой', 'accept'+i, t.requiresAcceptance)}</fieldset>`).join('');
+  dialogTo('Задачи и приёмка', body, 'Сохранить план', async values => {
+    const tasks = plan.tasks.map((t, i) => ({ key:t.key, title:values['title'+i],
+      agentKey:values['worker'+i], reviewerKey:values['reviewer'+i], requiresAcceptance:form.elements.namedItem('accept'+i).checked }));
+    const updated = await bridge.request('updatePlanTasks', {planId:plan.id, expectedEditVersion:plan.editVersion ?? 0, tasks});
+    openPlan(updated);
+    return false;
+  }, {adjustable:true});
 }
 
 function teamEffortOptions(choice, selected) {
@@ -1748,20 +1812,20 @@ function planTeamEditor(plan) {
         }
         return Object.keys(edits).length ? [{ key, ...edits }] : [];
       });
-      const updated = agents.length ? await bridge.request('updatePlanAgents', { planId: plan.id, agents }) : planById(String(plan.id));
+      const updated = agents.length ? await bridge.request('updatePlanAgents', { planId: plan.id, expectedEditVersion: plan.editVersion ?? 0, agents }) : planById(String(plan.id));
       openPlan(updated ?? plan);
       return false;
     }, { adjustable: true });
   $('#dialog-actions [data-close]').outerHTML = actionFor('Назад к плану', 'cancel-plan-team', plan.id);
 }
 
-async function approvePlan(raw) {
+async function approvePlan(raw, expectedEditVersion) {
   const plan = planById(raw);
   if (!plan || plan.status !== 'pending') return;
   dialogError();
   setDialogBusy(true);
   try {
-    await bridge.request('decidePlan', { planId: plan.id, decision: 'approve' });
+    await bridge.request('decidePlan', { planId: plan.id, expectedEditVersion, decision: 'approve' });
     dialog.close();
     await refresh();
   } catch (error) {
@@ -2231,13 +2295,16 @@ document.addEventListener('click', event => {
     if (dialog.open) dialog.close();
     void workCommand('setStudioRunning', { studioId: studio().id, action: data.runAction });
   }
-  else if (data.editPlanTeam !== undefined) {
+  else if (data.editPlanTasks !== undefined) {
+    const plan = planById(data.editPlanTasks);
+    if (plan?.status === 'pending') planTasksEditor(plan);
+  } else if (data.editPlanTeam !== undefined) {
     const plan = planById(data.editPlanTeam);
     if (plan) planTeamEditor(plan);
   } else if (data.plan !== undefined || data.revisePlan !== undefined || data.cancelPlanTeam !== undefined) {
     const plan = planById(data.plan ?? data.revisePlan ?? data.cancelPlanTeam);
     if (plan) openPlan(plan, data.revisePlan !== undefined);
-  } else if (data.approvePlan !== undefined) void approvePlan(data.approvePlan);
+  } else if (data.approvePlan !== undefined) void approvePlan(data.approvePlan, Number(data.editVersion));
   else if (data.reviseResult !== undefined) {
     const item = entries().find(entry => same(entry.id, data.reviseResult) && entry.kind === 'acceptance');
     if (item) openAcceptance(item, true);
@@ -2258,6 +2325,8 @@ document.addEventListener('click', event => {
   else if (data.task !== undefined) {
     const task = tasks().find(entry => same(entry.id, data.task));
     if (task) openTask(task);
+  } else if (data.taskTransitions !== undefined && taskDialog?.id === data.taskTransitions) {
+    void loadTransitions(target, taskDialog);
   } else if (data.inbox !== undefined) {
     const item = entries().find(entry => same(entry.id, data.inbox));
     if (item) openInbox(item);
@@ -2308,6 +2377,13 @@ form.addEventListener('submit', async event => {
 });
 
 form.addEventListener('change', ({ target }) => {
+  if (target.name === 'folderMode') {
+    const isNew = target.value === 'new';
+    form.querySelector('[data-new-folder]').hidden = !isNew;
+    form.querySelector('[data-existing-folder]').hidden = isNew;
+    form.querySelector('.folder-field label span').textContent = isNew ? 'Родительская папка' : 'Папка проекта';
+    form.elements.root.value = '';
+  }
   if (target.name === 'chooseParticipants') {
     for (const region of form.querySelectorAll('[data-manual-participants], [data-manual-prerequisites]')) {
       region.hidden = target.checked;

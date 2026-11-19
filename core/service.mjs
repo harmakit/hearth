@@ -225,6 +225,23 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), data TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS inbox_by_task ON inbox(task_id);
+    CREATE TABLE IF NOT EXISTS task_transitions (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, studio_id TEXT NOT NULL, task_id TEXT NOT NULL,
+      at TEXT NOT NULL, from_status TEXT, to_status TEXT, from_stage TEXT, to_stage TEXT,
+      from_agent TEXT, to_agent TEXT
+    );
+    CREATE INDEX IF NOT EXISTS task_transitions_by_task ON task_transitions(studio_id, task_id, seq);
+    CREATE TRIGGER IF NOT EXISTS record_task_transition AFTER UPDATE OF data ON tasks
+    WHEN json_extract(OLD.data,'$.status') IS NOT json_extract(NEW.data,'$.status')
+      OR json_extract(OLD.data,'$.stage') IS NOT json_extract(NEW.data,'$.stage')
+      OR json_extract(OLD.data,'$.agentId') IS NOT json_extract(NEW.data,'$.agentId')
+    BEGIN
+      INSERT INTO task_transitions(studio_id,task_id,at,from_status,to_status,from_stage,to_stage,from_agent,to_agent)
+      VALUES(NEW.studio_id, NEW.id, strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+        json_extract(OLD.data,'$.status'), json_extract(NEW.data,'$.status'),
+        json_extract(OLD.data,'$.stage'), json_extract(NEW.data,'$.stage'),
+        json_extract(OLD.data,'$.agentId'), json_extract(NEW.data,'$.agentId'));
+    END;
     CREATE TABLE IF NOT EXISTS studio_inbox (id TEXT PRIMARY KEY, data TEXT NOT NULL);
     ${[...domains, ...privateDomains].map((table) => `CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, data TEXT NOT NULL);`).join('\n')}
   `);
@@ -475,6 +492,20 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     };
   }
 
+  function taskHistory({ studioId, taskId, before = Number.MAX_SAFE_INTEGER, limit = 30 }) {
+    if (read('tasks', taskId, 'Задача').studioId !== studioId) throw new Error('Задача не найдена в студии.');
+    if (!Number.isSafeInteger(before) || before < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Некорректная страница истории.');
+    }
+    const rows = db.prepare(`SELECT seq, at, from_status AS fromStatus, to_status AS toStatus,
+      from_stage AS fromStage, to_stage AS toStage, from_agent AS fromAgent, to_agent AS toAgent
+      FROM task_transitions WHERE studio_id=? AND task_id=? AND seq<? ORDER BY seq DESC LIMIT ?`)
+      .all(studioId, taskId, before, limit + 1);
+    const more = rows.length > limit;
+    if (more) rows.pop();
+    return { rows, nextBefore: more ? rows.at(-1).seq : null };
+  }
+
   function publish(callback, value) {
     if (closed || !callback) return;
     try {
@@ -509,7 +540,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     if (waitingChanged) changed();
   }
 
-  function createStudio(input) {
+  function createStudio(input, preparedProject) {
     assertOpen();
     const providers = Object.values(providerSnapshot());
     const preferred = providers.find(info => info.enabled && info.available && info.authenticated === true) ??
@@ -519,6 +550,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       groomingPolicy: normalizeGroomingPolicy(input.groomingPolicy ?? { enabled: true, threshold: null, nextSprintCapacity: 5 }),
       ...studioSettings({ wipLimit: 5, debtPolicy: { ...normalizeDebtPolicy(), enabled: true },
         director: { ...defaultDirector, runtime: preferred?.runtime ?? defaultDirector.runtime }, ...input }),
+      ...(preparedProject ? {projectGit:{enabled:true,targetRef:preparedProject.targetRef,profile:normalizeProjectProfile()}} : {}),
     };
     transaction(() => {
       insert('studios', studio);
@@ -647,6 +679,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       for (const table of ['studio_inbox', ...domains, ...privateDomains]) {
         db.prepare(`DELETE FROM ${table} WHERE json_extract(data, '$.studioId') = ?`).run(studioId);
       }
+      db.prepare('DELETE FROM task_transitions WHERE studio_id = ?').run(studioId);
       db.prepare('DELETE FROM tasks WHERE studio_id = ?').run(studioId);
       db.prepare('DELETE FROM studios WHERE id = ?').run(studioId);
       db.prepare('INSERT INTO deleted_studios (id) VALUES (?) ON CONFLICT (id) DO NOTHING').run(studioId);
@@ -1439,11 +1472,11 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   }
   interruptUnfinishedAttempts({ restore: true });
   refreshSchedules();
-  const { initializeStudio, decidePlan, updatePlanAgents } = workflow;
+  const { initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks } = workflow;
   return {
-    snapshot, updateModelPolicy, inspectProvider, refreshProviders, updateProviderPreference,
+    snapshot, taskHistory, updateModelPolicy, inspectProvider, refreshProviders, updateProviderPreference,
     createStudio, updateStudio, assessDebtPolicy, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent,
-    createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, updatePlanAgents, setStudioRunning, importStudio, configureProject,
+    createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, importStudio, configureProject,
     previewCleanup, applyCleanup, cleanupState, recordEvidence, findEvidence, close,
     reviseBacklog: planning.reviseBacklog, closeSprint: planning.closeSprint, createPhase: planning.createPhase, updatePhase: planning.updatePhase,
     proposePhaseTransition: planning.proposePhaseTransition, decidePhaseTransition: planning.decidePhaseTransition,
