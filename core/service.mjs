@@ -22,6 +22,7 @@ const runtimes = ['codex', 'claude'];
 const modes = ['inherit', 'fixed', 'dynamic'];
 const roles = ['library', 'engineer', 'editor', 'artist', 'other'];
 const defaultDirector = { runtime: 'codex', model: '', effort: '' };
+const interfaceLanguages = {en:'English','zh-Hans':'简体中文',es:'Español',fr:'Français',ru:'Русский'};
 const restartable = ['queued', 'failed', 'interrupted'];
 const now = () => new Date().toISOString();
 const domains = ['plans', 'epics', 'stories', 'sprints', 'meetings', 'attempts', 'skills', 'knowledge', 'customSkills', 'evidence',
@@ -474,6 +475,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const tasks = list('tasks').map(visibleTask);
     return {
       modelPolicy,
+      appLocale: readAppLocale(),
       ...(inspectRuntime || Object.keys(providerPreferences()).length ? { providers: providerSnapshot() } : {}),
       notificationPreferences: readNotificationPreferences(),
       studios: studios.map((record) => {
@@ -545,11 +547,14 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const providers = Object.values(providerSnapshot());
     const preferred = providers.find(info => info.enabled && info.available && info.authenticated === true) ??
       providers.find(info => info.enabled);
+    const languageMode = input.languageMode === 'app' || !input.language ? 'app' : 'studio';
     const studio = {
       id: randomUUID(), lifecycle: 'draft',
       groomingPolicy: normalizeGroomingPolicy(input.groomingPolicy ?? { enabled: true, threshold: null, nextSprintCapacity: 5 }),
       ...studioSettings({ wipLimit: 5, debtPolicy: { ...normalizeDebtPolicy(), enabled: true },
-        director: { ...defaultDirector, runtime: preferred?.runtime ?? defaultDirector.runtime }, ...input }),
+        director: { ...defaultDirector, runtime: preferred?.runtime ?? defaultDirector.runtime }, ...input,
+        language:languageMode === 'app' ? interfaceLanguages[readAppLocale()] : input.language }),
+      languageMode,
       ...(preparedProject ? {projectGit:{enabled:true,targetRef:preparedProject.targetRef,profile:normalizeProjectProfile()}} : {}),
     };
     transaction(() => {
@@ -561,6 +566,9 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
 
   function updateStudio({ studioId, ...patch }) {
     const studio = read('studios', studioId, 'Студия');
+    const languageMode = patch.languageMode ?? (patch.language === undefined ? studio.languageMode ?? 'studio' : 'studio');
+    if (!['app','studio'].includes(languageMode)) throw new Error('Неизвестный режим языка отчётов.');
+    if (languageMode === 'app') patch.language = interfaceLanguages[readAppLocale()];
     const settings = studioSettings(patch, studio);
     if (settings.root !== studio.root) {
       const attachedTask = list('tasks').some((task) => task.studioId === studioId && (
@@ -572,7 +580,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       }
     }
     const result = changed(update('studios', {
-      ...studio, ...settings,
+      ...studio, ...settings, languageMode,
       ...(patch.debtPolicy !== undefined ? { debtAssessment: undefined } : {}),
     }));
     if (patch.schedule !== undefined && (hasWorkflowWork(result) || pending.get(studioId)?.size)) wake(studioId);
@@ -901,6 +909,23 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   function notifyInbox(item) {
     if (item?.kind) publish(notifications.notify, { title: item.title, body: item.body, kind: item.kind,
       version: item.version, studioId: item.studioId, inboxId: item.id });
+  }
+
+  function readAppLocale() {
+    const row = db.prepare("SELECT data FROM app_settings WHERE id='interfaceLocale'").get();
+    const value = row && JSON.parse(row.data);
+    return Object.hasOwn(interfaceLanguages,value) ? value : 'en';
+  }
+
+  function setAppLocale({locale}) {
+    if (!Object.hasOwn(interfaceLanguages, locale)) throw new Error('Unsupported interface language.');
+    transaction(()=>{
+      db.prepare("INSERT INTO app_settings VALUES ('interfaceLocale',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(locale));
+      for (const studio of list('studios')) {
+        if (studio.languageMode === 'app') update('studios',{...studio,language:interfaceLanguages[locale]});
+      }
+    });
+    return changed(locale);
   }
 
   function readNotificationPreferences() {
@@ -1474,7 +1499,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   refreshSchedules();
   const { initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks } = workflow;
   return {
-    snapshot, taskHistory, updateModelPolicy, inspectProvider, refreshProviders, updateProviderPreference,
+    snapshot, taskHistory, setAppLocale, updateModelPolicy, inspectProvider, refreshProviders, updateProviderPreference,
     createStudio, updateStudio, assessDebtPolicy, deleteStudio, wasStudioDeleted, refreshSchedules, addAgent, updateAgent,
     createTask, startTask, cancelTask, answerInbox, initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, importStudio, configureProject,
     previewCleanup, applyCleanup, cleanupState, recordEvidence, findEvidence, close,

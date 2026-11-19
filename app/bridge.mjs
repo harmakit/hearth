@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "assessDebtPolicy", "addAgent", "updateAgent", "createTask",
-  "updateProviderPreference", "updatePlanTasks", "taskHistory",
+  "updateProviderPreference", "updatePlanTasks", "taskHistory", "setAppLocale",
   "startTask", "cancelTask", "answerInbox",
   "initializeStudio", "startNextSprint", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
   "configureProject", "previewCleanup", "applyCleanup", "reviseBacklog", "closeSprint", "createPhase", "updatePhase",

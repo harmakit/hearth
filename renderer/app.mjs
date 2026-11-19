@@ -1,5 +1,6 @@
 import { agentActivity, actorState, buildRooms, languageChoices, pendingStudioPlan, roleDetails, roleNames, taskForAgent } from './workshop.mjs';
 import { paintRooms } from './room-art.mjs';
+import {localeNames, textFor} from './locale.mjs';
 import { taskFacts } from './owner-facts.mjs';
 import { publishedPaths, renderWork, registerRows } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
@@ -75,7 +76,8 @@ const lines = value => String(value ?? '').split(/\r?\n/).map(line => line.trim(
 const checkbox = (label, name, checked) => `<label class="checkbox-field"><input type="checkbox" name="${safe(name)}"${checked ? ' checked' : ''}> <span>${safe(label)}</span></label>`;
 const rowAction = (title, detail, actions) => `<div class="row settings-row legacy-row"><div><h3>${safe(title)}</h3><p class="muted">${safe(detail)}</p></div><div class="actions">${actions}</div></div>`;
 const fieldHint = text => `<p class="field-hint">${safe(text)}</p>`;
-const studioDate = value => Number.isFinite(new Date(value ?? '').getTime()) ? new Date(value).toLocaleString('ru-RU') : '';
+const ui = key => textFor(state.appLocale ?? 'en', key);
+const studioDate = value => Number.isFinite(new Date(value ?? '').getTime()) ? new Date(value).toLocaleString(state.appLocale ?? 'en') : '';
 
 function stored(key, value) {
   try {
@@ -179,6 +181,11 @@ function render() {
   const current = studio();
   const inStudio = Object.hasOwn(studioViews, view);
   const picker = $('#studio-select');
+  document.documentElement.lang = state.appLocale ?? 'en';
+  $('#locale-label').textContent = ui('language');
+  $('#app-locale').innerHTML = Object.entries(localeNames).map(([key,label])=>option(key,label,state.appLocale ?? 'en')).join('');
+  $('.studio-controls .picker span').textContent = ui('studio');
+  $('.studio-controls [data-open="studio"]').textContent = '＋ '+ui('newStudio');
   const focused = document.activeElement;
   const registryControl = focused?.matches('[data-registry-query]') ? '[data-registry-query]'
     : focused?.matches('[data-registry-stage]') ? '[data-registry-stage]' : '';
@@ -194,11 +201,11 @@ function render() {
   picker.innerHTML = state.studios.map(item => option(String(item.id), item.name, studioId)).join('') || '<option>Нет студий</option>';
   $('.studio-controls').hidden = !inStudio || !current;
   const openCount = entries().filter(item => item.status === 'open').length;
-  const navigation = group => Object.entries(group).map(([key, label]) => `<button type="button" data-view="${key}"${view === key ? ' aria-current="page"' : ''}>${glyph(key)}<span>${label}</span>${key === 'inbox' && openCount ? `<span class="nav-count">${openCount}</span>` : ''}</button>`).join('');
+  const navigation = group => Object.keys(group).map(key => `<button type="button" data-view="${key}"${view === key ? ' aria-current="page"' : ''}>${glyph(key)}<span>${ui(key)}</span>${key === 'inbox' && openCount ? `<span class="nav-count">${openCount}</span>` : ''}</button>`).join('');
   $('#workspace-navigation').innerHTML = navigation(workspaceViews);
   $('#navigation').hidden = !inStudio || !current;
   if (inStudio && current) $('#navigation').innerHTML = navigation(studioViews);
-  $('#breadcrumb').innerHTML = `<span>${safe(inStudio && current ? current.name : 'Hearth Studio')}</span><span aria-hidden="true">›</span><strong>${views[view]}</strong>`;
+  $('#breadcrumb').innerHTML = `<span>${safe(inStudio && current ? current.name : 'Hearth Studio')}</span><span aria-hidden="true">›</span><strong>${ui(view)}</strong>`;
   content.innerHTML = view === 'workspace' ? renderWorkspaceHome(state) : view === 'app-settings' ? appSettings() : current
     ? ({ overview, work, inbox, workshop, skills, settings })[view]()
     : heading(views[view]) + empty('Создайте студию', 'Опишите проект, выберите рабочую папку и подключение директора.', button('Создать студию', 'data-open="studio"'));
@@ -482,7 +489,8 @@ function appSettings() {
     </article>`;
   }).join('');
   const theme = document.documentElement.dataset.theme ?? 'system';
-  return heading('Настройки приложения', 'Общие параметры для всех студий') +
+  return heading(ui('app-settings'), ui('general')) +
+    `<label class="field"><span>${ui('language')}</span><select data-settings-locale>${Object.entries(localeNames).map(([id,label])=>option(id,label,state.appLocale ?? 'en')).join('')}</select></label>` +
     `<div class="stack settings"><section class="stack compact"><h2>Подключения</h2><div class="columns">${providers}</div></section>
       <section class="stack compact"><h2>Модели приложения</h2><div class="panel padded stack compact">
         ${rowAction('Политика по умолчанию', state.modelPolicy?.configured
@@ -595,6 +603,12 @@ function setDialogBusy(value) {
 function pathField(root = '', { label = 'Рабочая папка', name = 'root' } = {}) {
   return `<div class="folder-field">${input(label, name, root, 'readonly')}
     ${button('Выбрать папку', `data-folder="${name}"`, true)}</div>`;
+}
+
+function reportLanguageField(current) {
+  const value = !current || current.languageMode === 'app' ? '' : current.language;
+  const choices = [...new Set([...Object.values(localeNames), ...languageChoices(value)])].filter(Boolean);
+  return select('Язык отчётов', 'language', option('',ui('inherited'),value)+choices.map(name=>option(name,name,value)).join(''));
 }
 
 function languageField(label, name, value, inherit = false) {
@@ -1306,11 +1320,11 @@ function studioEditor(current) {
   dialogTo('Параметры студии',
     input('Название', 'name', current.name, 'required maxlength="120"') +
     pathField(current.root) + textarea('Что должно получиться?', 'brief', current.brief) +
-    languageField('Язык отчётов', 'language', current.language || 'Русский') +
+    reportLanguageField(current) +
     languageField('Язык материалов проекта', 'projectLanguage', current.projectLanguage || '', true),
     'Сохранить студию', async values => {
       if (!values.root) throw new Error('Выберите рабочую папку.');
-      await bridge.request('updateStudio', { studioId: current.id, ...values });
+      await bridge.request('updateStudio', { studioId: current.id, ...values, languageMode:values.language ? 'studio' : 'app' });
     });
 }
 
@@ -1338,7 +1352,7 @@ function newStudio() {
       <p class="muted">Hearth создаст пустой проект с локальной историей и отдельной веткой доставки. Аккаунт GitHub не требуется.</p></div>
       <div data-existing-folder hidden>${checkbox('После создания студии предложить подключить Git', 'offerGit', true)}
       <p class="muted">Подключение подтверждается отдельно. Существующие файлы и коммиты сохраняются.</p></div>` +
-      languageField('Язык отчётов', 'language', 'Русский') +
+      reportLanguageField() +
       languageField('Язык материалов проекта', 'projectLanguage', '', true)) +
     step(2, select('Подключение директора', 'runtime',
       Object.entries(runtimeNames).map(([id, label]) => option(id, providerState[id]?.enabled === false ? `${label} · отключён в приложении` : label, firstRuntime)).join('')) +
@@ -2450,6 +2464,22 @@ dialog.addEventListener('close', () => {
   if (opener?.isConnected) opener.focus();
   else content.focus();
   if (notificationTarget && !dialog.open) void goToNotification();
+});
+
+async function changeAppLocale(target) {
+  target.disabled = true;
+  try {
+    await bridge.request('setAppLocale',{locale:target.value});
+    await refresh();
+  } catch (error) {
+    target.value = state.appLocale ?? 'en';
+    notice(error.message,true);
+  } finally { target.disabled = false; }
+}
+
+$('#app-locale').addEventListener('change', ({target})=>void changeAppLocale(target));
+content.addEventListener('change', ({target})=>{
+  if (target.matches('[data-settings-locale]')) void changeAppLocale(target);
 });
 
 $('#studio-select').addEventListener('change', ({ target }) => {

@@ -68,3 +68,24 @@ test('the old empty startup list adopts defaults while explicit provider changes
   assert.equal(original.wipLimit, 1);
   assert.equal(original.groomingPolicy.enabled, false);
 });
+test('workspace locale persists and only changes report language for studios that inherit it', async t => {
+  const dir = await mkdtemp(fileURLToPath(new URL('../.tmp/locale-', import.meta.url)));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const dbPath = join(dir,'db');
+  let service = createStudioService({dbPath});
+  t.after(()=>service.close());
+  assert.equal(service.snapshot().appLocale,'en');
+  const book = service.createStudio({name:'Book', root:dir});
+  const film = service.createStudio({name:'Film', root:dir, language:'Français'});
+  assert.equal(book.language,'English');
+  assert.throws(()=>service.setAppLocale({locale:'unknown'}));
+  service.setAppLocale({locale:'ru'});
+  await service.close();
+  service = createStudioService({dbPath});
+  assert.equal(service.snapshot().appLocale,'ru');
+  assert.equal(service.snapshot().studios.find(s=>s.id===book.id).language,'Русский');
+  assert.equal(service.snapshot().studios.find(s=>s.id===film.id).language,'Français');
+  service.updateStudio({studioId:film.id, languageMode:'app'});
+  service.setAppLocale({locale:'zh-Hans'});
+  assert.equal(service.snapshot().studios.find(s=>s.id===film.id).language,'简体中文');
+});
