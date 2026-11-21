@@ -98,7 +98,7 @@ async function evidenceSnapshot(root, patterns, signal) {
   return files
 }
 
-export function createProjectChecks({ storageDir, prepareCommand } = {}) {
+export function createProjectChecks({ storageDir, prepareCommand, externalCheck } = {}) {
   return {
     async runChecks({ root, scratch, revision, profile, changedPaths, signal, network = false, verify, onCheck }) {
       const checks = selectProjectChecks(profile, changedPaths)
@@ -117,7 +117,12 @@ export function createProjectChecks({ storageDir, prepareCommand } = {}) {
         let evidencePaths = []
         try {
           checkSignal.throwIfAborted()
-          if (prepareCommand && process.platform !== 'win32') {
+          if (externalCheck) {
+            const result = await prepareScopedCommand(externalCheck, {command,args,root,network,evidenceGlobs,signal:checkSignal});
+            capture.append(result.output);
+            status = result.code===0 ? 'PASS' : 'FAIL';
+            detail = 'Isolated worker check exited with code '+result.code;
+          } else if (prepareCommand && process.platform !== 'win32') {
             const scoped = await prepareScopedCommand(prepareCommand, {
               command, args, root, scratch, network, signal: checkSignal,
             })

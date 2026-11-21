@@ -248,8 +248,11 @@ async function start() {
   const evidence = createEvidenceStore({ storageDir: path.join(dataDir, "evidence") });
   const worktrees = createGitWorktrees({ storageDir: path.join(dataDir, "worktrees"), validateRepository: validateRoot });
   const delivery = createGitDelivery({ storageDir: path.join(dataDir, "candidates") });
+  const workerHost = process.env.HEARTH_CHECK_WORKER_SSH;
+  const externalCheck = workerHost ? (await import("./isolated-check-executor.mjs")).createSshCheckExecutor(workerHost) : undefined;
   const checks = createProjectChecks({
     storageDir: path.join(dataDir, "check-logs"),
+    externalCheck,
     async prepareCommand({ command, args, root, scratch, network }) {
       const directories = (process.env.PATH ?? "").split(path.delimiter).filter(directory => path.isAbsolute(directory));
       for (const directory of directories) {

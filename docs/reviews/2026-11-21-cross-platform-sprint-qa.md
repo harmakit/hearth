@@ -1,5 +1,7 @@
 # Hearth 0.4.0 · Windows and Linux sprint acceptance
 
+[Follow-up after portability fixes](2026-11-21-cross-platform-sprint-retest.md).
+
 21 November 2026. The native Electron 44.11.4 ARM64 runtimes loaded the same release archive as the macOS build. Its SHA-256 was `cbc9c110c0c04f08579e84d5ab9b20f8d1367855d23fd4384a26ece596d83b0c`. The desktop scenario used the actual studio wizard, director plan and approval actions. Test projects and databases were disposable. No live provider account was used.
 
 | Environment | Verified stages | Observed blocker |

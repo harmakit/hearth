@@ -1,0 +1,14 @@
+# Windows and Linux sprint verification after portability fixes
+
+21 November 2026. The native Electron 44.11.4 ARM64 processes loaded a QA archive built from the new Hearth Studio sources. The desktop wizard, training and sprint state, review and acceptance UI, Git commands, worktrees, frozen candidates, integration, evidence storage and notification and power APIs ran on the guest system. The QA bootstrap injected a deterministic executor in place of LLM responses and disabled external material lookups. It installed neither Codex nor Claude.
+
+| Environment | Git | Result |
+|---|---|---|
+| Windows 11 ARM64 in Parallels | Portable Git 2.56.1 | Created a studio and initialized history. The delivery ref stayed at `f81be7204060be2e2e626a690eaf03a528ed0cf1` at acceptance. The final ref matched reviewed candidate `d59c83b4f7f39febbcce7a3aaca8c47c62701c98`, and the committed file matched the fixture. Hearth archived the diff and issued a native reveal request to Explorer. |
+| Ubuntu 24.04 ARM64 in OrbStack | Git 2.43.0 | Created a studio and initialized history. The delivery ref stayed at `183c44ad17eed3927d4b63a2fea01ba2c9c95bd6` at acceptance. The final ref matched reviewed candidate `1fdb773217d74f6304cf49569d9343050cba17c7`, and the committed file matched the fixture. Hearth archived the diff. |
+
+In each run, Electron invoked three native power-blocker starts and at least two stops and issued two notification show requests. The probe asserted the blocker state after each successful start or stop. Actual system suspend/resume handling and user-visible notification delivery were outside those assertions. The earlier [native file-manager tests](2026-11-19-owner-workspace-release.md#нативная-проверка-проводника-и-thunar) observed real Explorer and Thunar file selection.
+
+The Windows retry uncovered three Git-specific failures: Git returned slash-separated worktree paths, long detached checkout names exceeded a Git internal path limit, and Git for Windows could not create long candidate reference paths with default settings. The fixes normalize Git paths, shorten the transient detached checkout basename and enable `core.longpaths` only on Hearth's Git commands. Windows CLI discovery and the minimum Git version have regression tests.
+
+The new optional offline check worker ran a real subprocess in a disposable Docker container. The subprocess read its snapshot and wrote locally. A write outside the worker directory failed, the host's checkout and `.git` were absent, and a TCP connection failed with `ENETUNREACH`. That test used a local transport shim to the same container launcher. A live inter-host SSH deployment and LLM execution are separate, unverified paths. See the [worker deployment and supported modes](../superpowers/plans/2026-11-21-cross-platform-executor.md).
