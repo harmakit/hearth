@@ -3,6 +3,7 @@ import test from 'node:test';
 import {createSshCheckExecutor} from '../app/isolated-check-executor.mjs';
 
 test('offline worker refuses unsafe destination and unsupported evidence requests before dispatch',async()=>{
+  assert.throws(()=>createSshCheckExecutor('qa@worker.example',{config:'relative.conf'}),/absolute path/);
   assert.throws(()=>createSshCheckExecutor('-oProxyCommand'),/host/);
   assert.throws(()=>createSshCheckExecutor('host;cmd'),/host/);
   const execute=createSshCheckExecutor('qa@worker.example');

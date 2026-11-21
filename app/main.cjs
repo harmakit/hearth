@@ -249,7 +249,9 @@ async function start() {
   const worktrees = createGitWorktrees({ storageDir: path.join(dataDir, "worktrees"), validateRepository: validateRoot });
   const delivery = createGitDelivery({ storageDir: path.join(dataDir, "candidates") });
   const workerHost = process.env.HEARTH_CHECK_WORKER_SSH;
-  const externalCheck = workerHost ? (await import("./isolated-check-executor.mjs")).createSshCheckExecutor(workerHost) : undefined;
+  const externalCheck = workerHost ? (await import("./isolated-check-executor.mjs")).createSshCheckExecutor(workerHost, {
+    config: process.env.HEARTH_CHECK_WORKER_SSH_CONFIG,
+  }) : undefined;
   const checks = createProjectChecks({
     storageDir: path.join(dataDir, "check-logs"),
     externalCheck,

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 const maxBytes=16*1024*1024;
 const safeName=/^(?!\.\.?$)(?!\.git$)[^\\/:<>*"|?\u0000-\u001f]+$/iu;
@@ -39,14 +39,16 @@ async function snapshot(root,signal) {
   return files;
 }
 
-export function createSshCheckExecutor(host,{ssh='ssh'}={}) {
+export function createSshCheckExecutor(host,{ssh='ssh', config}={}) {
   if(!/^(?:[a-zA-Z0-9_.-]+@)?[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}$/u.test(host))throw Error('Invalid worker SSH host');
+  if(config!==undefined && !isAbsolute(config))throw Error('Worker SSH config must use an absolute path');
   return async ({root,command,args,network,signal,evidenceGlobs})=>{
     if(network || evidenceGlobs?.length)throw Error('The isolated check worker currently supports offline checks with log output.');
     const files=await snapshot(root,signal);
     signal.throwIfAborted();
     const answer=await new Promise((resolve,reject)=>{
-      const child=spawn(ssh,['-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ClearAllForwardings=yes','--',host,'hearth-check-worker'],{shell:false,windowsHide:true,signal,stdio:['pipe','pipe','ignore']});
+      const configArgs=config ? ['-F',config] : [];
+      const child=spawn(ssh,[...configArgs,'-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ClearAllForwardings=yes','--',host,'hearth-check-worker'],{shell:false,windowsHide:true,signal,stdio:['pipe','pipe','ignore']});
       const parts=[];
       let size=0;
       child.once('error',reject);

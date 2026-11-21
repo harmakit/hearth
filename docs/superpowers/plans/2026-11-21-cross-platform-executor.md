@@ -10,6 +10,8 @@ Approved direction on 21 November 2026. Keep the desktop host authoritative for 
 
 ## Offline project checks
 
+Set `HEARTH_CHECK_WORKER_SSH_CONFIG` to an absolute OpenSSH configuration path when the worker has dedicated keys, a pinned host key, or an alternate port. Omitting it uses the standard OpenSSH configuration. [Native SSH verification](../../reviews/2026-11-21-ssh-worker-native-qa.md).
+
 Hearth accepts a trusted SSH host alias in `HEARTH_CHECK_WORKER_SSH`. Provision that alias with a verified host key. Give the restricted SSH account a forced command that launches `node /absolute/path/to/scripts/hearth-check-worker.mjs`. Keep `isolated-check-worker.mjs` beside the launcher. Set `HEARTH_WORKER_IMAGE` on that host to a locally present image pinned by digest. The image must contain Node.js at `/usr/local/bin/node` and the executables used by the project's checks. Docker runs each check without a host mount, without networking and as an unprivileged user. Standard output and exit status are returned to the desktop.
 
 Select only trusted worker operators. The worker receives the ordinary files under the current candidate directory, up to 4,000 files and 16 MiB, with Git metadata excluded. The project checkout should contain only material approved for that worker. The transport rejects requests for network access or generated evidence files. Worker mode keeps the check log and leaves the candidate unchanged. A required check fails closed when configuration, authentication, isolation or the response is invalid.
