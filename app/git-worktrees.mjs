@@ -1,12 +1,14 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 
 const oidPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const idPattern = /^[0-9a-f]{64}$/;
 const taskBranchPrefix = 'refs/heads/hearth/';
+export const minimumGitVersion = '2.43.0';
 const gitConfig = [
+  ...(process.platform === 'win32' ? ['core.longpaths=true'] : []),
   'core.hooksPath=/dev/null',
   'core.fsmonitor=false',
   'core.attributesFile=/dev/null',
@@ -53,6 +55,26 @@ function runGit(repository, args, options = {}, config = []) {
   });
 }
 
+export function verifyGitVersion(output) {
+  const version = /^git version (\d+\.\d+\.\d+)(?:\.|\s|$)/u.exec(output)?.[1];
+  const order = version?.localeCompare(minimumGitVersion, 'en', { numeric:true });
+  if (order === undefined || order < 0) {
+    throw Object.assign(new Error(`Для рабочих копий и доставки нужен Git ${minimumGitVersion} или новее. ` +
+      (version ? `Обнаружен Git ${version}.` : 'Версию Git определить не удалось.')), {code:'GIT_VERSION_UNSUPPORTED'});
+  }
+  return version;
+}
+
+export async function requireProjectGit(directory) {
+  let output;
+  try { output = await runGit(directory, ['--version']); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    throw new Error(`Установите Git ${minimumGitVersion} или новее и добавьте его в PATH.`, {cause:error});
+  }
+  return verifyGitVersion(output);
+}
+
 export async function git(repository, args, options) {
   const keys = await runGit(repository, [
     'config', '--null', '--name-only', '--get-regexp',
@@ -77,12 +99,15 @@ function taskIdentity(studioId, taskId) {
 }
 
 function gitLine(output) {
-  return output.endsWith('\n') ? output.slice(0, -1) : output;
+  return output.replace(process.platform === 'win32' ? /\r?\n$/u : /\n$/u, '');
 }
+
+export const nativeGitPath = (path, platform = process.platform) => platform === 'win32' ? win32.normalize(path) : path;
 
 async function registeredEntry(repository, path) {
   const entries = (await git(repository, ['worktree', 'list', '--porcelain', '-z'])).split('\0\0');
-  return entries.map(item => item.split('\0')).find(fields => fields[0] === `worktree ${path}`);
+  return entries.map(item => item.split('\0')).find(([entry]) =>
+    entry.startsWith('worktree ') && nativeGitPath(entry.slice(9)) === path);
 }
 
 async function pathStat(path) {
@@ -168,6 +193,7 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     if (approved === false || (typeof approved === 'string' && await realpath(approved) !== canonical)) {
       throw new Error('Repository is outside the approved project directory');
     }
+    await requireProjectGit(canonical);
     const gitCommonDir = await verifiedDirectory(join(canonical, '.git'));
     const topLevel = gitLine(await git(canonical, ['rev-parse', '--show-toplevel']));
     const discoveredCommon = gitLine(await git(canonical, [

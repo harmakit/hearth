@@ -6,12 +6,21 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRuntimes } from '../runtimes/index.mjs';
+import { runtimePath, runtimeCandidates } from '../runtimes/executable.mjs';
 import { scopedCommand } from '../runtimes/scope.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/runtime-cli.mjs', import.meta.url));
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const request = { runtime: 'codex', projectRoot, prompt: 'Test prompt', model: 'fixture-model', effort: 'high' };
 const testScratch = join(projectRoot, '.tmp');
+
+test('native Windows CLI candidates preserve drive letters and never invoke command scripts', () => {
+  const directories = runtimePath({ Path: '"C:\\Program Files\\Agents";relative;D:\\CLI' }, 'win32');
+  assert.deepEqual(directories, ['C:\\Program Files\\Agents', 'D:\\CLI']);
+  assert.deepEqual(runtimeCandidates('claude', directories, 'win32'), [
+    'C:\\Program Files\\Agents\\claude.exe', 'D:\\CLI\\claude.exe',
+  ]);
+});
 
 function adapter(mode = 'success', options = {}, tracePath = '') {
   function binary(runtime) {

@@ -3,9 +3,21 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { git } from '../app/git-worktrees.mjs';
+import { git, nativeGitPath, verifyGitVersion } from '../app/git-worktrees.mjs';
 import { createCommandRouter } from '../app/bridge.mjs';
 import { createStudioService } from '../core/service.mjs';
+
+test('Git version floor accepts platform builds and rejects the older Ubuntu worktree command', () => {
+  assert.equal(verifyGitVersion('git version 2.43.0'), '2.43.0');
+  assert.equal(verifyGitVersion('git version 2.56.1.windows.1'), '2.56.1');
+  assert.throws(() => verifyGitVersion('git version 2.34.1'), { code: 'GIT_VERSION_UNSUPPORTED' });
+  assert.throws(() => verifyGitVersion('git unavailable'), { code: 'GIT_VERSION_UNSUPPORTED' });
+});
+
+test('Git for Windows porcelain paths use the native separator when checking registrations', () => {
+  assert.equal(nativeGitPath('C:/QA space/Книга/worktree', 'win32'), 'C:\\QA space\\Книга\\worktree');
+  assert.equal(nativeGitPath('/work/file\\name', 'linux'), '/work/file\\name');
+});
 
 test('studio setup creates local history only for an explicitly new project folder', async t => {
   // The positive case must live outside a Git checkout. Only disposable project data is written here.

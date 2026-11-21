@@ -1,11 +1,12 @@
 import { access, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { capture } from './process.mjs';
 import { inspectCodex, runCodex } from './codex.mjs';
 import { inspectClaude, runClaude } from './claude.mjs';
 import { executionScope, scopedCommand } from './scope.mjs';
+import { runtimeCandidates, runtimePath } from './executable.mjs';
 
 const providers = {
   codex: {
@@ -39,9 +40,17 @@ function electronEnvironment(source, runtime) {
     delete env.OPENAI_API_KEY;
     delete env.CODEX_API_KEY;
   }
-  const home = source.HOME ?? homedir();
-  const paths = (source.PATH ?? '').split(':').filter(isAbsolute);
-  env.PATH = [...new Set([...paths, join(home, '.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'])].join(':');
+  const paths = runtimePath(source);
+  if (process.platform === 'win32') {
+    for (const name of ['SystemRoot', 'WINDIR', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP']) {
+      const value = Object.entries(source).find(([key]) => key.toUpperCase() === name.toUpperCase())?.[1];
+      if (value !== undefined) env[name] = value;
+    }
+  } else {
+    paths.push(join(source.HOME ?? homedir(), '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin');
+    if (process.platform === 'darwin') paths.push('/opt/homebrew/bin');
+  }
+  env.PATH = [...new Set(paths)].join(delimiter);
   return env;
 }
 
@@ -70,8 +79,7 @@ export function createRuntimes({
 
   async function locate(runtime, env) {
     if (binaries[runtime]) return binaries[runtime];
-    for (const folder of env.PATH.split(':')) {
-      const command = join(folder, runtime);
+    for (const command of runtimeCandidates(runtime, runtimePath(env))) {
       try {
         await access(command, constants.X_OK);
         if ((await stat(command)).isFile()) return { command };

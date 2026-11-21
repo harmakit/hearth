@@ -1,5 +1,5 @@
 import { access, mkdir, realpath, stat } from "node:fs/promises";
-import { git } from "./git-worktrees.mjs";
+import { git, requireProjectGit } from "./git-worktrees.mjs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const serviceCommands = new Set([
@@ -84,6 +84,7 @@ async function newProjectFolder(parentPath, requestedName, protectedRoots) {
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (dirname(dir) === dir) break;
   }
+  await requireProjectGit(parent);
   await mkdir(root); // Exclusive creation protects pre-existing directories, even empty ones.
   try {
     await git(root, ['init','--template=','--initial-branch=main','.']);

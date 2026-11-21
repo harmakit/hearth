@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
+import { nativeGitPath } from "./git-worktrees.mjs";
 
 const oidPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const gitOptions = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
@@ -66,7 +67,10 @@ export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, 
 
   async function gitWorktrees(item) {
     const text = await git(item.repository, ["worktree", "list", "--porcelain", "-z"]);
-    return text.split("\0\0").filter(Boolean).map(block => block.split("\0"));
+    return text.split("\0\0").filter(Boolean).map(block => {
+      const [entry, ...metadata] = block.split("\0");
+      return [entry.startsWith("worktree ") ? "worktree " + nativeGitPath(entry.slice(9)) : entry, ...metadata];
+    });
   }
 
   async function gitState(item) {
@@ -79,7 +83,7 @@ export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, 
     const registered = trees.find((lines, index) => index > 0 && lines[0] === `worktree ${item.path}`);
     if (!registered || !registered.includes(`branch ${item.branchRef}`) ||
         await realpath(item.path) !== item.path || await realpath(item.repository) !== item.repository ||
-        (await git(item.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim() !== item.gitCommonDir) {
+        nativeGitPath((await git(item.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).replace(/\r?\n$/u,"")) !== item.gitCommonDir) {
       return { reasons: ["registration-mismatch"] };
     }
     const reasons = [];

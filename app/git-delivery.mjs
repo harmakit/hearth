@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { sameDeliveryRevision } from '../core/delivery.mjs';
-import { git as defaultGit } from './git-worktrees.mjs';
+import { git as defaultGit, nativeGitPath } from './git-worktrees.mjs';
 
 const oidPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const localBranch = /^refs\/heads\/[^\s]+$/u;
-const checkoutName = /^[a-f0-9]{64}-[a-f0-9-]{36}$/;
+const checkoutName = /^(?:[a-f0-9]{64}-[a-f0-9-]{36}|[a-f0-9]{24}-[a-f0-9]{12})$/;
 const targetCheckoutName = /^target-([1-9][0-9]{0,9})-[a-f0-9-]{36}$/;
 const commitOptions = [
   '-c', 'user.name=Hearth Studio',
@@ -69,7 +69,7 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
     const records = [];
     const fields = (await run(repository, ['worktree', 'list', '--porcelain', '-z'], { signal })).split('\0');
     for (const field of fields) {
-      if (field.startsWith('worktree ')) records.push({ path: field.slice(9) });
+      if (field.startsWith('worktree ')) records.push({ path: nativeGitPath(field.slice(9)) });
       else if (field.startsWith('branch ')) records.at(-1).branchRef = field.slice(7);
       else if (field === 'detached') records.at(-1).detached = true;
     }
@@ -217,7 +217,10 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
     const paths = await changedPaths(worktree, revision, signal);
     await mkdir(workingDirectory, { recursive: true, mode: 0o700 });
     const parent = await realpath(workingDirectory);
-    const root = join(parent, `${key}-${randomUUID()}`);
+    // Git for Windows also embeds this basename under the repository's .git/worktrees.
+    const id = randomUUID();
+    const name = process.platform==='win32' ? `${key.slice(0,24)}-${id.replaceAll('-','').slice(0,12)}` : `${key}-${id}`;
+    const root = join(parent, name);
     const commitOid = revision.candidateOid ?? revision.headOid;
     try {
       await run(worktree.repository, ['worktree', 'add', '--detach', '--', root, commitOid], { signal });
@@ -235,7 +238,7 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
   async function releaseCandidate({ worktree, root }) {
     const key = worktreeKey(worktree);
     if (typeof root !== 'string' || !isAbsolute(root)
-      || !new RegExp(`^${key}-[a-f0-9-]{36}$`).test(basename(root))) {
+      || !new RegExp(`^(?:${key}-[a-f0-9-]{36}|${key.slice(0,24)}-[a-f0-9]{12})$`).test(basename(root))) {
       throw deliveryError('INVALID_CHECKOUT', 'Only a disposable delivery checkout can be released');
     }
     const parent = await realpath(workingDirectory).catch((error) => {
