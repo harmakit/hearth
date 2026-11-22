@@ -384,6 +384,30 @@ test('invalid dependency graphs fail planning before creating studio records', a
   assert.equal(snapshot.inbox[0].kind, 'error');
 });
 
+test('planning repairs one invalid director response and accepts criteria lists', async t => {
+  const plan = structuredClone(draft);
+  plan.story.acceptance = ['Readable outline'];
+  plan.tasks[0].criteria = ['Has a heading', 'Names the time period'];
+  const prompts = [];
+  const service = createStudioService({dbPath: ':memory:', run: async ({prompt}) => {
+    prompts.push(prompt);
+    const response = structuredClone(plan);
+    if (prompts.length === 1) response.tasks[0].criteria = [{ missing: 'criterion text' }];
+    return {text: JSON.stringify(response)};
+  }});
+  t.after(() => service.close());
+  const {id: studioId} = service.createStudio({name: 'Criteria', root: '/project'});
+  service.initializeStudio({studioId});
+  const result = await until(service.snapshot, view => view.plans.length || view.studios[0].lifecycle === 'error');
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /previous plan/i);
+  assert.match(prompts[1], /First/);
+  assert.equal(result.plans[0].tasks[0].criteria, '- Has a heading\n- Names the time period');
+  assert.equal(result.plans[0].story.acceptance, '- Readable outline');
+  assert.deepEqual(result.inbox.map(row => row.kind), ['plan']);
+  assert.equal(result.attempts.filter(row => row.purpose === 'plan').length, 1);
+});
+
 test('a revised initialization survives restart and later plans can run without approval', async (t) => {
   const dbPath = database(t);
   const calls = [];

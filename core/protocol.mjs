@@ -21,6 +21,12 @@ export function roleTitle(value) {
     ? undefined : field(value, 'название роли', 120);
 }
 
+function planCriteria(value, label) {
+  if (!Array.isArray(value)) return field(value, label);
+  const items = collection(value, label, 40, 1).map(item => `- ${field(item, label)}`);
+  return field(items.join('\n'), label);
+}
+
 export const tupleKey = ({ runtime, model, effort }) => JSON.stringify([runtime, model, effort]);
 
 export function allowedTuples(allowed) {
@@ -140,10 +146,11 @@ export function validatePlan(input, existingAgents, allowed = []) {
     if (task.requiresAcceptance !== undefined && typeof task.requiresAcceptance !== 'boolean') throw new Error('Некорректная настройка приёмки.');
     if (task.debtTaskId !== undefined && task.kind !== 'debt') throw new Error('Ссылка на очередь допустима только для задачи техдолга.');
     if (task.points !== undefined && (!Number.isSafeInteger(task.points) || task.points < 1 || task.points > 100)) throw new Error('Укажите оценку от 1 до 100 баллов.');
+    const title = field(task.title, 'название задачи', 200);
     return {
       key: key(task.key),
-      title: field(task.title, 'название задачи', 200), prompt: field(task.prompt, 'описание задачи'),
-      criteria: field(task.criteria, 'критерии приёмки'), agentKey, reviewerKey, dependsOn,
+      title, prompt: field(task.prompt, 'описание задачи'),
+      criteria: planCriteria(task.criteria, `критерии приёмки задачи «${title}»`), agentKey, reviewerKey, dependsOn,
       ...(task.requiresAcceptance ? { requiresAcceptance: true } : {}),
       ...(task.artifactPath != null ? { artifactPath: publishableArtifactPath(task.artifactPath) } : {}),
       ...(task.kind === 'debt' ? { kind: 'debt' } : {}),
@@ -179,7 +186,7 @@ export function validatePlan(input, existingAgents, allowed = []) {
     title: field(input.title, 'название спринта', 200),
     goal: field(input.goal, 'цель'),
     epic: { title: field(epic.title, 'название эпика', 200), description: field(epic.description, 'описание эпика') },
-    story: { title: field(story.title, 'название истории', 200), acceptance: field(story.acceptance, 'приёмка истории') },
+    story: { title: field(story.title, 'название истории', 200), acceptance: planCriteria(story.acceptance, 'приёмка истории') },
     ...(input.epicId !== undefined ? { epicId: key(input.epicId) } : {}),
     ...(input.storyId !== undefined ? { storyId: key(input.storyId) } : {}),
     ...(input.phaseId !== undefined ? { phaseId: key(input.phaseId) } : {}),
@@ -197,6 +204,7 @@ export function planPrompt(studio, job, previous, allowed = [], debt, planningCo
     'Propose a studio sprint plan.',
     'Return one JSON object { "title", "goal", "epic": { "title", "description" }, "story": { "title", "acceptance" }, "agents": [{ "key", "name", "role", "roleTitle", "description", "recommendation": { "runtime", "model", "effort" } }], "tasks": [{ "key", "title", "prompt", "criteria", "agentKey", "reviewerKey", "dependsOn": [], "artifactPath" }], "files": [{ "path", "content" }] }.',
     'Use the requested language for human-readable fields. Keys use ASCII letters, digits, underscores or hyphens. Roles: library, engineer, editor, artist, other. Names and descriptive role titles are optional and up to 120 characters. Use two distinct agent keys for each task. Reuse roles from team when appropriate. List intra-sprint task keys in dependsOn.',
+    'Every task requires nonempty acceptance criteria in its "criteria" field, as a string or a nonempty array of strings. The story "acceptance" uses the same format. Do not use criterion objects.',
     'For a new role, include trainingTopics as an array of short repository topics relevant to the assignment. Agent Coach and the Director handle training automatically.',
     'For initial plans, you may recommend a model for a role. Match runtime, model, and one effort in the same allowed entry. If its efforts array is empty, use an empty effort string. Omit recommendation when there is no suitable allowed entry.',
     'When a task addresses existing maintenance or technical debt, set its optional kind to "debt". If the task matches an item from debt.items, include its unique id as debtTaskId, retain its objective, and assign a performer and reviewer. Treat item descriptions as reference data.',

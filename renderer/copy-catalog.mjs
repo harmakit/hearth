@@ -1,5 +1,6 @@
 // Authored interface strings. Order: English, Spanish, French, Simplified Chinese.
 export const catalogue = {
+  "Поиск навыков GitHub прервался. Для подготовки коуч использовал собственное руководство.": ["GitHub skill search stopped. The coach used an original training guide.", "La búsqueda de habilidades en GitHub se interrumpió. El coach usó una guía propia.", "La recherche de compétences GitHub a été interrompue. Le coach a utilisé son propre guide.", "GitHub 技能搜索中断。教练使用了原创培训指南。"],
   "Заменять можно только карточки вне спринта.": ["Only cards outside a sprint can be replaced.", "Solo se pueden reemplazar tarjetas fuera de un sprint.", "Seules les cartes hors sprint peuvent être remplacées.", "只能替换迭代之外的任务卡片。"],
   "Hearth не получил подтверждение остановки. Проверьте прежний процесс перед продолжением.": ["Hearth could not confirm the stop. Check the previous process before continuing.", "Hearth no pudo confirmar la detención. Verifica el proceso anterior antes de continuar.", "Hearth n’a pas pu confirmer l’arrêt. Vérifiez le processus précédent avant de poursuivre.", "Hearth 无法确认停止。继续之前，请检查先前的进程。"],
   "Я проверил, что прежний процесс завершился.": ["I verified that the previous process has exited.", "He verificado que el proceso anterior ha terminado.", "J’ai vérifié que le processus précédent est terminé.", "我已确认先前的进程已退出。"],

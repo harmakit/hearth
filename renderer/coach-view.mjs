@@ -55,7 +55,8 @@ export function renderTrainingDetails(task, studio, tasks) {
   const topics = training?.topics?.length ? copy`<p>Темы · ${safe(training.topics.join(', '))}</p>` : '';
   const warningList = [...(training?.warnings ?? []), ...(training?.materialWarnings ?? [])];
   const warnings = warningList.length ? `<ul class="skill-warnings">${warningList.map(warning => `<li>${safe(warning)}</li>`).join('')}</ul>` : '';
-  const projectGuide = training?.searchOutcome === 'no-match' ? copy('<p>Подходящих навыков на GitHub не найдено. Коуч подготовил руководство под задачу.</p>') : '';
+  const projectGuide = training?.searchOutcome === 'no-match' ? copy('<p>Подходящих навыков на GitHub не найдено. Коуч подготовил руководство под задачу.</p>') :
+    training?.searchOutcome === 'error' ? copy('<p>Поиск навыков GitHub прервался. Для подготовки коуч использовал собственное руководство.</p>') : '';
   const guide = training?.guide ? copy`<details class="advanced"><summary>Руководство</summary><p class="long-text">${safe(training.guide)}</p></details>` : '';
   const exercise = training?.exercise ? copy`<details class="advanced"><summary>Упражнение</summary><p class="long-text">${safe(training.exercise)}</p></details>` : '';
   const visibleMaterials = (training?.materials ?? []).filter(material => training.selectedMaterialIds?.includes(material.id));

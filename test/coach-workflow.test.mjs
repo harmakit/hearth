@@ -88,6 +88,30 @@ test('retrying a coach rejected by the director continues the approved parallel 
   assert.deepEqual(writes, ['reports/first.md']);
 });
 
+test('automatic sprint training still requires an exercise and review when GitHub returns no usable skills', async t => {
+  const plan = structuredClone(filePlan);
+  plan.agents[0].trainingTopics = ['writing'];
+  const reason = 'GitHub repository search failed (rate limit reached).';
+  const service = createStudioService({
+    dbPath: ':memory:', findSkills: async () => ({candidates: [], warnings: [reason]}),
+    writeArtifact: async ({path}) => ({path}),
+    run: async request => request.purpose === 'plan' ? json(plan) : fileSprintReply(request),
+  });
+  t.after(() => service.close());
+  const {id: studioId} = service.createStudio({root: '/project', name: 'External lookup failure', wipLimit: 5, sprintReview: 'off'});
+  service.initializeStudio({studioId});
+  const pending = await until(service.snapshot, view => view.plans[0]?.status === 'pending');
+  service.decidePlan({planId: pending.plans[0].id, decision: 'approve'});
+  const result = await until(service.snapshot, view => view.sprints[0]?.status === 'completed' || view.training.some(task => task.status === 'failed'));
+  const training = result.training.find(task => task.training.topics.includes('writing'));
+  assert.equal(training.stage, 'done');
+  assert.equal(training.training.searchOutcome, 'error');
+  assert.deepEqual(training.training.warnings, [reason]);
+  assert.deepEqual(training.training.selectedSkillIds, []);
+  assert.ok(training.training.exercise && training.review);
+  assert.equal(result.tasks.find(task => task.key === 'report').stage, 'done');
+});
+
 test('a saved studio left idle after coaching resumes its approved sprint on restart', async t => {
   const dbPath = database(t);
   const review = Promise.withResolvers();
@@ -251,6 +275,15 @@ test('a manual hire is gated by coach bootstrap, trainee exercise, and Director 
   assert.equal(bootstrap.training.exercise, 'Practiced with one heading and two sections.');
   const bootstrapReview = calls.find(({ prompt }) => prompt.startsWith('Review the studio agent'));
   assert.match(bootstrapReview.prompt, /Practiced with one heading and two sections/);
+  assert.match(bootstrapReview.prompt, /Empty source and skill lists are expected/);
+  const bootstrapExercise = calls.find(({purpose}) => purpose === 'training-exercise');
+  const exerciseCase = prompt => JSON.parse(prompt.split('\n\n').at(-1)).exerciseCase;
+  assert.deepEqual(exerciseCase(bootstrapExercise.prompt), exerciseCase(bootstrapReview.prompt));
+  assert.equal(exerciseCase(bootstrapReview.prompt).fictional, true);
+  const roleReview = calls.find(({prompt}) => prompt.startsWith('Review the studio agent') && !prompt.includes('"bootstrap": true'));
+  assert.match(roleReview.prompt, /full production deliverable is outside this exercise/);
+  const bootstrapGuide = calls.find(({prompt}) => prompt.startsWith('Prepare a studio agent') && prompt.includes('"bootstrap": true'));
+  assert.match(bootstrapGuide.prompt, /studio brief is project context/);
   assert.equal(snapshot.skills[0].commit, candidate.commit);
   assert.equal(snapshot.studios[0].agents.find(({ id }) => id === hire.id).trainingStatus, 'ready');
   assert.match(calls.find(({ prompt }) => prompt.startsWith('Work on')).prompt, /Pinned instructions for outlining/);

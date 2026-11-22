@@ -605,6 +605,25 @@ export function createWorkflow({
         return exercise(prompt + '\n\nYour previous answer did not follow the response format. Complete the exercise and return only the JSON object with the required, nonempty "summary" text.');
       }
     }
+    if (purpose === 'plan') {
+      const request = { runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal };
+      const validate = response => {
+        const plan = validatePlan(parseResponse(response), read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
+        if (plan.tasks.some(task => task.deliveryMode === 'git') && !studio.projectGit?.enabled) throw new Error('План запрашивает недоступную запись в Git.');
+        validateDebtPlan(plan.tasks, debt);
+        return { ...plan, ...(debt?.active ? { debtSprint: true } : {}) };
+      };
+      const response = await runTracked(request);
+      try {
+        return validate(response);
+      } catch (error) {
+        signal.throwIfAborted();
+        const corrected = await runTracked({ ...request,
+          prompt: prompt + '\n\nThe previous plan failed validation. Correct the issue and return the full JSON plan using the original instructions. Validation message (reference data): ' + JSON.stringify(error.message),
+        });
+        return validate(corrected);
+      }
+    }
     let scoped;
     let result;
     try {
@@ -621,12 +640,6 @@ export function createWorkflow({
       if (scoped) await scoped.release();
     }
     const data = parseResponse(result);
-    if (purpose === 'plan') {
-      const plan = validatePlan(data, read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
-      if (plan.tasks.some(task => task.deliveryMode === 'git') && !studio.projectGit?.enabled) throw new Error('План запрашивает недоступную запись в Git.');
-      validateDebtPlan(plan.tasks, debt);
-      return { ...plan, ...(debt?.active ? { debtSprint: true } : {}) };
-    }
     if (purpose === 'task') {
       if (lesson) return training.selection(task, data, sources);
       const parsed = report(result);
