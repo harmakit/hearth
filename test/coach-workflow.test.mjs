@@ -12,6 +12,21 @@ import { trainingReply } from './fixtures/training.mjs';
 const commit = '1'.repeat(40);
 const candidate = { id: 'candidate-1', repo: 'publisher/tool', commit, path: 'tool/SKILL.md', title: 'Outline', stars: 15_000, license: 'MIT', url: `https://github.com/publisher/tool/blob/${commit}/tool/SKILL.md`, content: 'Pinned instructions for outlining.' };
 const json = (value) => ({ text: JSON.stringify(value) });
+const filePlan = {
+  title: 'File sprint', goal: 'Publish one report',
+  epic: { title: 'Reports', description: 'Report project' }, story: { title: 'Report', acceptance: 'Review the file' },
+  agents: [{ key: 'writer', role: 'editor', description: 'Write' }, { key: 'reader', role: 'other', description: 'Review' }],
+  tasks: [{ key: 'report', title: 'Report', prompt: 'Write the report', criteria: 'File exists', agentKey: 'writer', reviewerKey: 'reader', artifactPath: 'reports/first.md' }],
+};
+
+function fileSprintReply(request) {
+  return trainingReply(request) ?? json({
+    plan: filePlan,
+    task: { summary: 'Report written', artifact: '# Report', artifactPath: 'reports/first.md' },
+    review: { pass: true, summary: 'File verified' },
+    director: { action: 'finish', summary: 'Sprint complete' },
+  }[request.purpose]);
+}
 
 function database(t) {
   const base = fileURLToPath(new URL('../.tmp', import.meta.url));
@@ -49,6 +64,60 @@ test('a blocked coach can retry from its existing task even when only one launch
   assert.equal(recovered.studios[0].agents[0].trainingStatus,'ready');
   assert.equal(recovered.inbox.find(row=>row.taskId===taskId).status,'resolved');
   assert.equal(reviews,4);
+});
+
+test('retrying a coach rejected by the director continues the approved parallel sprint and publishes its file', async t => {
+  let reviews = 0;
+  const writes = [];
+  const service = createStudioService({ dbPath: ':memory:', writeArtifact: async ({ path }) => (writes.push(path), { path }), run: async request => {
+    if (request.prompt.startsWith('Review the studio agent') && request.prompt.includes('"bootstrap": true')) {
+      return json({ pass: ++reviews > 3, summary: 'Review of the coach exercise' });
+    }
+    return fileSprintReply(request);
+  } });
+  t.after(() => service.close());
+  const studio = service.createStudio({ root: '/project', name: 'Parallel coach retry', wipLimit: 5, sprintReview: 'off' });
+  const coachTaskId = studio.agents.find(agent => agent.systemRole === 'coach').trainingTaskId;
+  service.initializeStudio({ studioId: studio.id });
+  const { plans: [plan] } = await until(service.snapshot, view => view.plans.length);
+  service.decidePlan({ planId: plan.id, decision: 'approve' });
+  await until(service.snapshot, view => view.tasks.some(task => task.id === coachTaskId && task.failedReviews === 3));
+  service.startTask({ taskId: coachTaskId });
+  await until(service.snapshot, view => view.sprints[0]?.status === 'completed');
+  assert.equal(reviews, 4);
+  assert.deepEqual(writes, ['reports/first.md']);
+});
+
+test('a saved studio left idle after coaching resumes its approved sprint on restart', async t => {
+  const dbPath = database(t);
+  const review = Promise.withResolvers();
+  const initial = createStudioService({ dbPath, run: async request => {
+    if (request.prompt.startsWith('Review the studio agent') && request.prompt.includes('"bootstrap": true')) return review.promise;
+    return fileSprintReply(request);
+  } });
+  t.after(() => { review.resolve(json({ pass: true, summary: 'Approved' })); return initial.close(); });
+  const studio = initial.createStudio({ root: '/project', name: 'Saved sprint', wipLimit: 5, sprintReview: 'off' });
+  initial.initializeStudio({ studioId: studio.id });
+  const { plans: [plan] } = await until(initial.snapshot, view => view.plans.length);
+  initial.decidePlan({ planId: plan.id, decision: 'approve' });
+  await until(initial.snapshot, view => view.attempts.some(attempt => attempt.purpose === 'review' && attempt.status === 'running'));
+  initial.setStudioRunning({ studioId: studio.id, action: 'pause' });
+  review.resolve(json({ pass: true, summary: 'Approved' }));
+  await until(initial.snapshot, view => view.tasks.some(task => task.training?.bootstrap && task.stage === 'done'));
+  await initial.close();
+
+  const db = new DatabaseSync(dbPath);
+  db.prepare("UPDATE studios SET data=json_set(data,'$.lifecycle','idle','$.activity','Обучение завершено','$.workflowJob',NULL,'$.manualPaused',json('false')) WHERE id=?").run(studio.id);
+  db.exec("DELETE FROM dispatch_jobs WHERE json_extract(data,'$.status')='queued'");
+  db.close();
+
+  const reopened = createStudioService({ dbPath, writeArtifact: async ({ path }) => ({ path }), run: async request => {
+    assert.equal(request.prompt.includes('"bootstrap": true'), false, 'completed coaching is not replayed');
+    return fileSprintReply(request);
+  } });
+  t.after(() => reopened.close());
+  const done = await until(reopened.snapshot, view => view.sprints[0]?.status === 'completed');
+  assert.equal(done.tasks.find(task => task.key === 'report').artifactPath, 'reports/first.md');
 });
 
 test('resuming the studio keeps the failed coach and its request until an explicit retry', async t=>{

@@ -1596,6 +1596,9 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     conversations.replyToMessage({ messageId: message.id, attemptId: message.attemptId, text: 'Обработка сообщения прервалась. Отправьте его повторно при необходимости.', outcome: 'interrupted' });
   }
   interruptUnfinishedAttempts({ restore: true });
+  transaction(() => {
+    for (const studio of list('studios').map(visibleStudio)) workflow.resumeSprintAfterTraining(studio);
+  });
   refreshSchedules();
   const { initializeStudio, decidePlan, updatePlanAgents, updatePlanTasks } = workflow;
   return {

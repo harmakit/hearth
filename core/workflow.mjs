@@ -7,6 +7,7 @@ import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 import { buildTaskContext } from './checkpoints.mjs';
 
 const now = () => new Date().toISOString();
+const trainingFinished = 'Обучение завершено';
 
 function artifactPathFor(task, proposedPath) {
   const path = proposedPath ?? task.artifactTarget ?? task.artifactPath;
@@ -181,6 +182,13 @@ export function createWorkflow({
         })));
       if (task && !hasHeldWorkflow(studio.id)) routeTask(studio, task);
     }
+  }
+
+  function resumeSprintAfterTraining(studio) {
+    if (studio.lifecycle !== 'idle' || studio.activity !== trainingFinished || studio.workflowJob
+      || studio.manualPaused || studio.importedPaused || studio.archivedAt || studio.projectDetached
+      || dispatcher.jobs(studio.id).some(job => ['queued', 'running', 'reconcile'].includes(job.status))) return;
+    activateQueuedSprint({ ...studio, lifecycle: 'active' });
   }
 
   function startStandaloneTraining(studio, task) {
@@ -689,7 +697,8 @@ export function createWorkflow({
     }
     const paused = studio.lifecycle === 'paused' || studio.manualPaused;
     const resultStudio = paused && job.returnLifecycle === 'draft' ? { ...studio, resumeDraft: true } : studio;
-    return state(resultStudio, paused ? 'paused' : job.returnLifecycle ?? 'idle', paused ? 'Студия на паузе' : job.returnActivity ?? 'Обучение завершено');
+    const settled = state(resultStudio, paused ? 'paused' : job.returnLifecycle ?? 'idle', paused ? 'Студия на паузе' : job.returnActivity ?? trainingFinished);
+    if (task.training.bootstrap) resumeSprintAfterTraining(settled);
   }
 
   function retrain(studio, next, decision) {
@@ -1130,7 +1139,8 @@ export function createWorkflow({
       }
       const current = update('tasks', { ...task, status: 'queued', error: '', failedReviews: 0, updatedAt: now() });
       if (previous?.status === 'failed') return schedule(studio, jobPayload(previous), 'Повтор рабочего шага');
-      return routeTask(studio, current);
+      const { resumeTaskId, resumeSprint, returnLifecycle, returnActivity } = previous ?? {};
+      return routeTask(studio, current, task.kind === 'train' ? { resumeTaskId, resumeSprint, returnLifecycle, returnActivity } : {});
     });
     queue(studio.id);
     return changed(result);
@@ -1159,6 +1169,6 @@ export function createWorkflow({
 
   return {
     initializeStudio, startNextSprint, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, resumeInbox, startStandaloneTraining, startGitTask,
-    queue, hasDispatchWork, activeWork, reconcileWork, resolveReconciliation, cancelTask, retryTask,
+    queue, hasDispatchWork, activeWork, reconcileWork, resolveReconciliation, cancelTask, retryTask, resumeSprintAfterTraining,
   };
 }

@@ -706,7 +706,7 @@ function workshop() {
       return `<tr><td>${actionFor(nameFor(person),'owner-agent',person.id??'')}</td><td>${safe(titleFor(person))}</td><td>${badge(...activityFor(person))}</td><td>${safe(configText(person) || modeNames[person.mode] || '—')}</td><td>${person.id ? roleReadiness(person,currentTasks) : '—'}</td><td>${work ? actionFor(work.title,'task',work.id) : '—'}</td><td>${past.length}</td></tr>`;
     }).join('')}</tbody></table></div>` :
 copy`<div class="work-map" role="group" aria-label="Карта мастерской">
-      ${rooms.map(zone => copy`<section class="work-room"><div class="room-header"><h2>${zone.name}</h2><span aria-label="Участников в комнате: ${zone.desks.length}">${zone.desks.length}</span></div>
+      ${rooms.map(zone => copy`<section class="work-room" data-zone="${safe(zone.id)}"><div class="room-header"><h2>${zone.name}</h2><span aria-label="Участников в комнате: ${zone.desks.length}">${zone.desks.length}</span></div>
         <div class="room-floor"><canvas class="room-art" width="200" height="126" data-room="${zone.id}" aria-hidden="true"></canvas>
           <div class="room-occupants">${zone.desks.map(({ agent: person, props }) => renderAgent(person, true, props)).join('')}</div>
         </div></section>`).join('')}

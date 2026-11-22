@@ -9,6 +9,16 @@ const send = message => console.log(JSON.stringify(message));
 const fixtureSandbox = cwd => ['-p', `(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath ${JSON.stringify(cwd)}))`];
 function response(prompt) {
   if(prompt.includes('QA-FORCED-ERROR')) throw new Error('QA intentional provider failure');
+  if (prompt.startsWith('Propose') && prompt.includes('QA-COACH-SPRINT')) return {
+    title:'План с подготовкой коуча', goal:'Записать два файла',
+    epic:{ title:'Сборник', description:'Временный проект.' }, story:{ title:'Глава', acceptance:'Файлы записаны.' },
+    agents:[{key:'writer',role:'editor',description:'Пишет'}, {key:'reader',role:'other',description:'Проверяет'}, {key:'artist',role:'artist',description:'Иллюстрирует'}],
+    tasks:[
+      {key:'chapter',title:'Подготовить главу',prompt:'QA-CHAPTER-FILE',criteria:'Глава записана',agentKey:'writer',reviewerKey:'reader',artifactPath:'reports/chapter.md'},
+      {key:'art',title:'Описать иллюстрацию',prompt:'QA-ART-FILE',criteria:'Описание записано',agentKey:'artist',reviewerKey:'reader',dependsOn:['chapter'],artifactPath:'reports/art.md'},
+    ],
+    files:[],
+  };
   if (prompt.startsWith('Propose')) return {
     title:'План QA', goal:'Проверить Git-доставку',
     epic:{ title:'Git-доставка',description:'Только фикстура.' }, story:{title:'Результат QA',acceptance:'Файл проверен.'},
@@ -19,7 +29,8 @@ function response(prompt) {
     files:[],
   };
   if (prompt.startsWith('Prepare a studio agent')) return { summary:prompt.includes('QA-COACH-REJECT')?'QA-COACH-REJECT':'Учебный план.',
-    selectedSkillIds:[], guide:prompt.includes('QA-COACH-EXERCISE')?'QA-COACH-EXERCISE':'Проверьте документ.' };
+    selectedSkillIds:[], guide:prompt.includes('QA-COACH-EXERCISE')?'QA-COACH-EXERCISE':
+      prompt.includes('QA-COACH-SPRINT')?'QA-COACH-SPRINT':'Проверьте документ.' };
   if (prompt.startsWith('Practice the studio assignment')) {
     if (prompt.includes('QA-COACH-EXERCISE') && prompt.includes('"bootstrap": true')) {
       const countFile = join(process.env.TMPDIR, 'qa-coach-exercise-count');
@@ -34,12 +45,20 @@ function response(prompt) {
     if (!prompt.includes('QA: не допускать навык до проверки лицензии')) return { pass:false, summary:'QA: проверяющий не получил упражнение.' };
     return { pass:true, summary:'QA: директор проверил решение по лицензии.' };
   }
+  if (prompt.startsWith('Review the studio agent') && prompt.includes('QA-COACH-SPRINT') && prompt.includes('"bootstrap": true')) {
+    const countFile = join(process.env.TMPDIR, 'qa-coach-sprint-review-count');
+    const call = Number(readFileSync(countFile, { encoding: 'utf8', flag: 'a+' })) + 1;
+    writeFileSync(countFile, String(call));
+    return { pass:call > 3, summary:call > 3 ? 'Директор принял упражнение.' : 'Уточните доказательства в упражнении.' };
+  }
   if (prompt.includes('QA-CODEX-QUESTION')) {
     return prompt.includes('Подтверждаю QA T-17') ? { summary:'Codex: QA T-17 подтверждён.', artifact:'# QA ответ\n' }
       : { summary:'Codex: черновик.', question:'Подтвердить QA T-17?' };
   }
   if (prompt.startsWith('Review')) return prompt.includes('QA-COACH-REJECT')
     ? {pass:false,summary:'QA: приведите доказательство применимости навыка.'} : {pass:true, summary:'Независимая проверка пройдена.' };
+  if (prompt.startsWith('Work on') && prompt.includes('QA-CHAPTER-FILE')) return { summary:'Глава готова.', artifact:'# Глава', artifactPath:'reports/chapter.md' };
+  if (prompt.startsWith('Work on') && prompt.includes('QA-ART-FILE')) return { summary:'Описание готово.', artifact:'# Иллюстрация', artifactPath:'reports/art.md' };
   if (prompt.includes('QA-GIT-EDIT')) {
     if (!process.cwd().includes('/worktrees/')) throw Error('Fixture requires Hearth worktree: ' + process.cwd());
     const child = spawnSync('/usr/bin/sandbox-exec', [...fixtureSandbox(process.cwd()), '/bin/sh', '-c', 'printf "# QA deliverable\\n" > delivery.md']);

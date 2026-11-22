@@ -1,18 +1,18 @@
 const roomPalette = {
-  director: { floor: '#76513c', seam: '#61432f', rug: '#744439', edge: '#a16b54' },
-  library: { floor: '#674f3d', seam: '#554133', rug: '#474a63', edge: '#827f97' },
-  workshop: { floor: '#705a42', seam: '#5b4a38', rug: '#466159', edge: '#76978a' },
-  atelier: { floor: '#846047', seam: '#6f503e', rug: '#856548', edge: '#bba177' },
-  common: { floor: '#71533e', seam: '#624432', rug: '#765843', edge: '#a7825f' },
+  director: { accent: '#cfed9e', dim: '#718761', inset: '#252e29' },
+  library: { accent: '#a7d0ff', dim: '#6987a5', inset: '#242d38' },
+  workshop: { accent: '#91d8c8', dim: '#578b85', inset: '#212e31' },
+  atelier: { accent: '#c8b7ea', dim: '#8677a5', inset: '#2a2936' },
+  common: { accent: '#b9c5d4', dim: '#778594', inset: '#282e36' },
 };
 
 const deskPalette = {
-  plan: '#edc683',
-  books: '#e6a559',
-  paper: '#f0d69b',
-  terminal: '#85dbab',
-  easel: '#b4c8a6',
-  notebook: '#e6b783',
+  plan: '#cfed9e',
+  books: '#a7d0ff',
+  paper: '#d9e2ec',
+  terminal: '#91d8c8',
+  easel: '#c8b7ea',
+  notebook: '#bdc9d7',
 };
 
 const skins = [
@@ -62,71 +62,95 @@ function paint(canvas, scene) {
   });
 }
 
-function furniture(rect, room) {
-  const cabinet = (x, width, shades) => {
-    rect(x + 2, 14, width, 30, '#3f2d25');
-    rect(x, 11, width, 29, '#8a573e');
-    rect(x + 3, 14, width - 6, 21, '#503426');
-    shades.forEach((color, i) => rect(x + 6 + i * 6, 19 - (i % 2) * 3, 4, 14 + (i % 2) * 3, color));
-    rect(x, 34, width, 3, '#b48355');
+function furniture(rect, room, { accent, dim, inset }) {
+  const frame = (x, y, width, height) => {
+    rect(x + 2, y + 2, width, height, '#12161c');
+    rect(x, y, width, height, '#484f59');
+    rect(x + 1, y + 1, width - 2, height - 2, '#181e26');
   };
-  const plant = (x, y) => {
-    rect(x + 2, y + 12, 10, 8, '#9e6749');
-    rect(x + 1, y + 10, 12, 3, '#bc825b');
-    rect(x + 6, y + 3, 3, 9, '#405b44');
-    rect(x + 2, y + 3, 5, 5, '#6b8b52');
-    rect(x + 8, y, 6, 5, '#85a267');
+  const shelves = (x, width) => {
+    frame(x, 8, width, 27);
+    for (let i = 0; i < Math.floor((width - 6) / 6); i++) {
+      const height = 7 + (i * 5) % 11;
+      rect(x + 4 + i * 6, 29 - height, 4, height, [dim, '#687383', '#536657', '#8b809e'][i % 4]);
+      rect(x + 4 + i * 6, 30 - height, 4, 1, '#a8b4bf');
+    }
+    rect(x + 2, 29, width - 4, 2, '#687483');
   };
-  const picture = (x, body) => {
-    rect(x, 6, 30, 19, '#39291f');
-    rect(x + 2, 8, 26, 15, '#bc926b');
-    rect(x + 4, 10, 22, 11, body);
-    rect(x + 6, 16, 17, 3, '#856d54');
-    rect(x + 15, 11, 5, 4, '#e3bc81');
+  const light = (x) => {
+    rect(x, 7, 4, 24, '#161b22');
+    rect(x + 1, 9, 1, 12, accent);
+    rect(x + 1, 23, 1, 3, dim);
+  };
+  const picture = (x, body, variant) => {
+    frame(x, 8, 27, 24);
+    rect(x + 4, 12, 19, 16, body);
+    rect(x + 7 + variant * 3, 14, 5, 5, accent);
+    rect(x + 5, 23, 9 + variant * 3, 3, '#313a47');
+    rect(x + 13, 21, 8, 2, '#a5a8bc');
   };
   if (room === 'library') {
-    cabinet(16, 54, ['#ac6652', '#806e51', '#6b8069', '#a58456', '#747894', '#93624c', '#9c815e']);
-    cabinet(129, 52, ['#6c8290', '#a67555', '#8a6a8b', '#9b9b6f', '#a86850', '#b29261', '#718368']);
+    shelves(19, 62);
+    shelves(119, 62);
+    light(98);
   } else if (room === 'workshop') {
-    rect(12, 13, 55, 23, '#3b302b');
-    rect(14, 15, 51, 19, '#a18b68');
-    rect(19, 18, 3, 13, '#53645c');
-    rect(25, 19, 10, 3, '#727d76');
-    rect(41, 17, 3, 14, '#86533d');
-    rect(50, 19, 9, 8, '#53645c');
-    cabinet(142, 35, ['#b08657', '#82988d', '#536554', '#ad774f']);
+    frame(23, 8, 85, 26);
+    for (let y = 12; y < 30; y += 4) {
+      for (let x = 27; x < 104; x += 4) rect(x, y, 1, 1, '#414c59');
+    }
+    rect(35, 15, 3, 13, '#9daebc');
+    rect(43, 17, 16, 2, dim);
+    rect(69, 13, 11, 10, inset);
+    rect(70, 16, 8, 2, accent);
+    shelves(135, 43);
+    light(119);
   } else if (room === 'atelier') {
-    picture(18, '#5c6b65');
-    picture(68, '#9a6460');
-    picture(141, '#57617b');
+    picture(31, '#536070', 0);
+    picture(87, '#626385', 1);
+    picture(143, '#4d6a67', 2);
+  } else if (room === 'director') {
+    frame(48, 8, 104, 26);
+    rect(51, 11, 98, 20, inset);
+    for (let column = 0; column < 3; column++) {
+      const x = 56 + column * 30;
+      rect(x, 14, 22, 2, column ? dim : accent);
+      rect(x, 19, 22, 3, '#454f5b');
+      rect(x, 25, 14 + column * 3, 3, '#454f5b');
+    }
+    light(27);
+    light(169);
   } else {
-    picture(30, room === 'director' ? '#6b795e' : '#7c656b');
-    cabinet(139, 42, ['#ac6652', '#806e51', '#6b8069', '#a58456', '#747894']);
+    picture(37, '#4f6460', 1);
+    shelves(108, 51);
+    light(83);
   }
-  plant(room === 'library' ? 93 : 177, 30);
 }
 
 function paintRoom(canvas) {
   const room = canvas.dataset.room;
-  const palette = roomPalette[room];
+  const palette = roomPalette[room] ?? roomPalette.common;
   paint(canvas, rect => {
-    rect(0, 0, 200, 126, palette.floor);
-    for (let y = 39; y < 126; y += 11) {
-      rect(0, y, 200, 1, palette.seam);
-      for (let x = y % 3 * 10; x < 200; x += 35) rect(x, y, 1, 10, palette.seam);
+    rect(0, 0, 200, 126, '#20262e');
+    for (let y = 48; y < 126; y += 13) {
+      rect(0, y, 200, 1, '#2e3640');
+      for (let x = 12 + (y % 2) * 10; x < 200; x += 22) rect(x, y, 1, 13, '#2b333d');
     }
-    rect(0, 0, 200, 35, '#584131');
-    rect(0, 0, 200, 5, '#3b2b23');
-    rect(0, 32, 200, 3, '#3d2c21');
-    rect(0, 35, 200, 2, '#9a6f51');
-    rect(17, 52, 166, 66, '#3a3027');
-    rect(20, 53, 160, 62, palette.edge);
-    rect(24, 57, 152, 54, palette.rug);
-    for (let x = 27; x < 175; x += 6) {
-      rect(x, 54, 2, 1, '#d7a67a');
-      rect(x, 113, 2, 1, '#d7a67a');
+    rect(0, 0, 200, 41, '#292f38');
+    rect(0, 0, 200, 3, '#232832');
+    for (const x of [11, 95, 189]) rect(x, 3, 1, 37, '#353d48');
+    rect(0, 38, 200, 1, palette.dim);
+    rect(0, 40, 200, 3, '#181d24');
+    rect(17, 51, 166, 64, '#3a424e');
+    rect(18, 52, 164, 62, palette.inset);
+    rect(21, 55, 158, 56, '#252c35');
+    for (let y = 61; y < 111; y += 8) {
+      for (let x = 26; x < 179; x += 8) rect(x, y, 1, 1, '#343c47');
     }
-    furniture(rect, room);
+    for (const x of [18, 174]) {
+      rect(x, 52, 8, 1, palette.dim);
+      rect(x, 113, 8, 1, palette.dim);
+    }
+    furniture(rect, room, palette);
   });
 }
 
@@ -165,40 +189,40 @@ function portrait(rect, actor) {
 
 function deskProps(rect, kind, frame, accent) {
   if (kind === 'terminal') {
-    rect(4, 13, 12, 11, '#26342e');
-    rect(6, 15, 8, 7, '#415d50');
+    rect(4, 13, 12, 11, '#68798a');
+    rect(5, 14, 10, 9, '#17232e');
     rect(7, 16, 5, 1, accent);
     rect(7, 18, 3 + frame % 3, 1, accent);
-    rect(8 + frame, 20, 1, 1, '#d9ebc2');
-    rect(9, 24, 3, 2, '#4a554e');
-    rect(13, 26, 10, 2, '#403839');
-    rect(14, 26, 8, 1, '#b39b88');
+    rect(8 + frame, 20, 1, 1, '#e1f0fa');
+    rect(9, 24, 3, 2, '#728495');
+    rect(13, 26, 10, 2, '#222831');
+    rect(14, 26, 8, 1, '#a7b6c3');
   } else if (kind === 'easel') {
-    rect(5, 12, 11, 13, '#594034');
-    rect(6, 12, 9, 10, '#edd4b0');
+    rect(5, 12, 11, 13, '#3c4451');
+    rect(6, 12, 9, 10, '#dae2ee');
     rect(7, 17, 4, 3, accent);
-    rect(12, 14, 2, 3 + frame, '#b96e50');
-    rect(8, 24, 6, 2, '#866146');
+    rect(12, 14, 2, 3 + frame, '#6579a5');
+    rect(8, 24, 6, 2, '#788795');
   } else if (kind === 'books') {
-    rect(5, 22, 9, 4, '#996348');
+    rect(5, 22, 9, 4, '#596d84');
     rect(6, 19, 8, 3, accent);
-    rect(9, 23, 12, 5, '#5d4b64');
-    rect(9, 22, 5, 4, '#eed7b3');
-    rect(15, 22, 5, 4, '#f5e0bd');
-    rect(14, 23, 1, 4, '#b99b7d');
-    if (frame) rect(14, 22 - frame, 5 - frame, frame, '#fff1d5');
+    rect(9, 23, 12, 5, '#444d66');
+    rect(9, 22, 5, 4, '#d7e0ec');
+    rect(15, 22, 5, 4, '#ecf0f3');
+    rect(14, 23, 1, 4, '#8190a4');
+    if (frame) rect(14, 22 - frame, 5 - frame, frame, '#f3f7fc');
   } else {
-    if (kind === 'plan') rect(6, 20, 8, 2, '#80978a');
+    if (kind === 'plan') rect(6, 20, 8, 2, '#80988d');
     rect(7, 23, 13, 5, accent);
-    rect(8, 24, 6, 1, '#987b65');
-    rect(8, 26, 3 + frame, 1, '#987b65');
+    rect(8, 24, 6, 1, '#617384');
+    rect(8, 26, 3 + frame, 1, '#617384');
   }
 }
 
 function thought(rect, actor, action, frame) {
-  const paper = frame === 2 ? '#fff1bb' : '#e6cfab';
-  rect(7, 3, 8, 1, '#5c4736');
-  rect(5, 4, 12, 8, '#5c4736');
+  const paper = frame === 2 ? '#e3f1cb' : '#cbd6e2';
+  rect(7, 3, 8, 1, '#3e4755');
+  rect(5, 4, 12, 8, '#3e4755');
   rect(7, 4, 8, 8, paper);
   rect(6, 5, 10, 6, paper);
   rect(15, 12, 2, 1, paper);
@@ -210,13 +234,13 @@ function thought(rect, actor, action, frame) {
     rect(12, 7, 1, 1, '#4e6855');
     rect(13, 6, 1, 1, '#4e6855');
   } else if (actor.seed % 2) {
-    rect(10, 5, 2, 1, '#8a5b31');
-    rect(9, 6, 4, 2, frame === 1 ? '#e69e45' : '#b77637');
-    rect(10, 8, 2, 1, '#8a5b31');
-    rect(10, 10, 2, 1, '#8a5b31');
-    if (frame === 2) rect(14, 6, 1, 1, '#a27549');
+    rect(10, 5, 2, 1, '#55697c');
+    rect(9, 6, 4, 2, frame === 1 ? '#8ea85d' : '#627d47');
+    rect(10, 8, 2, 1, '#55697c');
+    rect(10, 10, 2, 1, '#55697c');
+    if (frame === 2) rect(14, 6, 1, 1, '#6b8551');
   } else {
-    for (let i = 0; i <= frame; i++) rect(8 + i * 3, 8, 1, 1, '#8a5b31');
+    for (let i = 0; i <= frame; i++) rect(8 + i * 3, 8, 1, 1, '#55697c');
   }
 }
 
@@ -234,12 +258,16 @@ function paintDesk(canvas, actor, action, frame, lift) {
   const [skin, shadow] = actor.skin;
   const workFrame = action === 'working' ? frame : 0;
   paint(canvas, rect => {
-    rect(7, 31, 3, 6, '#4e352a');
-    rect(29, 31, 3, 6, '#4e352a');
+    rect(3, 36, 34, 2, '#151a20');
+    rect(6, 31, 3, 6, '#5e6a77');
+    rect(29, 31, 3, 6, '#5e6a77');
+    rect(9, 32, 20, 2, '#272e36');
     portrait((x, y, w, h, color) => rect(x, y - lift, w, h, color), actor);
-    rect(4, 24, 31, 8, '#302522');
-    rect(4, 24, 30, 5, '#a3714d');
-    rect(4, 29, 30, 2, '#c58d5f');
+    rect(3, 24, 33, 8, '#21272f');
+    rect(4, 24, 31, 5, '#535f6b');
+    rect(4, 28, 31, 1, '#8491a1');
+    rect(5, 30, 10, 1, accent);
+    rect(27, 30, 6, 1, '#535f6b');
     deskProps(rect, kind, workFrame, accent);
 
     const [leftX, leftY] = (handPositions[kind] ?? handPositions.writing)[workFrame];
@@ -255,7 +283,7 @@ function paintDesk(canvas, actor, action, frame, lift) {
       rect(workFrame === 2 ? 20 : 22, workFrame === 2 ? 26 : 25, 3, 2, skin);
     } else if (kind === 'easel' || !handPositions[kind]) {
       const toolY = kind === 'easel' ? leftY - 1 : leftY + 1;
-      rect(leftX - 3, toolY, 4, 1, '#543b35');
+      rect(leftX - 3, toolY, 4, 1, '#293542');
     }
 
     if (action === 'planning' || action === 'review') {

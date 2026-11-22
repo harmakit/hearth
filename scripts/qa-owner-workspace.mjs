@@ -204,6 +204,43 @@ try {
     await desktop.click('[data-view=workspace]');
     console.log('PASS ответ коуча → ошибка без ложного статуса → повтор → проверка директором → завершение зависимой задачи');
   }
+  if (process.env.HEARTH_QA_COACH_SPRINT === '1') {
+    await appLocale('ru');
+    await choose('#theme-select', 'dark');
+    const root = join(run, 'coach-sprint-project');
+    await mkdir(root);
+    const studio = await desktop.request('createStudio', { root, name:'QA: первый спринт', brief:'QA-COACH-SPRINT', wipLimit:5, sprintReview:'off' });
+    const coachId = studio.agents.find(agent => agent.systemRole === 'coach').trainingTaskId;
+    await desktop.request('initializeStudio', { studioId:studio.id });
+    const plan = await until(snapshot => snapshot.plans.find(row => row.studioId === studio.id && row.status === 'pending'), 'Coach sprint plan');
+    await desktop.request('decidePlan', { planId:plan.id, decision:'approve' });
+    await until(snapshot => snapshot.tasks.find(row => row.id === coachId && row.failedReviews === 3 && row.status === 'failed'), 'Director returned the coach three times');
+    await assert.rejects(readFile(join(root, 'reports', 'chapter.md')), { code:'ENOENT' });
+    await desktop.click('[data-view=workspace]');
+    await desktop.click('[data-enter-studio="' + studio.id + '"]');
+    await desktop.click('main [data-retry-from-inbox="' + coachId + '"]');
+    await until(snapshot => snapshot.sprints.find(row => row.studioId === studio.id && row.status === 'completed'), 'Coach retry continues the original sprint', 100_000);
+    assert.match(await readFile(join(root, 'reports', 'chapter.md'), 'utf8'), /# Глава/);
+    assert.match(await readFile(join(root, 'reports', 'art.md'), 'utf8'), /# Иллюстрация/);
+
+    await desktop.click('main [data-view=workshop], [data-view=workshop]');
+    if (await desktop.evaluate(() => !document.querySelector('.work-map'))) await desktop.click('[data-team-toggle]');
+    assert.ok(await desktop.evaluate(() => ['director','library','atelier'].every(zone => {
+      const canvas = document.querySelector('.work-room[data-zone="' + zone + '"] canvas[data-room]');
+      const [r,g,b,a] = canvas.getContext('2d').getImageData(4, 10, 1, 1).data;
+      return a === 255 && b > g && g > r;
+    })));
+    await shot('graphite-workshop');
+    await desktop.click('main .map-pin:first-child');
+    await eventually(() => desktop.evaluate(() => !document.querySelector('#owner-inspector').hidden), 'Map opens the agent profile');
+    await desktop.click('[data-owner-close]');
+    await desktop.click('[data-team-toggle]');
+    await desktop.request('deleteStudio', { studioId:studio.id, confirmation:studio.name });
+    await desktop.click('[data-view=app-settings]');
+    await choose('#theme-select', 'system');
+    await desktop.click('[data-view=workspace]');
+    console.log('PASS повтор коуча продолжает тот же спринт и публикует файлы, графитовая карта открывает профили агентов');
+  }
   if(process.env.HEARTH_QA_POLISH==='1'){
     await desktop.click('[data-view=app-settings]');
     await choose('#theme-select','dark');
