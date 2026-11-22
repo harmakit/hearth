@@ -8,7 +8,7 @@ import { createTraining, defaultSkillMinStars, roleObjective } from './training.
 import { nextScheduleWindow, normalizeSchedule, withinSchedule } from './schedule.mjs';
 import { assessDebtPrompt, debtAssessment, normalizeDebtPolicy } from './debt.mjs';
 import { normalizeProjectProfile } from './project-profile.mjs';
-import { createDispatcher } from './dispatcher.mjs';
+import { createDispatcher, unconfirmedProviderStop } from './dispatcher.mjs';
 import { createCheckpointStore } from './checkpoints.mjs';
 import { createPlanning, normalizeGroomingPolicy } from './planning.mjs';
 import { assertAssignable, createRoster, normalizeStaffing } from './roster.mjs';
@@ -425,7 +425,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   }
 
   function activeCount(studioId) {
-    return Number(active.has(studioId)) + parallelManual(studioId).length + (workflow.activeWork?.(studioId).length ?? 0);
+    return Number(active.has(studioId)) + parallelManual(studioId).length + dispatcher.activeAttempts(studioId).length;
   }
 
   function hasQueuedWork(studio) {
@@ -449,8 +449,8 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     return list('tasks').some((task) => task.studioId === studioId && task.workflowManaged && task.status === 'waiting');
   }
 
-  function waitingForSchedule(studio, date) {
-    return !activeCount(studio.id) && !isPaused(studio) && !withinSchedule(studio.schedule, date) && Boolean(hasQueuedWork(studio));
+  function waitingForSchedule(studio, date, activeAttempts = activeCount(studio.id)) {
+    return !activeAttempts && !isPaused(studio) && !withinSchedule(studio.schedule, date) && Boolean(hasQueuedWork(studio));
   }
 
   function list(table) {
@@ -488,7 +488,8 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const modelPolicy = readModelPolicy();
     const studios = list('studios').map(visibleStudio);
     const agentsByStudio = new Map(studios.map(({ id, agents }) => [id, agents]));
-    const tasks = list('tasks').map(visibleTask);
+    const tasks = list('tasks').map(visibleTask).map(task => workflow.interruptedJob(task)
+      ? { ...task, canRestartInterrupted: true } : task);
     const activeWorkflow = new Map();
     for (const { studioId } of dispatcher.activeAttempts()) {
       activeWorkflow.set(studioId, (activeWorkflow.get(studioId) ?? 0) + 1);
@@ -500,9 +501,10 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       notificationPreferences: readNotificationPreferences(),
       studios: studios.map((record) => {
         const { workflowJob, manualPaused, resumeDraft, importedPaused, ...studio } = record;
+        const activeAttempts = Number(active.has(studio.id)) + parallelManual(studio.id).length + (activeWorkflow.get(studio.id) ?? 0);
         return { ...studio, effectiveAllowed: modelPolicyFor(record, modelPolicy).allowed, manualPaused: Boolean(manualPaused),
-          scheduleWaiting: waitingForSchedule(record, date), nextScheduleAt: nextScheduleWindow(record.schedule, date)?.toISOString(),
-          activeAttempts: Number(active.has(studio.id)) + parallelManual(studio.id).length + (activeWorkflow.get(studio.id) ?? 0),
+          scheduleWaiting: waitingForSchedule(record, date, activeAttempts), nextScheduleAt: nextScheduleWindow(record.schedule, date)?.toISOString(),
+          activeAttempts,
         };
       }),
       tasks,
@@ -868,6 +870,17 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     if (start) wake(studioId);
   }
 
+  function scheduledManualQueue(studioId) {
+    const queue = pending.get(studioId);
+    if (!queue) return;
+    const status = db.prepare("SELECT json_extract(data, '$.status') AS status FROM tasks WHERE id = ? AND studio_id = ?");
+    for (const taskId of queue) {
+      if (status.get(taskId, studioId)?.status !== 'scheduled') queue.delete(taskId);
+    }
+    if (queue.size) return queue;
+    pending.delete(studioId);
+  }
+
   function startTask({ taskId, confirmLegacy }) {
     let task = read('tasks', taskId, 'Задача');
     const ownerStudio=read('studios',task.studioId,'Студия');
@@ -883,7 +896,9 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     }
     if (task.workflowManaged) {
       const studio = read('studios', task.studioId, 'Студия');
-      if (task.status === 'failed' && (studio.wipLimit > 1 || task.training?.bootstrap)) return workflow.retryTask(studio, task);
+      if (task.status === 'interrupted' || (task.status === 'failed' && (studio.wipLimit > 1 || task.training?.bootstrap))) {
+        return workflow.retryTask(studio, task);
+      }
       if (task.kind === 'train' && task.status === 'queued' && !task.sprintId && !studio.workflowJob
         && !studio.manualPaused && !active.has(studio.id) && ['draft', 'idle', 'active'].includes(studio.lifecycle)) {
         return workflow.startStandaloneTraining(studio, task);
@@ -892,6 +907,10 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       return setStudioRunning({ studioId: studio.id, action: 'resume' });
     }
     if (!restartable.includes(task.status)) throw new Error('Задача сейчас недоступна для запуска.');
+    if (manualParallel.has(taskId) || active.get(task.studioId)?.id === taskId ||
+        dispatcher.jobs(task.studioId).some(job => job.taskId === taskId && job.status === 'reconcile')) {
+      throw new Error('Прежний запуск ещё выполняется или ждёт сверки.');
+    }
     if (pending.get(task.studioId)?.has(taskId)) return task;
     if (task.legacyWorktreeReview && confirmLegacy !== true) {
       throw new Error('Подтвердите сверку рабочего дерева и изменений перед запуском.');
@@ -991,6 +1010,28 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   function notifyInbox(item) {
     if (item?.kind) publish(notifications.notify, { title: item.title, body: item.body, kind: item.kind,
       version: item.version, studioId: item.studioId, inboxId: item.id });
+  }
+
+  function resolveReconciliation(payload) {
+    const attempt = read('attempts', payload.attemptId, 'Запуск');
+    if (dispatcher.findJob(attempt.jobId)?.purpose !== 'manual-task') return workflow.resolveReconciliation(payload);
+    const task = read('tasks', attempt.taskId, 'Задача');
+    const studio = read('studios', task.studioId, 'Студия');
+    if (studio.archivedAt || studio.projectDetached || (task.stage === 'replaced' && payload.decision !== 'discard')) {
+      throw new Error('Задача сейчас недоступна для запуска.');
+    }
+    if (payload.decision === 'complete') throw new Error('Для проверки результата этого шага запустите его повторно.');
+    const retry = payload.decision === 'retry';
+    const result = dispatcher.resolveReconciliation(payload, ({ job }) => {
+      if (retry) {
+        update('dispatch_jobs', { ...job, status: 'completed', reason: 'manual-requeued' });
+        taskState(task, 'scheduled', { error: '' });
+      }
+      const notice = taskInbox(task.id).find(item => item.attemptId === attempt.id && item.kind === 'reconcile' && item.status === 'open');
+      if (notice) update('inbox', { ...notice, status: 'resolved', answer: payload.reason.trim() });
+    });
+    if (retry) enqueue(task);
+    return changed(result);
   }
 
   function readAppLocale() {
@@ -1257,7 +1298,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     }
     const lesson = scopedLesson(studio);
     if (lesson && (!studio.workflowJob || studio.wipLimit > 1)) return workflow.startStandaloneTraining(studio, lesson);
-    const queue = pending.get(studioId);
+    const queue = scheduledManualQueue(studioId);
     const taskId = queue && [...queue].find(id => !prerequisites.pendingPrerequisites('task', id).length);
     if (!taskId) return;
     let task = read('tasks', taskId, 'Задача');
@@ -1304,6 +1345,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     } else active.set(studioId, activity);
     const isCurrent = () => !closed && !controller.signal.aborted;
     let inboxItem;
+    let shutdown;
 
     try {
       changed(running);
@@ -1330,6 +1372,21 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         return question && addInbox(running, 'question', question);
       });
     } catch (error) {
+      shutdown = unconfirmedProviderStop(error);
+      if (shutdown && db.isOpen) {
+        const body = shutdown.message || 'Не удалось завершить процесс подключения.';
+        inboxItem = transaction(() => {
+          const attempt = list('attempts').find(row => row.id === attemptId);
+          const job = dispatcher.enqueue({ studioId, taskId, purpose: 'manual-task' });
+          update('dispatch_jobs', { ...job, status: 'reconcile', attemptId, reason: 'unknown-effect', error: body, updatedAt: now() });
+          update('attempts', { ...attempt, jobId: job.id, status: 'reconcile', reason: 'unknown-effect', error: body,
+            processActive: Boolean(shutdown.processExited?.then), processUnconfirmed: true, finishedAt: now() });
+          taskState(running, 'interrupted', { error: body });
+          const item = addInbox(running, 'reconcile', { title: `Сверка · ${running.title}`, body });
+          return update('inbox', { ...item, attemptId });
+        });
+        return;
+      }
       if (!isCurrent()) return;
       const body = error instanceof Error ? error.message : String(error);
       inboxItem = transaction(() => {
@@ -1338,9 +1395,16 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         return addInbox(running, 'error', { title: `Ошибка · ${running.title}`, body });
       });
     } finally {
-      if (!closed && controller.signal.aborted) update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'interrupted', finishedAt: now() });
+      if (!closed && controller.signal.aborted && !shutdown) update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'interrupted', finishedAt: now() });
       if (isParallel) manualParallel.delete(taskId);
       else active.delete(studioId);
+      if (shutdown?.processExited?.then) {
+        void shutdown.processExited.then(() => {
+          if (!db.isOpen || !dispatcher.releaseProcess({ attemptId, confirmedExit: true }) || closed) return;
+          changed();
+          onAvailable(studioId);
+        });
+      }
       finished.resolve();
       if (!closed) {
         changed();
@@ -1442,6 +1506,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   const planning = createPlanning({
     ...shared, now,
     hasActiveAttempt: (studioId, taskId) => [...parallelManual(studioId), ...(workflow.activeWork?.(studioId) ?? []), active.get(studioId)].some(attempt => attempt?.id === taskId),
+    onTaskReplaced: task => workflow.clearReplacedWork(task),
     onSprintClosed(studio, sprint) {
       for (const job of dispatcher.jobs(studio.id)) {
         if (job.sprintId === sprint.id && ['queued', 'waiting'].includes(job.status)) {
@@ -1526,6 +1591,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     effectiveAllowed: (studio) => modelPolicyFor(studio).allowed, training, hasHeldWorkflow,
     projectPipeline, dispatcher, checkpoints, planning, prerequisites, roster, trackedRun, describeAttachments,
     nonWorkflowActiveCount: studioId => Number(active.has(studioId)) + parallelManual(studioId).length,
+    isStorageOpen: () => db.isOpen,
     afterGitMerge, withAttemptActor,
     validateFixed,
   });
@@ -1538,7 +1604,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const studio = read('studios', studioId, 'Студия');
     const attempt = active.get(studioId);
     if (action === 'stop') {
-      const queued = pending.get(studioId) ?? [];
+      const queued = scheduledManualQueue(studioId) ?? [];
       transaction(() => {
         for (const taskId of queued) taskState(read('tasks', taskId, 'Задача'), 'interrupted');
         if (attempt && !attempt.job && !attempt.debtAssessment && !attempt.auxiliary) taskState(read('tasks', attempt.id, 'Задача'), 'interrupted');
@@ -1597,6 +1663,14 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   }
   interruptUnfinishedAttempts({ restore: true });
   transaction(() => {
+    for (const task of list('tasks')) {
+      if (task.stage === 'replaced' || task.replacedBy) {
+        if (task.stage !== 'replaced' || task.status !== 'cancelled') {
+          update('tasks', { ...task, stage: 'replaced', status: 'cancelled', activeAgentId: undefined });
+        }
+        workflow.clearReplacedWork(task);
+      }
+    }
     for (const studio of list('studios').map(visibleStudio)) workflow.resumeSprintAfterTraining(studio);
   });
   refreshSchedules();
@@ -1617,6 +1691,6 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     changeKnowledge: training.changeKnowledge, publishLibraryEntry: training.publishLibraryEntry,
     postStudioMessage, applyConversationProposal, studioUsage, updateUsageTariff, setEpicPriority, diagnoseStudio, updateNotifications,
     startNextSprint: workflow.startNextSprint,
-    resolveReconciliation: payload => workflow.resolveReconciliation?.(payload),
+    resolveReconciliation,
   };
 }

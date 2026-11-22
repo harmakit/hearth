@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const [provider, ...args] = process.argv.slice(2);
@@ -9,7 +9,7 @@ const send = message => console.log(JSON.stringify(message));
 const fixtureSandbox = cwd => ['-p', `(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath ${JSON.stringify(cwd)}))`];
 function response(prompt) {
   if(prompt.includes('QA-FORCED-ERROR')) throw new Error('QA intentional provider failure');
-  if (prompt.startsWith('Propose') && prompt.includes('QA-COACH-SPRINT')) return {
+  if (prompt.startsWith('Propose') && /QA-(?:COACH|QUEUE)-SPRINT/.test(prompt)) return {
     title:'План с подготовкой коуча', goal:'Записать два файла',
     epic:{ title:'Сборник', description:'Временный проект.' }, story:{ title:'Глава', acceptance:'Файлы записаны.' },
     agents:[{key:'writer',role:'editor',description:'Пишет'}, {key:'reader',role:'other',description:'Проверяет'}, {key:'artist',role:'artist',description:'Иллюстрирует'}],
@@ -23,7 +23,7 @@ function response(prompt) {
     title:'План QA', goal:'Проверить Git-доставку',
     epic:{ title:'Git-доставка',description:'Только фикстура.' }, story:{title:'Результат QA',acceptance:'Файл проверен.'},
     agents:[{key:'maker',role:'engineer',description:'Правит файлы'},{key:'reader',role:'other',description:'Проверяет изменения'}],
-    tasks:[prompt.includes('QA-STOP-PLAN')
+    tasks:[/QA-(?:STOP-PLAN|QUEUE-STOP)/.test(prompt)
       ? {key:'first-text',title:'Первая глава',prompt:'Подготовить текст',criteria:'Черновик готов',agentKey:'maker',reviewerKey:'reader'}
       : {key:'git-file',title:'Git доставка QA',prompt:'QA-GIT-EDIT',criteria:'Файл проверен',agentKey:'maker',reviewerKey:'reader',deliveryMode:'git',requiresAcceptance:true}],
     files:[],
@@ -102,7 +102,15 @@ else if (args[0] === 'app-server') {
         send({ method:'item/completed',params:{ threadId,turnId,item:{ type:'agentMessage',phase:'final_answer',text } } });
         send({ method:'turn/completed',params:{ threadId,turn:{ id:turnId,status:'completed' } } });
       };
-      if (prompt.includes('QA-STOP-PLAN')) pendingPlan = setTimeout(finish,2500);
+      const hangingPid = join(process.env.TMPDIR, 'qa-queue-stop-pid');
+      const cancelledTask = join(process.env.TMPDIR, 'qa-queue-cancelled');
+      if (prompt.startsWith('Propose') && prompt.includes('QA-QUEUE-STOP') && !existsSync(hangingPid)) {
+        writeFileSync(hangingPid, String(process.pid));
+        pendingPlan = setTimeout(finish, 30_000);
+      } else if (prompt.startsWith('Work on') && prompt.includes('QA-QUEUE-SPRINT') && prompt.includes('QA-CHAPTER-FILE') && !existsSync(cancelledTask)) {
+        writeFileSync(cancelledTask, String(process.pid));
+        pendingPlan = setTimeout(finish, 30_000);
+      } else if (prompt.includes('QA-STOP-PLAN')) pendingPlan = setTimeout(finish,2500);
       else finish();
     }
     if (method === 'turn/interrupt') {

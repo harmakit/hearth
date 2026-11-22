@@ -32,6 +32,91 @@ test('the final manual task completion publishes zero active attempts', async t 
   assert.equal(published.studios[0].activeAttempts, 0);
 });
 
+test('replacing a scheduled backlog task on pause leaves it replaced after resume', async t => {
+  const started = [];
+  const service = createStudioService({
+    dbPath: ':memory:',
+    run: async ({ prompt }) => {
+      started.push(JSON.parse(prompt.split('\n\n').at(-1)).title);
+      return reply({ summary: 'Delivered' });
+    },
+  });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({ root: '/project', name: 'Backlog replacement', wipLimit: 1 });
+  const old = service.createTask({ studioId, title: 'Old', prompt: 'Write old', backlog: true });
+  const replacement = service.createTask({ studioId, title: 'Replacement', prompt: 'Write new', backlog: true });
+  service.setStudioRunning({ studioId, action: 'pause' });
+  service.startTask({ taskId: old.id });
+  service.reviseBacklog({ studioId, baseVersion: service.snapshot().studios[0].backlogVersion, edits: [
+    { type: 'replace', taskId: old.id, replacementId: replacement.id, redirectDependencies: true },
+  ] });
+  service.startTask({ taskId: replacement.id });
+  service.setStudioRunning({ studioId, action: 'resume' });
+  await until(() => service.snapshot().tasks.find(row => row.id === replacement.id).stage === 'done', service.snapshot);
+  assert.deepEqual(started, ['Replacement']);
+  assert.equal(service.snapshot().tasks.find(row => row.id === old.id).stage, 'replaced');
+});
+
+test('aborting a provider waits for its confirmed exit after the stop deadline', async t => {
+  const processExited = Promise.withResolvers();
+  let calls = 0;
+  let stopFailed = false;
+  const service = createStudioService({
+    dbPath: ':memory:',
+    run: ({ signal }) => {
+      calls += 1;
+      if (calls > 1) return reply({ title: 'Plan', goal: 'Test', tasks: [], files: [] });
+      return new Promise((_, reject) => signal.addEventListener('abort', () => {
+        stopFailed = true;
+        reject(Object.assign(new Error('Не удалось завершить процесс подключения.'), {
+          processMayBeRunning: true, processExited: processExited.promise,
+        }));
+      }, { once: true }));
+    },
+  });
+  t.after(() => { processExited.resolve(); return service.close(); });
+  const { id: studioId } = service.createStudio({ root: '/project', name: 'Unconfirmed stop' });
+  service.initializeStudio({ studioId });
+  await until(() => calls === 1, service.snapshot);
+  service.setStudioRunning({ studioId, action: 'stop' });
+  const hold = service.snapshot().inbox.find(item => item.kind === 'reconcile');
+  const attempt = () => service.snapshot().attempts.find(row => row.id === hold.attemptId);
+  await until(() => stopFailed, service.snapshot);
+  await delay(5);
+  assert.equal(attempt().processUnconfirmed, true);
+  assert.throws(() => service.resolveReconciliation({ attemptId: hold.attemptId, decision: 'retry', reason: 'Checked' }), /выполняется/);
+  assert.equal(calls, 1);
+  processExited.resolve();
+  await until(() => !attempt().processActive && !attempt().processUnconfirmed, service.snapshot);
+  assert.doesNotThrow(() => service.resolveReconciliation({ attemptId: hold.attemptId, decision: 'retry', reason: 'Exited' }));
+});
+
+test('a manually queued task also waits for its previous provider process', async t => {
+  const exited = Promise.withResolvers();
+  let calls = 0;
+  const service = createStudioService({ dbPath: ':memory:', run: ({ signal }) => {
+    if (++calls > 1) return reply({ summary: 'Finished' });
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('Не удалось завершить процесс подключения.'), {
+      processMayBeRunning: true, processExited: exited.promise,
+    })), { once: true }));
+  } });
+  t.after(() => { exited.resolve(); return service.close(); });
+  const { id: studioId } = service.createStudio({ root: '/project', name: 'Manual stop' });
+  const task = service.createTask({ studioId, title: 'Note', prompt: 'Deliver a note' });
+  service.startTask({ taskId: task.id });
+  await until(() => calls === 1, service.snapshot);
+  service.cancelTask({ taskId: task.id });
+  await delay(10);
+  assert.throws(() => service.startTask({ taskId: task.id }), /прежн|сверк/i);
+  const hold = service.snapshot().inbox.find(row => row.taskId === task.id && row.kind === 'reconcile');
+  assert.throws(() => service.resolveReconciliation({ attemptId: hold.attemptId, decision: 'retry', reason: 'Premature' }), /выполняется/);
+  exited.resolve();
+  await until(() => service.snapshot().attempts.some(row => row.id === hold.attemptId && row.processUnconfirmed === false), service.snapshot);
+  service.resolveReconciliation({ attemptId: hold.attemptId, decision: 'retry', reason: 'Exited' });
+  await until(() => service.snapshot().tasks.find(row => row.id === task.id).status === 'completed', service.snapshot);
+  assert.equal(calls, 2);
+});
+
 test('an owner question frees one of two studio slots and a duplicate answer starts no duplicate work', async (t) => {
   const gates = new Map(['First', 'Second', 'Third'].map((title) => [title, Promise.withResolvers()]));
   const started = [];
@@ -89,7 +174,7 @@ test('an owner question frees one of two studio slots and a duplicate answer sta
   assert.deepEqual(started.find(({ decisions }) => decisions.length).decisions, [{ question: 'Proceed?', answer: 'Yes' }]);
 });
 
-test('a published file survives interruption before the workflow records it and retries by the same operation', async (t) => {
+for (const decision of ['retry', 'discard']) test(`a published file survives interruption and restarts the same operation after ${decision}`, async (t) => {
   const base = new URL('../.tmp/', import.meta.url);
   await mkdir(base, { recursive: true });
   const directory = await mkdtemp(new URL('interrupted-artifact-', base));
@@ -149,8 +234,13 @@ test('a published file survives interruption before the workflow records it and 
   service = createStudioService(options);
   assert.equal(service.snapshot().inbox.find(({ id }) => id === hold.id).status, 'open');
   assert.equal(await readFile(join(root, 'result.md'), 'utf8'), '# Result\n');
-  service.resolveReconciliation({ attemptId: hold.attemptId, decision: 'retry', reason: 'Прежний процесс завершён, файл проверен' });
+  service.resolveReconciliation({ attemptId: hold.attemptId, decision, reason: 'Прежний процесс завершён, файл проверен' });
   service.setStudioRunning({ studioId, action: 'resume' });
+  if (decision === 'discard') {
+    const task = service.snapshot().tasks.find(row => row.id === hold.taskId);
+    assert.equal(task.status, 'interrupted');
+    service.startTask({ taskId: task.id });
+  }
   await until(() => service.snapshot().sprints.find(({ status }) => status === 'completed'), diagnostics);
   assert.equal(workerCalls, 1);
   assert.deepEqual(writes, [writes[0], writes[0]]);

@@ -75,7 +75,7 @@ function editTask(task, edit) {
 
 export function createPlanning({
   read, list, insert, update, transaction, changed, now = () => new Date().toISOString(),
-  hasActiveAttempt = () => false, onSprintClosed, onPhaseProposal, onGroomingRequest,
+  hasActiveAttempt = () => false, onTaskReplaced, onSprintClosed, onPhaseProposal, onGroomingRequest,
 }) {
   const records = (table, studioId) => list(table).filter((record) => record.studioId === studioId);
   const getStudio = (studioId) => read('studios', studioId, 'Студия');
@@ -135,6 +135,7 @@ export function createPlanning({
         } else if (type === 'replace') {
           const old = editable(taskId);
           const replacement = editable(edit.replacementId);
+          if (old.sprintId || replacement.sprintId) throw new Error('Заменять можно только карточки вне спринта.');
           if (old.id === replacement.id) throw new Error('Задача не может заменить саму себя.');
           if (edit.redirectDependencies !== undefined && typeof edit.redirectDependencies !== 'boolean') throw new Error('Некорректная настройка переноса зависимостей.');
           save({ ...old, stage: 'replaced', status: 'cancelled', replacedBy: replacement.id });
@@ -171,6 +172,9 @@ export function createPlanning({
       assertAcyclic(tasks, 'replaces');
       for (const task of updated.values()) (created.has(task.id) ? insert : update)('tasks', task);
       update('studios', { ...studio, backlogVersion: version + 1 });
+      for (const task of updated.values()) {
+        if (task.stage === 'replaced') onTaskReplaced?.(task);
+      }
       return { studioId, version: version + 1, tasks: [...updated.values()] };
     }));
   }

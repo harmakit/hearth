@@ -35,8 +35,8 @@ async function eventually(check, label, timeout = 15000) {
 }
 
 async function launch() {
-  const zoomCheck=process.env.HEARTH_QA_ZOOM==='1';
-  const child = spawn(bundle || require('electron'), [...(bundle ? [] : [root]), ...(zoomCheck ? ['--inspect=127.0.0.1:0'] : []), '--remote-debugging-port=0', '--user-data-dir=' + profile], {
+  const inspectMain = process.env.HEARTH_QA_ZOOM === '1' || process.env.HEARTH_QA_QUEUE === '1';
+  const child = spawn(bundle || require('electron'), [...(bundle ? [] : [root]), ...(inspectMain ? ['--inspect=127.0.0.1:0'] : []), '--remote-debugging-port=0', '--user-data-dir=' + profile], {
     cwd: root, env: { HOME:home, PATH:bin + ':/opt/homebrew/bin:/usr/bin:/bin', LANG:'en_US.UTF-8', HEARTH_DATA_DIR:profile, CODEX_HOME:join(home,'.codex'), CLAUDE_CONFIG_DIR:join(home,'.claude'), TMPDIR:run, GIT_CONFIG_NOSYSTEM:'1', GIT_CONFIG_GLOBAL:'/dev/null' },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -163,6 +163,85 @@ try {
   if(process.env.HEARTH_QA_LOCALE){
     await appLocale(process.env.HEARTH_QA_LOCALE);
     await desktop.click('[data-view="workspace"]');
+  }
+  if (process.env.HEARTH_QA_QUEUE === '1') {
+    await appLocale('ru');
+    const project = join(run, 'queue-qa-project');
+    await mkdir(project);
+    const backlogStudio = await desktop.request('createStudio', { root:project, name:'QA: замена', wipLimit:1 });
+    const backlog = { studioId:backlogStudio.id, backlog:true };
+    const old = await desktop.request('createTask', { ...backlog, title:'Старая задача', prompt:'Старая.' });
+    const replacement = await desktop.request('createTask', { ...backlog, title:'Новая задача', prompt:'Новая.' });
+    await desktop.request('setStudioRunning', { studioId:backlogStudio.id, action:'pause' });
+    await desktop.request('startTask', { taskId:old.id });
+    const version = (await snap()).studios.find(row => row.id === backlogStudio.id).backlogVersion;
+    await desktop.request('reviseBacklog', { studioId:backlogStudio.id, baseVersion:version, edits:[
+      { type:'replace', taskId:old.id, replacementId:replacement.id },
+    ] });
+    await desktop.request('startTask', { taskId:replacement.id });
+    await desktop.request('setStudioRunning', { studioId:backlogStudio.id, action:'resume' });
+    await until(view => view.tasks.find(row => row.id === replacement.id)?.stage === 'done', 'Replacement task finishes');
+    const replaced = await snap();
+    assert.equal(replaced.tasks.find(row => row.id === old.id).stage, 'replaced');
+    assert.equal(replaced.attempts.some(row => row.taskId === old.id), false);
+    await desktop.request('deleteStudio', { studioId:backlogStudio.id, confirmation:backlogStudio.name });
+
+    const sprintStudio = await desktop.request('createStudio', { root:project, name:'QA: повтор шага', brief:'QA-QUEUE-SPRINT', wipLimit:5, sprintReview:'off' });
+    await desktop.request('initializeStudio', { studioId:sprintStudio.id });
+    const sprintPlan = await until(view => view.plans.find(row => row.studioId === sprintStudio.id && row.status === 'pending'), 'Queue sprint plan');
+    await desktop.request('decidePlan', { planId:sprintPlan.id, decision:'approve' });
+    const step = await until(view => view.tasks.find(row => row.studioId === sprintStudio.id && row.key === 'chapter' && row.status === 'running'), 'Chapter process');
+    await eventually(() => readFile(join(run, 'qa-queue-cancelled'), 'utf8').catch(() => ''), 'First chapter provider is waiting');
+    await desktop.request('cancelTask', { taskId:step.id });
+    const hold = await until(view => view.inbox.find(row => row.taskId === step.id && row.kind === 'reconcile'), 'Cancelled step is held');
+    await until(view => view.attempts.find(row => row.id === hold.attemptId && row.processActive === false), 'Cancelled provider exits');
+    await desktop.request('resolveReconciliation', { attemptId:hold.attemptId, decision:'discard', reason:'Проверочный процесс завершился.' });
+    await desktop.click('[data-view=workspace]');
+    await desktop.click('[data-enter-studio="' + sprintStudio.id + '"]');
+    await desktop.click('main [data-task="' + step.id + '"]');
+    await desktop.click('#owner-body [data-start-task="' + step.id + '"]');
+    await until(view => view.sprints.find(row => row.studioId === sprintStudio.id && row.status === 'completed'), 'Same sprint finishes after explicit retry');
+    assert.match(await readFile(join(project, 'reports', 'chapter.md'), 'utf8'), /# Глава/);
+    await desktop.click('[data-owner-close]');
+    await desktop.request('deleteStudio', { studioId:sprintStudio.id, confirmation:sprintStudio.name });
+
+    const stopStudio = await desktop.request('createStudio', { root:project, name:'QA: остановка процесса', brief:'QA-QUEUE-STOP' });
+    await desktop.request('initializeStudio', { studioId:stopStudio.id });
+    const pid = Number(await eventually(() => readFile(join(run, 'qa-queue-stop-pid'), 'utf8').catch(() => ''), 'Local fixture PID'));
+    assert.ok(Number.isSafeInteger(pid) && pid > 1);
+    await desktop.mainEval(`(() => {
+      const original = process.kill;
+      globalThis.restoreQueueTestSignal = () => { process.kill = original; };
+      process.kill = (target, signal) => target === -${pid} ? true : original(target, signal);
+      return true;
+    })()`);
+    let fixtureStopped = false;
+    try {
+      await desktop.click('[data-view=workspace]');
+      await desktop.click('[data-enter-studio="' + stopStudio.id + '"]');
+      await desktop.click('[data-run-action=stop]');
+      const stopHold = await until(view => view.inbox.find(row => row.studioId === stopStudio.id && row.kind === 'reconcile'), 'Stop reconciliation');
+      await until(view => view.attempts.find(row => row.id === stopHold.attemptId && row.processActive && row.processUnconfirmed), 'Timeout recorded while provider is alive');
+      process.kill(pid, 0);
+      await desktop.click('[data-inbox="' + stopHold.id + '"]');
+      assert.equal(await desktop.evaluate(() => Boolean(document.querySelector('#dialog-actions button[type=submit]'))), false);
+      await assert.rejects(desktop.request('resolveReconciliation', { attemptId:stopHold.attemptId, decision:'retry', reason:'QA', confirmProcessExited:true }), /выполняется/);
+      await shot('queue-still-stopping');
+      process.kill(-pid, 'SIGKILL');
+      fixtureStopped = true;
+      await until(view => view.attempts.find(row => row.id === stopHold.attemptId && row.processActive === false && row.processUnconfirmed === false), 'Confirmed subprocess exit');
+      await desktop.click('#dialog-actions button[type=submit]');
+      await desktop.click('[data-run-action=resume]');
+      await until(view => view.plans.find(row => row.studioId === stopStudio.id && row.status === 'pending'), 'Retry succeeds after exit');
+    } finally {
+      await desktop.mainEval('globalThis.restoreQueueTestSignal()');
+      if (!fixtureStopped) {
+        try { process.kill(-pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      }
+    }
+    await desktop.request('deleteStudio', { studioId:stopStudio.id, confirmation:stopStudio.name });
+    await desktop.click('[data-view=workspace]');
+    console.log('PASS замена карточки, повтор прерванной задачи в том же спринте, блокировка на живом процессе до подтверждения выхода');
   }
   if (process.env.HEARTH_QA_COACH_EXERCISE === '1') {
     await appLocale('ru');

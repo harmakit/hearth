@@ -26,7 +26,9 @@ export async function stop(child, { graceful = false, cleanupGroup = false } = {
       if (processGroups) process.kill(-child.pid, signal);
       else if (!state.closed) child.kill(signal);
     } catch (error) {
-      if (error.code !== 'ESRCH') child.kill(signal);
+      if (error.code !== 'ESRCH' && !state.closed) {
+        try { child.kill(signal); } catch { /* Wait for the close event or report uncertainty. */ }
+      }
     }
   }
 
@@ -45,7 +47,9 @@ export async function stop(child, { graceful = false, cleanupGroup = false } = {
   let deadline;
   try {
     await Promise.race([state.closing, new Promise((_, reject) => {
-      deadline = setTimeout(() => reject(new Error('Не удалось завершить процесс подключения.')), 2000);
+      deadline = setTimeout(() => reject(Object.assign(new Error('Не удалось завершить процесс подключения.'), {
+        processMayBeRunning: true, processExited: state.closing,
+      })), 2000);
     })]);
     if (!graceful || cleanupGroup) send('SIGKILL');
   } finally {

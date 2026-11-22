@@ -5,6 +5,7 @@ import { allowedTuples, tupleKey, completeInitialRoster, directorPrompt, field, 
 import { coachFor, ExerciseResponseError, exerciseResult } from './training.mjs';
 import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 import { buildTaskContext } from './checkpoints.mjs';
+import { unconfirmedProviderStop } from './dispatcher.mjs';
 
 const now = () => new Date().toISOString();
 const trainingFinished = 'Обучение завершено';
@@ -25,7 +26,7 @@ export function createWorkflow({
   run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, effectiveAllowed, validateFixed,
   runPrompt, report, isClosed, active, availableStudio, onAvailable, training, hasHeldWorkflow,
   projectPipeline, afterGitMerge, withAttemptActor=(_id,write)=>write(), dispatcher, checkpoints, planning: planningService, prerequisites, roster, trackedRun, describeAttachments,
-  nonWorkflowActiveCount = () => 0,
+  nonWorkflowActiveCount = () => 0, isStorageOpen = () => !isClosed(),
 }) {
   const controllers = new Map();
   const pumping = new Set();
@@ -123,6 +124,7 @@ export function createWorkflow({
   }
 
   function routeTask(studio, task, continuation = {}, visited = new Set()) {
+    if (task.stage === 'replaced') return;
     if (visited.has(task.id)) throw new Error('Обнаружена циклическая зависимость обучения.');
     visited.add(task.id);
     const gated = training.withDependencies(studio, task);
@@ -441,7 +443,8 @@ export function createWorkflow({
     if (action === 'resume') {
       if (!['paused', 'error'].includes(studio.lifecycle)) return studio;
       studio = transaction(() => {
-        const job = studio.workflowJob;
+        const previous = studio.workflowJob;
+        const job = previous?.taskId && currentTask(previous).stage === 'replaced' ? null : previous;
         const retry = studio.lifecycle === 'error' && job && !hasTaskHold(studioId, job.taskId) ? putJob(studio, job) : null;
         const next = dispatcher.jobs(studioId).find(({ status }) => status === 'queued');
         if (retry?.status === 'queued' && retry.taskId) {
@@ -691,7 +694,7 @@ export function createWorkflow({
     }
     if (task.sprintId && wip(studio) > 1 && !job.resumeTaskId) return routeParallelSprint(studio, task);
     const next = job.resumeTaskId && read('tasks', job.resumeTaskId, 'Задача');
-    if (next && next.id !== task.id) {
+    if (next && next.id !== task.id && next.stage !== 'replaced') {
       if (job.resumeSprint) return routeSprint(studio, next);
       return routeTask(studio, next, job.returnLifecycle ? { returnLifecycle: job.returnLifecycle, returnActivity: job.returnActivity } : {});
     }
@@ -934,8 +937,9 @@ export function createWorkflow({
   }
 
   function claimable(job) {
-    if (job.purpose !== 'task') return true;
     const task = currentTask(job);
+    if (job.purpose === 'manual-task' || task?.stage === 'replaced') return false;
+    if (job.purpose !== 'task') return true;
     return (task.dependencies ?? []).every((id) => read('tasks', id, 'Зависимость').stage === 'done')
       && !prerequisites?.pendingPrerequisites('task', task.id).length && !pendingRosterChange(task);
   }
@@ -997,11 +1001,12 @@ export function createWorkflow({
     return closed;
   }
 
-  function resolveReconciliation({ attemptId, decision, reason }) {
+  function resolveReconciliation({ attemptId, decision, reason, confirmProcessExited }) {
     let item;
-    const result = dispatcher.resolveReconciliation({ attemptId, decision, reason }, ({ job, attempt }) => {
+    const result = dispatcher.resolveReconciliation({ attemptId, decision, reason, confirmProcessExited }, ({ job, attempt }) => {
       const studio = read('studios', job.studioId, 'Студия');
       const task = currentTask(job);
+      if (task?.stage === 'replaced' && decision !== 'discard') throw new Error('Задача сейчас недоступна для запуска.');
       if (decision === 'complete') {
         if (!['artifact', 'publish'].includes(job.purpose)) throw new Error('Для проверки результата этого шага запустите его повторно.');
         const path = job.purpose === 'publish' ? read('plans', job.planId, 'План').files[job.fileIndex].path : job.path;
@@ -1039,6 +1044,7 @@ export function createWorkflow({
     const { id: attemptId } = claim.attempt;
     const controller = new AbortController();
     const finished = Promise.withResolvers();
+    let shutdown;
     controllers.set(attemptId, { id: job.taskId, studioId, job, attemptId, controller, completion: finished.promise });
     const isCurrent = () => !isClosed() && !controller.signal.aborted;
     const onEvent = (event) => {
@@ -1078,7 +1084,14 @@ export function createWorkflow({
       }
       if (job.purpose === 'director') planningService.maybeRequestGrooming({ studioId });
     } catch (error) {
-      if (!isCurrent()) return;
+      shutdown = unconfirmedProviderStop(error);
+      if (!isCurrent()) {
+        if (shutdown && isStorageOpen()) {
+          const held = dispatcher.recordUnconfirmedStop({ attemptId, shutdown });
+          if (held && !isClosed()) changed();
+        }
+        return;
+      }
       let item;
       const readyToRecheck = task?.deliveryMode === 'git' && ['git-merge', 'review'].includes(job.purpose)
         && ['TARGET_CHANGED', 'STALE_REVISION'].includes(error?.code);
@@ -1116,7 +1129,14 @@ export function createWorkflow({
     } finally {
       clearInterval(heartbeat);
       controllers.delete(attemptId);
-      if (!isClosed() && dispatcher.releaseProcess({ attemptId })) changed();
+      if (!shutdown && isStorageOpen() && dispatcher.releaseProcess({ attemptId }) && !isClosed()) changed();
+      if (shutdown?.processExited?.then) {
+        void shutdown.processExited.then(() => {
+          if (!isStorageOpen() || !dispatcher.releaseProcess({ attemptId, confirmedExit: true }) || isClosed()) return;
+          changed();
+          onAvailable(studioId);
+        });
+      }
       finished.resolve();
       if (!isClosed()) onAvailable(studioId);
     }
@@ -1129,21 +1149,47 @@ export function createWorkflow({
     return changed(result);
   }
 
+  function interruptedJob(task) {
+    if (!task.workflowManaged || task.status !== 'interrupted' || task.stage === 'replaced' || task.legacyWorktreeReview) return;
+    if (task.sprintId && !list('sprints').some(sprint => sprint.id === task.sprintId && sprint.status === 'active')) return;
+    const jobs = dispatcher.jobs(task.studioId).filter(job => job.taskId === task.id);
+    const latest = jobs.at(-1);
+    if (latest?.status === 'interrupted' && ['stopped', 'owner-discard'].includes(latest.reason)
+      && latest.sprintId === task.sprintId && !jobs.some(job => ['queued', 'running', 'waiting', 'reconcile'].includes(job.status))) return latest;
+  }
+
   function retryTask(studio, task) {
-    if (task.status !== 'failed' || hasTaskWork(studio, task.id)) throw new Error('Эта задача не ждёт повторного запуска.');
+    const interrupted = interruptedJob(task);
+    if (!interrupted && (task.status !== 'failed' || hasTaskWork(studio, task.id))) throw new Error('Эта задача не ждёт повторного запуска.');
     if (studio.manualPaused || studio.lifecycle === 'paused') throw new Error('Сначала снимите студию с паузы.');
-    const previous = dispatcher.jobs(studio.id).findLast(job => job.taskId === task.id);
+    const previous = interrupted ?? dispatcher.jobs(studio.id).findLast(job => job.taskId === task.id);
     const result = transaction(() => {
       for (const item of taskInbox(task.id)) {
         if (item.kind === 'error' && item.status === 'open') update('inbox', { ...item, status: 'resolved' });
       }
       const current = update('tasks', { ...task, status: 'queued', error: '', failedReviews: 0, updatedAt: now() });
-      if (previous?.status === 'failed') return schedule(studio, jobPayload(previous), 'Повтор рабочего шага');
+      if (interrupted || previous?.status === 'failed') return schedule(studio, jobPayload(previous), 'Повтор рабочего шага');
       const { resumeTaskId, resumeSprint, returnLifecycle, returnActivity } = previous ?? {};
       return routeTask(studio, current, task.kind === 'train' ? { resumeTaskId, resumeSprint, returnLifecycle, returnActivity } : {});
     });
     queue(studio.id);
     return changed(result);
+  }
+
+  function clearReplacedWork(task) {
+    for (const job of dispatcher.jobs(task.studioId)) {
+      if (job.taskId === task.id && ['queued', 'waiting'].includes(job.status)) {
+        update('dispatch_jobs', { ...job, status: 'interrupted', reason: 'task-replaced', updatedAt: now() });
+      }
+    }
+    for (const item of taskInbox(task.id)) {
+      if (item.status === 'open' && item.kind !== 'reconcile') update('inbox', { ...item, status: 'resolved' });
+    }
+    const studio = read('studios', task.studioId, 'Студия');
+    if (studio.workflowJob?.taskId === task.id) {
+      if (studio.lifecycle === 'error' && !hasDispatchWork(studio.id)) state(studio, 'idle', 'Ожидает нового плана');
+      else update('studios', { ...studio, workflowJob: null });
+    }
   }
 
   function cancelTask({ studioId, taskId }) {
@@ -1169,6 +1215,7 @@ export function createWorkflow({
 
   return {
     initializeStudio, startNextSprint, decidePlan, updatePlanAgents, updatePlanTasks, setStudioRunning, resumeInbox, startStandaloneTraining, startGitTask,
-    queue, hasDispatchWork, activeWork, reconcileWork, resolveReconciliation, cancelTask, retryTask, resumeSprintAfterTraining,
+    queue, hasDispatchWork, activeWork, reconcileWork, resolveReconciliation, cancelTask, retryTask, interruptedJob,
+    clearReplacedWork, resumeSprintAfterTraining,
   };
 }

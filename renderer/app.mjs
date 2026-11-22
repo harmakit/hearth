@@ -237,7 +237,8 @@ async function refresh() {
     } else if (dialog.open && !dialogBusy && dialogReconciliation) {
       const item = entries().find(row => row.id === dialogReconciliation.id);
       if (item && (item.status !== dialogReconciliation.status ||
-          reconciliationPending(item) !== dialogReconciliation.pending)) openInbox(item);
+          reconciliationPending(item) !== dialogReconciliation.pending ||
+          Boolean(reconciliationAttempt(item)?.processUnconfirmed) !== dialogReconciliation.unconfirmed)) openInbox(item);
     } else if (dialog.open && dialogConversation) {
       const thread = studioRows('conversations').find(row => (row.agentId ?? null) === dialogConversation.agentId &&
         (row.taskId ?? null) === dialogConversation.taskId);
@@ -1965,6 +1966,7 @@ function openTask(task, present) {
   const latest = tasks().find(entry => entry.id === task.id && entry.studioId === task.studioId);
   if (!latest) return;
   const entry = entries().find(item => item.taskId === latest.id && item.status === 'open' && ['question', 'acceptance'].includes(item.kind));
+  const reconciliation = entries().find(item => item.taskId === latest.id && item.status === 'open' && item.kind === 'reconcile');
   const allTasks = tasks();
   const dependencies = pendingDependencies(latest, new Map(allTasks.map(item => [item.id, item])));
   const current = studio();
@@ -1975,10 +1977,12 @@ function openTask(task, present) {
     ['backlog', 'ready'].includes(latest.stage);
   const canStartTraining = latest.kind === 'train' && !latest.sprintId && latest.status === 'queued' &&
     !current.manualPaused && !allTasks.some(task => task.status === 'running') && ['draft', 'idle', 'active'].includes(current.lifecycle);
-  const canRun = dependencies.every(task => task.kind === 'train') &&
+  const paused = current.manualPaused || current.lifecycle === 'paused';
+  const canRun = !reconciliation && ((latest.canRestartInterrupted && !paused) || dependencies.every(task => task.kind === 'train') &&
     (canStartTraining || parallelManaged && latest.status === 'failed' ||
-      !latest.workflowManaged && ['failed', 'interrupted', 'queued'].includes(latest.status));
-  const startLabel = latest.kind === 'train' ? copy('Запустить обучение') : dependencies.length ? copy('Запустить после обучения')
+      !latest.workflowManaged && ['failed', 'interrupted', 'queued'].includes(latest.status)));
+  const startLabel = latest.canRestartInterrupted ? copy('Повторить шаг') :
+    latest.kind === 'train' ? copy('Запустить обучение') : dependencies.length ? copy('Запустить после обучения')
     : latest.status === 'queued' ? copy('Запустить') : copy('Запустить снова');
   const needsWorktreeReview = latest.legacyWorktreeReview === true;
   const artifact = typeof latest.artifact === 'object' && latest.artifact
@@ -2064,6 +2068,8 @@ function openTask(task, present) {
       ${latest.artifactPath ? actionFor(copy('Открыть файл'), 'artifact', latest.id, false) +
         actionFor(copy('Показать в папке'), 'reveal-artifact', latest.id) + actionFor(copy('Копировать путь'), 'copy-artifact-path', latest.id) : ''}
       ${entry ? actionFor(entry.kind === 'acceptance' ? copy('Открыть приёмку') : copy('Ответить на вопрос'), 'inbox', entry.id, false) : ''}
+      ${reconciliation ? actionFor(copy('Посмотреть прерванный шаг'), 'inbox', reconciliation.id, false) : ''}
+      ${latest.canRestartInterrupted && paused ? actionFor(copy('Возобновить студию'), 'run-action', 'resume', false) : ''}
       ${canRun&&!recovery ? needsWorktreeReview ? actionFor(copy('Сверить рабочее дерево'), 'review-worktree', latest.id, false)
         : actionFor(startLabel, 'start-task', latest.id, false) : ''}
       ${canCancel ? actionFor(copy('Отменить задачу'), 'cancel-task', latest.id) : ''}
@@ -2172,19 +2178,26 @@ function openReconciliation(item) {
   const open = item.status === 'open';
   const canResolve = open && !pending && Boolean(attempt);
   const canComplete = ['artifact', 'publish'].includes(attempt?.purpose);
+  const unconfirmed = Boolean(attempt?.processUnconfirmed);
+  const replaced = tasks().some(task => task.id === item.taskId && task.stage === 'replaced');
   const fields = !canResolve || plan ? '' :
-    select(copy('Что сделать с прерванным шагом?'), 'decision', option('retry', copy('Повторить шаг')) +
-      (canComplete ? option('complete', copy('Подтвердить выполненный шаг')) : '') + option('discard', copy('Отказаться от шага'))) +
+    select(copy('Что сделать с прерванным шагом?'), 'decision', (replaced ? '' : option('retry', copy('Повторить шаг')) +
+      (canComplete ? option('complete', copy('Подтвердить выполненный шаг')) : '')) + option('discard', copy('Отказаться от шага'))) +
     textarea(copy('Что вы проверили?'), 'reason', '', 'required');
-  const detail = pending ? copy('<p role="status">Hearth завершает прежний запуск. Действия появятся здесь, когда он остановится.</p>') :
+  const confirmation = canResolve && unconfirmed
+    ? copy`<p>Hearth не получил подтверждение остановки. Проверьте прежний процесс перед продолжением.</p>
+      <label class="checkbox-field"><input type="checkbox" name="confirmProcessExited" required> <span>Я проверил, что прежний процесс завершился.</span></label>` : '';
+  const detail = pending && unconfirmed ? copy('<p role="status">Прежний процесс не остановился вовремя. Hearth ждёт подтверждения его завершения.</p>') :
+    pending ? copy('<p role="status">Hearth завершает прежний запуск. Действия появятся здесь, когда он остановится.</p>') :
     !attempt && open ? plain(copy('Запись прерванного запуска недоступна. Подробности можно проверить в диагностике студии.')) :
       canResolve && studio().manualPaused ? plain(copy('Повтор добавит шаг в очередь. Чтобы запустить его, нажмите «Возобновить» в обзоре.')) : '';
-  dialogTo(inboxHeading(item), plain(inboxDetail(item)) + detail + fields + (item.answer ? plain(item.answer) : ''),
+  dialogTo(inboxHeading(item), plain(inboxDetail(item)) + detail + confirmation + fields + (item.answer ? plain(item.answer) : ''),
     plan ? copy('Повторить подготовку плана') : copy('Сохранить решение'),
     canResolve ? values => bridge.request('resolveReconciliation', { attemptId: item.attemptId,
       ...(plan ? { decision: 'retry', reason: copy('Подготовка плана поставлена в очередь повторно.') } : values),
+      confirmProcessExited: values.confirmProcessExited === 'on',
     }) : undefined, { focusSummary: true });
-  dialogReconciliation = { id: item.id, status: item.status, pending };
+  dialogReconciliation = { id: item.id, status: item.status, pending, unconfirmed };
 }
 
 function openAcceptance(item, revise = false) {

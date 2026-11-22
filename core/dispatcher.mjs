@@ -3,10 +3,17 @@ import { randomUUID } from 'node:crypto';
 const pendingStatuses = new Set(['queued', 'running', 'waiting', 'reconcile']);
 const holds = new Set(['running', 'reconcile']);
 const outcomes = new Set(['completed', 'waiting', 'failed', 'reconcile', 'interrupted']);
+const providerSteps = new Set(['plan', 'task', 'review', 'director', 'training-exercise']);
 const temporaryCodes = new Set(['EAI_AGAIN', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ENETDOWN', 'ENETUNREACH']);
 
 function date(value) {
   return new Date(typeof value === 'number' && value < 10_000_000_000 ? value * 1000 : value);
+}
+
+export function unconfirmedProviderStop(error) {
+  for (let cause = error; cause && typeof cause === 'object'; cause = cause.cause) {
+    if (cause.processMayBeRunning || /Не удалось завершить процесс подключения/.test(cause.message ?? '')) return cause;
+  }
 }
 
 function failureDetails(error, now) {
@@ -15,7 +22,6 @@ function failureDetails(error, now) {
     const status = Number(cause.status ?? cause.statusCode ?? cause.code);
     const text = typeof cause.message === 'string' ? cause.message : '';
     details.effect ??= cause.effect;
-    if (cause.processMayBeRunning || /Не удалось завершить процесс подключения/.test(text)) details.processMayBeRunning = true;
     if (status === 401 || status === 403 || /\b(?:unauthorized|authentication required|invalid api key|not logged in)\b/i.test(text)) {
       details.action = 'authenticate';
     } else if (cause.code === 'GIT_CONFLICT' || /\b(?:merge conflict|rebase conflict|unmerged paths)\b/i.test(text)) {
@@ -127,10 +133,10 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
   }
 
   function transition(current, changes, onFinish) {
-    const { status, jobStatus = status, reason, error, action, failureCount, retryAt, outcome, processActive } = changes;
+    const { status, jobStatus = status, reason, error, action, failureCount, retryAt, outcome, processActive, processUnconfirmed } = changes;
     const finishedAt = now().toISOString();
     const attempt = update(attemptTable, {
-      ...current.attempt, status, reason, error, action, outcome, processActive, finishedAt,
+      ...current.attempt, status, reason, error, action, outcome, processActive, processUnconfirmed, finishedAt,
       ...(retryAt ? { retryAt: retryAt.toISOString() } : {}),
     });
     const job = update(jobTable, {
@@ -157,7 +163,12 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
       if (!current) return;
       const failure = failureDetails(error, timestamp);
       const fields = { error: failure.message, action: failure.action };
-      if (failure.processMayBeRunning || (current.job.writes && failure.effect !== 'none')) {
+      const shutdown = unconfirmedProviderStop(error);
+      if (shutdown) {
+        return transition(current, { ...fields, status: 'reconcile', reason: 'unknown-effect',
+          processActive: Boolean(shutdown.processExited?.then), processUnconfirmed: true }, onFinish);
+      }
+      if (current.job.writes && failure.effect !== 'none') {
         return transition(current, { ...fields, status: 'reconcile', reason: 'unknown-effect' }, onFinish);
       }
       if (failure.action) return transition(current, { ...fields, status: 'failed', reason: failure.action }, onFinish);
@@ -182,8 +193,12 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
       const results = [];
       for (const attempt of attempts(studioId)) {
         if (taskId && attempt.taskId !== taskId) continue;
-        if (restart && attempt.status === 'reconcile' && attempt.processActive) {
-          update(attemptTable, { ...attempt, processActive: false });
+        if (restart && attempt.status === 'reconcile') {
+          const legacyUnknownStop = attempt.processUnconfirmed === undefined &&
+            (unconfirmedProviderStop({ message: attempt.error }) || (attempt.processActive && providerSteps.has(attempt.purpose)));
+          if (attempt.processActive || legacyUnknownStop) {
+            update(attemptTable, { ...attempt, processActive: false, processUnconfirmed: legacyUnknownStop ? true : attempt.processUnconfirmed });
+          }
         }
         if (attempt.status !== 'running' || (!restart && !stop && date(attempt.expiresAt) > timestamp)) continue;
         const job = findJob(attempt.jobId);
@@ -196,16 +211,25 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
     });
   }
 
-  function releaseProcess({ attemptId }) {
+  function recordUnconfirmedStop({ attemptId, shutdown }) {
     return transaction(() => {
       const attempt = attempts().find(({ id }) => id === attemptId);
-      if (attempt?.status === 'reconcile' && attempt.processActive) {
-        return update(attemptTable, { ...attempt, processActive: false });
+      if (attempt?.status !== 'reconcile') return;
+      return update(attemptTable, { ...attempt, processActive: Boolean(shutdown.processExited?.then), processUnconfirmed: true,
+        error: failureDetails(shutdown, now()).message });
+    });
+  }
+
+  function releaseProcess({ attemptId, confirmedExit = false }) {
+    return transaction(() => {
+      const attempt = attempts().find(({ id }) => id === attemptId);
+      if (attempt?.status === 'reconcile' && (attempt.processActive || attempt.processUnconfirmed) && (!attempt.processUnconfirmed || confirmedExit)) {
+        return update(attemptTable, { ...attempt, processActive: false, processUnconfirmed: false });
       }
     });
   }
 
-  function resolveReconciliation({ attemptId, decision, reason }, onResolve) {
+  function resolveReconciliation({ attemptId, decision, reason, confirmProcessExited }, onResolve) {
     if (!['retry', 'complete', 'discard'].includes(decision) || typeof reason !== 'string' || !reason.trim()) {
       throw new Error('Укажите решение сверки и её результат.');
     }
@@ -214,10 +238,13 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
       const job = attempt && findJob(attempt.jobId);
       if (attempt?.status !== 'reconcile' || job?.status !== 'reconcile') throw new Error('Эта сверка уже закрыта.');
       if (attempt.processActive) throw new Error('Прежний запуск ещё выполняется.');
+      if (attempt.processUnconfirmed && confirmProcessExited !== true) throw new Error('Подтвердите, что прежний процесс завершился.');
       const stamp = now().toISOString();
       const status = decision === 'retry' ? 'queued' : decision === 'complete' ? 'completed' : 'interrupted';
       const result = {
-        attempt: update(attemptTable, { ...attempt, status: decision === 'complete' ? 'completed' : 'interrupted', reconciliation: { decision, reason: reason.trim(), resolvedAt: stamp } }),
+        attempt: update(attemptTable, { ...attempt, status: decision === 'complete' ? 'completed' : 'interrupted',
+          processUnconfirmed: false, reconciliation: { decision, reason: reason.trim(), resolvedAt: stamp,
+            ...(attempt.processUnconfirmed ? { processExitConfirmedByOwner: true } : {}) } }),
         job: update(jobTable, { ...job, status, reason: `owner-${decision}`, error: undefined, action: undefined, failureCount: 0, availableAt: undefined, updatedAt: stamp }),
       };
       onResolve?.(result);
@@ -233,6 +260,6 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
 
   return {
     enqueue, jobs, findJob, releaseWaiting, activeAttempts, claimAttempt, renewAttempt, finishAttempt, failAttempt,
-    reconcileStudio, releaseProcess, resolveReconciliation, delayUntil,
+    reconcileStudio, recordUnconfirmedStop, releaseProcess, resolveReconciliation, delayUntil,
   };
 }

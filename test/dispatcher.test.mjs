@@ -165,6 +165,22 @@ test('activity extends the lease while a quiet attempt stays running until expir
   assert.equal(dispatcher.reconcileStudio({ studioId: 'studio' }).length, 0);
 });
 
+test('an unconfirmed provider shutdown cannot be retried after reopening without confirmation', t => {
+  const { dispatcher } = setup(t);
+  const job = task(dispatcher, 'task-1', { writes: true, worktree: 'tree' });
+  const { attempt } = dispatcher.claimAttempt({ studioId: 'studio' });
+  const error = Object.assign(new Error('Не удалось завершить процесс подключения.'), {
+    processMayBeRunning: true, processExited: new Promise(() => {}),
+  });
+  dispatcher.failAttempt({ attemptId: attempt.id, error });
+  const retry = { attemptId: attempt.id, decision: 'retry', reason: 'Checked' };
+  assert.equal(dispatcher.releaseProcess({ attemptId: attempt.id }), undefined);
+  assert.throws(() => dispatcher.resolveReconciliation({ ...retry, confirmProcessExited: true }), /выполняется/);
+  dispatcher.reconcileStudio({ studioId: 'studio', restart: true });
+  assert.throws(() => dispatcher.resolveReconciliation(retry), /подтвердите/i);
+  assert.equal(dispatcher.resolveReconciliation({ ...retry, confirmProcessExited: true }).job.id, job.id);
+});
+
 test('bounded context keeps attachment references and short excerpts in a durable checkpoint', (t) => {
   const { store } = setup(t);
   const input = {
