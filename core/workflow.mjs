@@ -572,11 +572,14 @@ export function createWorkflow({
         }
         break;
       }
-      case 'review':
+      case 'review': {
+        const artifactLimit = 40_000;
         prompt = lesson ? training.reviewPrompt(studio, task) : reviewPrompt(studio, {
-          ...task, artifact: task.artifact?.slice(0, task.artifactPath ? 1_000 : 16_000),
+          ...task, artifact: task.artifact?.slice(0, artifactLimit),
+          artifactWasTruncated: task.artifact?.length > artifactLimit,
         }, agent, (usedTraining=training.context(studio, agent, task)));
         break;
+      }
       case 'training-exercise':
         prompt = training.exercisePrompt(studio, task);
         break;
@@ -626,6 +629,7 @@ export function createWorkflow({
     }
     let scoped;
     let result;
+    let data;
     try {
       if (task?.deliveryMode === 'git' && purpose === 'task') {
         scoped = await projectPipeline.workScope({ studio, task });
@@ -635,11 +639,19 @@ export function createWorkflow({
         const checkout = scoped.context ? `\n\nCandidate details (reference data):\n${JSON.stringify(scoped.context)}` : '';
         prompt = `Review the exact detached candidate version ${task.gitDelivery.revision.candidateOid}. Inspect files and check results.${checkout}\n\n${prompt}`;
       }
-      result = await runTracked({ runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal, scope: scoped?.scope });
+      const request = { runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal, scope: scoped?.scope };
+      result = await runTracked(request);
+      try {
+        data = parseResponse(result);
+      } catch (error) {
+        if (purpose === 'task' && task.deliveryMode === 'git') throw error;
+        signal.throwIfAborted();
+        result = await runTracked({ ...request, prompt: prompt + '\n\nThe previous answer could not be parsed. Return only the required JSON object with all requested content. Escape quotation marks and newlines inside string fields.' });
+        data = parseResponse(result);
+      }
     } finally {
       if (scoped) await scoped.release();
     }
-    const data = parseResponse(result);
     if (purpose === 'task') {
       if (lesson) return training.selection(task, data, sources);
       const parsed = report(result);

@@ -492,7 +492,7 @@ test('rework publishes a distinct file and a reviewer routed by the director see
         }),
         task: () => {
           assert.equal(runtime, 'codex');
-          return { summary: 'Draft', artifact: `# Version ${++work}` };
+          return { summary: 'Draft', artifact: `# Version ${++work}\n${'Outline details. '.repeat(150)}\nEnd of proof.` };
         },
         'select-model': () => {
           assert.equal(runtime, 'codex');
@@ -531,6 +531,9 @@ test('rework publishes a distinct file and a reviewer routed by the director see
   assert.deepEqual(routingPrompts.map((prompt) => JSON.parse(prompt.split('\n\n').at(-1)).purpose), ['task', 'review', 'task', 'review']);
   assert.match(reviewPrompts[1], /"artifactPath": "outline-v2.md"/);
   assert.match(reviewPrompts[1], /"previousArtifactPath": "outline.md"/);
+  const reviewed = JSON.parse(reviewPrompts[1].split('\n\n').at(-1));
+  assert.equal(reviewed.artifact, writes[1].content);
+  assert.ok(reviewed.artifact.endsWith('End of proof.'));
   assert.equal(snapshot.tasks[0].artifactPath, 'outline-v2.md');
 });
 
