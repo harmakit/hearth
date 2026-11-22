@@ -129,3 +129,27 @@ test('the director can name sources from the blocked task and keeps a clarificat
   await waiting(()=>service.snapshot().conversationMessages.find(m=>m.replyTo===next.id),'director passes the chosen route');
   assert.equal(service.snapshot().inbox.find(i=>i.id===item.id).status,'resolved');
 });
+
+test('manually assigned work also gets a safe technical recovery before a question is shown', async t => {
+  let work=0;
+  let director=0;
+  const service=createStudioService({dbPath:':memory:',run:async request=>{
+    if(request.purpose==='resolve-blocker'){
+      director++;
+      return {text:'{"nextStep":"Use the recorded evidence."}'};
+    }
+    if(++work===1)return {text:'{"summary":"Origin unavailable","question":{"kind":"technical","body":"Source cannot be reached"}}'};
+    assert.match(request.prompt,/Use the recorded evidence/);
+    return {text:'{"summary":"Recovered"}'};
+  }});
+  t.after(()=>service.close());
+  const studio=service.createStudio({root:'/project',name:'Manual recovery'});
+  const task=service.createTask({studioId:studio.id,title:'Check',prompt:'Use the evidence.'});
+  service.startTask({taskId:task.id});
+  const final=await waiting(()=>service.snapshot().tasks.find(row=>row.id===task.id&&['completed','waiting'].includes(row.status)),
+    'manual task outcome');
+  assert.equal(final.status,'completed');
+  assert.equal(director,1);
+  assert.equal(work,2);
+  assert.equal(service.snapshot().inbox.some(row=>row.taskId===task.id&&row.status==='open'),false);
+});

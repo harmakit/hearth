@@ -150,7 +150,7 @@ async function selectTaskControls(studio, agent, task, policy, { run, signal, pu
 }
 
 function runPrompt(studio, agent, task, decisions, workflowContext, approvedTraining) {
-  const priorDraft = decisions.length ? {
+  const priorDraft = decisions.length || task.recovery ? {
     summary: task.summary.slice(0, 4000),
     artifact: task.artifact.slice(0, 16_000),
   } : undefined;
@@ -1393,6 +1393,27 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     });
   }
 
+  async function planBlockerRecovery({studio,task,result,references,attemptId,signal}){
+    if(result.question?.kind!=='technical' || task.recovery)return;
+    const director=studio.director;
+    const request={runtime:director.runtime,model:director.model||undefined,effort:director.effort||undefined,
+      projectRoot:studio.root,purpose:'resolve-blocker',signal,outputSchema:responseSchemas.blocker,prompt:[
+        'Resolve an operational blocker inside the studio. Return JSON with exactly one string field "nextStep".',
+        'Give the task one concrete, safe recovery attempt. Prefer existing project evidence, an available alternative, or a clearly marked partial draft. Do not change acceptance criteria, claim that missing evidence was verified, request permissions, run commands, or ask the owner to do studio work.',
+        JSON.stringify({language:studio.language,task:{title:task.title,criteria:task.criteria,summary:result.summary},
+          blocker:result.question.body.slice(0,2000),references}),
+      ].join('\n\n')};
+    let nextStep='Use the available studio materials. Record which facts remain unverified and complete the supported portion.';
+    try {
+      const reply=await trackedRun({studio,task,attemptId,request});
+      nextStep=field(parseResponse(reply).nextStep,'план восстановления',2400);
+    } catch(error){
+      signal.throwIfAborted();
+      if(unconfirmedProviderStop(error))throw error;
+    }
+    return {reason:result.question.body.slice(0,2000),nextStep};
+  }
+
   async function describeAttachments(studioId, ids = []) {
     const result = [];
     for (const evidenceId of ids) {
@@ -1627,7 +1648,16 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
           (running.attachmentIds?.length || decisions.some(d => d.attachmentIds?.length) ? '\n\n' + JSON.stringify(await describeAttachments(studioId, [...new Set([...(running.attachmentIds ?? []), ...decisions.flatMap(d => d.attachmentIds ?? [])])])) : ''),
         signal: controller.signal,
       } }));
+      const recovery=await planBlockerRecovery({studio,task:running,result,attemptId,signal:controller.signal});
       if (!isCurrent()) return;
+      if(recovery){
+        const scheduled=transaction(()=>{
+          update('attempts',{...read('attempts',attemptId,'Запуск'),status:'completed',finishedAt:now()});
+          return taskState(running,'scheduled',{summary:result.summary,artifact:result.artifact,recovery});
+        });
+        enqueue(scheduled,{start:false});
+        return;
+      }
       inboxItem = transaction(() => {
         const { summary, artifact, question, improvements } = result;
         const finished = taskState(running, question ? 'waiting' : 'completed', { summary, artifact, improvements });
@@ -1853,7 +1883,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
     run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, runPrompt, report, isClosed: () => closed, active, availableStudio, onAvailable,
     effectiveAllowed: (studio) => modelPolicyFor(studio).allowed, training, hasHeldWorkflow,
-    projectPipeline, dispatcher, checkpoints, planning, prerequisites, roster, trackedRun, describeAttachments,
+    projectPipeline, dispatcher, checkpoints, planning, prerequisites, roster, trackedRun, describeAttachments,planBlockerRecovery,
     nonWorkflowActiveCount: studioId => Number(active.has(studioId)) + parallelManual(studioId).length,
     isStorageOpen: () => db.isOpen,
     afterGitMerge, withAttemptActor,

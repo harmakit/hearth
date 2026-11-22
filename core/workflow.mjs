@@ -27,7 +27,7 @@ export function createWorkflow({
   read, list, insert, update, transaction, changed, notifyInbox, addStudioInbox, addInbox, taskInbox,
   run, writeArtifact, taskControls, recommendedTaskControls, confirmTaskControls, effectiveAllowed, validateFixed,
   runPrompt, report, isClosed, active, availableStudio, onAvailable, training, hasHeldWorkflow,
-  projectPipeline, afterGitMerge, withAttemptActor=(_id,write)=>write(), dispatcher, checkpoints, planning: planningService, prerequisites, roster, trackedRun, describeAttachments,
+  projectPipeline, afterGitMerge, withAttemptActor=(_id,write)=>write(), dispatcher, checkpoints, planning: planningService, prerequisites, roster, trackedRun, describeAttachments,planBlockerRecovery,
   nonWorkflowActiveCount = () => 0, isStorageOpen = () => !isClosed(),
 }) {
   const controllers = new Map();
@@ -681,26 +681,9 @@ export function createWorkflow({
     if (purpose === 'task') {
       if (lesson) return training.selection(task, data, sources);
       const parsed = report(result);
-      if(parsed.question?.kind==='technical' && !task.recovery){
-        const director=studio.director;
-        const request={runtime:director.runtime,model:director.model||undefined,effort:director.effort||undefined,
-          projectRoot:studio.root,purpose:'resolve-blocker',signal,outputSchema:responseSchemas.blocker,prompt:[
-            'Resolve an operational blocker inside the studio. Return JSON with exactly one string field "nextStep".',
-            'Give the task one concrete, safe recovery attempt. Prefer existing project evidence, an available alternative, or a clearly marked partial draft. Do not change acceptance criteria, claim that missing evidence was verified, request permissions, run commands, or ask the owner to do studio work.',
-            JSON.stringify({language:studio.language,task:{title:task.title,criteria:task.criteria,summary:parsed.summary},
-              blocker:parsed.question.body.slice(0,2000),references:referenceArtifacts(task)?.map(({title,path})=>({title,path}))}),
-          ].join('\n\n')};
-        let nextStep='Use the available studio materials. Record which facts remain unverified and complete the supported portion.';
-        try {
-          const reply=await (trackedRun?trackedRun({studio,task,attemptId:job.runAttemptId,request}):run(request));
-          nextStep=field(parseResponse(reply).nextStep,'план восстановления',2400);
-        } catch(error){
-          signal.throwIfAborted();
-          if(unconfirmedProviderStop(error))throw error;
-        }
-        return {...parsed,recovery:{reason:parsed.question.body.slice(0,2000),nextStep},
-          ...(scoped?.worktreeId?{worktreeId:scoped.worktreeId}:{})};
-      }
+      const recovery=await planBlockerRecovery({studio,task,result:parsed,attemptId:job.runAttemptId,signal,
+        references:parsed.question?.kind==='technical'?referenceArtifacts(task)?.map(({title,path})=>({title,path})):undefined});
+      if(recovery)return {...parsed,recovery,...(scoped?.worktreeId?{worktreeId:scoped.worktreeId}:{})};
       if (task.deliveryMode === 'git') {
         if (!parsed.question && !parsed.summary) throw new Error('Исполнитель не вернул отчёт о работе в Git.');
         return { ...parsed, worktreeId: scoped.worktreeId };
