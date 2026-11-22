@@ -10,12 +10,13 @@ const train = { id: 'train-editor', kind: 'train', stage: 'review', status: 'com
     warnings: ['Ограничение GitHub'], guide: 'Проверить масштаб', exercise: 'Масштаб проверен' } };
 const production = { id: 'work', title: 'Составить карту', agentId: trainee.id, dependencies: [train.id], stage: 'backlog' };
 
-test('board shows coach, trainee and a linked training prerequisite until approval', () => {
+test('board shows the coach and a compact training prerequisite until approval', () => {
   const render = training => renderWork({ studio: { agents: [coach, trainee] }, tasks: [production, training] });
   const pending = render(train);
-  assert.match(pending, /data-task-kind="train"[^]*?Коуч агентов[^]*?Обучение[^]*?Редактор &lt;мира&gt;/);
-  assert.match(pending, /Составить карту[^]*?Ждёт обучения[^]*?data-task="train-editor"/);
-  assert.doesNotMatch(render({ ...train, stage: 'done' }), /Ждёт обучения/);
+  assert.match(pending, /data-task-kind="train"[^]*?Коуч агентов/);
+  assert.match(pending, /Составить карту[^]*?work-wait-mark[^]*?data-task="train-editor"/);
+  assert.doesNotMatch(pending,/Ждёт обучения/);
+  assert.doesNotMatch(render({ ...train, stage: 'done' }), /work-wait-mark/);
 });
 
 test('training details show evidence and dependencies are linked with a clear reason', () => {

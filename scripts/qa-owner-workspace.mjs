@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { studioInterfaceFixture } from '../test/fixtures/studio-interface.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const run = await (async()=>{await mkdir(join(root,'.tmp'),{recursive:true});return mkdtemp(join(root,'.tmp','owner-qa-'));})();
@@ -122,13 +123,25 @@ const snap=()=>desktop.request('snapshot');
 const shot=name=>desktop.screenshot(name);
 const choose=async(sel,value)=>{await desktop.set(sel,value);};
 const until=async (fn,label,ms=60000)=>eventually(async()=>fn(await snap()),label,ms);
+async function quitDesktop(instance){
+  const exit=new Promise(resolve=>instance.child.once('exit',resolve));
+  const pid=Number(instance.child.pid);
+  assert.ok(Number.isSafeInteger(pid)&&pid>0);
+  execFileSync('/usr/bin/osascript',['-l','JavaScript','-e',
+    "ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier("+pid+").terminate"]);
+  assert.equal(await Promise.race([exit.then(()=>true),delay(15000).then(()=>false)]),true,'Native Quit');
+  await instance.close();
+}
 async function dragHorizontal(handle, pane, distance) {
   const geometry=await desktop.evaluate((h,p)=>{
     const divider=document.querySelector(h).getBoundingClientRect();
     return {x:divider.x+divider.width/2,y:divider.y+divider.height/2,width:document.querySelector(p).getBoundingClientRect().width};
   }, handle,pane);
   const {x,y,width}=geometry;
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseMoved',x,y,button:'none',buttons:0});
+  await delay(100);
   await desktop.rpc('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',buttons:1,clickCount:1});
+  await delay(100);
   await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseMoved',x:x+distance/2,y,button:'left',buttons:1});
   await delay(125);
   const middle=await desktop.evaluate(p=>document.querySelector(p).getBoundingClientRect().width,pane);
@@ -160,6 +173,14 @@ try {
     await choose('[name=name]','Onboarding QA');
     await choose('[name=brief]','Книжная студия QA-STOP-PLAN');
     await choose('[name=firstResult]','Придумать пять персонажей');
+    if(process.env.HEARTH_QA_TODAY==='1'){
+      await desktop.click('[data-save-studio-draft]');
+      await quitDesktop(desktop);
+      desktop=await launch();
+      await desktop.click('main [data-open=studio]');
+      assert.equal(await desktop.evaluate(()=>document.querySelector('[name=firstResult]').value),'Придумать пять персонажей');
+      console.log('PASS создание → сохранённый черновик → нативный перезапуск → продолжение');
+    }
     await desktop.click('[data-wizard-next]');
     await choose('[name=folderMode]','existing');
     await choose('[name=root]',plain);
@@ -214,11 +235,22 @@ try {
   const target=s.projectGit.targetRef;
   const ref=()=>execFileSync('git',['-C',s.root,'rev-parse',target],{encoding:'utf8'}).trim();
   assert.equal(ref(),base);
-  await desktop.click('[data-view=inbox]');await desktop.click('[data-inbox="'+item.id+'"]');
+  if(process.env.HEARTH_QA_TODAY==='1'){
+    await desktop.click('[data-view=today]');await desktop.click('[data-today-id="'+item.id+'"]');
+  } else {
+    await desktop.click('[data-view=inbox]');await desktop.click('[data-inbox="'+item.id+'"]');
+  }
   if(process.env.HEARTH_QA_RESIZE==='1') await dragHorizontal('[data-dialog-width]','#dialog',50);
   await shot('01-package-acceptance');
   await desktop.click('#dialog-actions button[type=submit]');
   await until(x=>x.sprints.some(sp=>sp.studioId===s.id&&sp.status==='completed'),'Sprint completion');
+  if(process.env.HEARTH_QA_TODAY==='1'){
+    await eventually(()=>desktop.evaluate(()=>Boolean(document.querySelector('.today-outcome')?.textContent.includes(
+      document.documentElement.lang==='ru'?'Изменения слиты':'Changes merged'))),'Today shows confirmed merge');
+    await shot('today-real-merge');
+    console.log('PASS Сегодня → решение → подтверждённое слияние');
+    await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+s.id+'"]');
+  }
   if(await desktop.evaluate(()=>!document.querySelector('#owner-inspector').hidden))await desktop.click('[data-owner-close]');
   await desktop.click('[data-view=inbox]');await desktop.click('[data-scope=resolved]');
   await desktop.click('[data-inbox="'+item.id+'"]');
@@ -243,11 +275,20 @@ try {
   await until(x=>x.inbox.find(i=>i.id===failure.id && i.readAt && i.status==='open'),'Reading an error leaves the blocker open');
   await desktop.click('[data-inbox="'+failure.id+'"]');await desktop.click('[data-retry-from-inbox]');
   await until(x=>x.inbox.find(i=>i.taskId===errTask.id && i.kind==='error' && i.id!==failure.id && i.status==='open'),'Retry reports its actual outcome');
-  await desktop.click('[data-view=workspace]');
-  await desktop.click('[data-decision="'+ask.id+'"]');
+  if(process.env.HEARTH_QA_TODAY==='1'){
+    await desktop.click('[data-view=today]');await desktop.click('[data-today-id="'+ask.id+'"]');
+    await until(x=>x.studios.find(studio=>studio.id===book.id)?.activeAttempts===0,'Question provider has stopped');
+    await desktop.request('setStudioArchived',{studioId:book.id,archived:true});
+    await eventually(()=>desktop.evaluate(()=>!document.querySelector('#dialog').open),'Archived studio closes a stale question');
+    await desktop.request('setStudioArchived',{studioId:book.id,archived:false});
+    await desktop.click('[data-today-id="'+ask.id+'"]');
+  }else{
+    await desktop.click('[data-view=workspace]');await desktop.click('[data-decision="'+ask.id+'"]');
+  }
   await choose('[name=answer]','Подтверждаю QA T-17'); await desktop.click('#dialog-actions button[type=submit]');
   await until(x=>x.tasks.find(t=>t.id===question.id&&t.status==='completed'),'Text result');
-  for(let i=1;i<=36;i++)await desktop.request('createTask',{studioId:s.id,title:'Chapter '+i,prompt:'Edit chapter '+i});
+  for(const task of studioInterfaceFixture())await desktop.request('createTask',{studioId:s.id,...task});
+  assert.equal((await snap()).tasks.filter(t=>t.studioId===s.id).length,42);
   await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+s.id+'"]');
   await desktop.click('[data-view=work]');
   const original=await until(x=>x.tasks.find(t=>t.studioId===s.id&&t.gitDelivery?.status==='merged'&&!t.packageMembers),'Find work');
@@ -304,19 +345,33 @@ try {
   await desktop.rpc('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   await desktop.rpc('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   await eventually(()=>desktop.evaluate(()=>document.querySelector('#owner-inspector').hidden),'Escape returns to register');
+  if(process.env.HEARTH_QA_TODAY==='1'){
+    await desktop.rpc('Emulation.clearDeviceMetricsOverride');
+    await desktop.click('[data-view=workshop]');
+    await desktop.click('main [data-owner-agent]');
+    await eventually(()=>desktop.evaluate(()=>document.querySelector('#owner-title')?.textContent==='Директор'),'Role opens from team');
+    await desktop.click('[data-owner-close]');
+    await desktop.click('[data-team-toggle]');
+    assert.ok(await desktop.evaluate(()=>document.querySelector('.work-map canvas[data-room]')));
+    await desktop.click('[data-view=settings]');
+    if(await desktop.evaluate(()=>!document.querySelector('#advanced').open))await desktop.click('#advanced summary');
+    await desktop.click('#advanced [data-view=skills]');
+    assert.equal(await desktop.evaluate(()=>document.querySelector('main h1').textContent),'Библиотека');
+    await desktop.click('[data-view=work]');
+    await desktop.click('[data-work-tab=artifacts]');
+    assert.ok(await desktop.evaluate(()=>document.querySelector('[data-file-query]')));
+    await desktop.click('[data-view=app-settings]');
+    await choose('[name=density]','roomy');
+    assert.equal(await desktop.evaluate(()=>document.documentElement.dataset.density),'roomy');
+    console.log('PASS команда и мастерская, библиотека, поиск артефактов и плотность');
+  }
   assert.deepEqual(desktop.errors,[]);
-  const exit=new Promise(resolve=>desktop.child.once('exit',resolve));
-  const pid=Number(desktop.child.pid);
-  assert.ok(Number.isSafeInteger(pid) && pid>0);
-  execFileSync('/usr/bin/osascript',['-l','JavaScript','-e',
-    "ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier("+pid+").terminate"]);
-  const stopped=await Promise.race([exit.then(()=>true),delay(15000).then(()=>false)]);
-  assert.equal(stopped,true,'The isolated application did not finish the native Quit request');
-  await desktop.close();
+  await quitDesktop(desktop);
   desktop=await launch();
   const restored=await snap();
   assert.equal(restored.appLocale,'ru');
   assert.equal(restored.studios.length,3);
+  if(process.env.HEARTH_QA_TODAY==='1')assert.equal(await desktop.evaluate(()=>document.documentElement.dataset.density),'roomy');
   assert.ok(restored.conversationMessages.some(m=>m.text==='Owner QA note'));
   assert.equal(ref(),item.review.delivery.revision.candidateOid);
   if (process.env.HEARTH_QA_REVEAL==='1') {

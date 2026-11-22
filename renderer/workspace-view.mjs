@@ -1,5 +1,7 @@
 import {inboxLabelIn} from './copy.mjs';
 import {textFor} from './locale.mjs';
+import {progressMark,stageMark} from './presentation.mjs';
+import {copy} from './copy.mjs';
 const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const safe = value => String(value ?? '').replace(/[&<>"']/g, symbol => entities[symbol]);
 const statuses = {
@@ -7,12 +9,14 @@ const statuses = {
   paused: 'На паузе', idle: 'Без активных задач', error: 'Нужно внимание',
 };
 
-export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprints=[], inbox = [], appLocale = 'ru', projectAvailability={} }) {
+export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprints=[], inbox = [], appLocale = 'ru', projectAvailability={}, hasDraft=false }) {
   const ui = key=>textFor(appLocale,key);
   const archived=studios.filter(s=>s.archivedAt);
   studios=studios.filter(s=>!s.archivedAt);
-  const archive=archived.length ? `<details class="panel padded"><summary>${ui('archived')} · ${archived.length}</summary>${archived.map(s=>`<div class="row">${safe(s.name)}<button type="button" class="action secondary" data-restore-studio="${safe(s.id)}">${ui('restore')}</button></div>`).join('')}</details>` : '';
-  const create = `<button type="button" class="action" data-open="studio">${ui('create')}</button>`;
+  const archive=archived.length ? `<details class="panel padded" data-work-record="studio-archive"><summary>${ui('archived')} · ${archived.length}</summary>${archived.map(s=>`<div class="row">
+    <button type="button" class="text-button" data-archive-details="${safe(s.id)}">${safe(s.name)}</button><button type="button" class="action secondary" data-restore-studio="${safe(s.id)}">${ui('restore')}</button></div>`).join('')}</details>` : '';
+  const create = `<button type="button" class="action" data-open="studio">${hasDraft?copy('Продолжить создание'):ui('create')}</button>`+
+    `<button type="button" class="action secondary" data-open="import-bundle">${copy('Импортировать файл Hearth')}</button>`;
   const taskButton=t=>`<button type="button" class="text-button" data-portfolio-task="${safe(t.id)}" data-studio="${safe(t.studioId)}">${safe(t.title || t.id)}</button>`;
   const requestButton=i=>`<button type="button" class="text-button" data-workspace-inbox="${safe(i.studioId)}" data-decision="${safe(i.id)}">${safe(inboxLabelIn(i,appLocale) || i.id)}</button>`;
   const metric=(label,count,values,button)=>`<dt>${label}</dt><dd>${values.some(v=>v.id) ? `<details><summary aria-label="${label} · ${count}">${count}</summary>${values.filter(v=>v.id).map(button).join('<br>')}</details>` : count}</dd>`;
@@ -46,13 +50,15 @@ export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprint
         const name = safe(studio.name);
         const count = counts.get(String(studio.id));
         const sprint = sprints.findLast(s=>s.studioId===studio.id && s.status==='active');
+        const members=sprint?tasks.filter(t=>t.studioId===studio.id&&t.stage!=='replaced'&&(t.sprintId===sprint.id||sprint.taskIds?.includes(t.id))):[];
         const latest = tasks.filter(t=>t.studioId===studio.id && t.updatedAt).toSorted((a,b)=>b.updatedAt.localeCompare(a.updatedAt))[0];
         return `<article class="panel padded stack compact workspace-card">
           <header><h2><button type="button" class="workspace-studio-name" data-enter-studio="${id}">${name}</button></h2>
-          <p class="muted">${ui(studio.manualPaused ? 'paused' : studio.lifecycle === 'stopped' || Object.hasOwn(statuses,studio.lifecycle) ? studio.lifecycle : 'idle')}</p></header>
+          ${stageMark(studio.lifecycle==='active'&&!studio.manualPaused?'in_progress':'backlog',ui(studio.manualPaused ? 'paused' : studio.lifecycle === 'stopped' || Object.hasOwn(statuses,studio.lifecycle) ? studio.lifecycle : 'idle'))}</header>
           ${studio.root ? `<p class="muted workspace-path">${safe(studio.root)}</p>` : ''}
           ${studio.projectDetached || projectAvailability[studio.id]?.available===false ? `<button type="button" class="text-button" data-project-settings="${id}">${ui(studio.projectDetached?'detached':'missingFolder')}</button>` : ''}
           ${sprint?.goal || studio.brief ? `<p>${ui('goal')} · ${safe(sprint?.goal || studio.brief)}</p>` : ''}
+          ${sprint?progressMark(members.filter(t=>t.stage==='done').length,members.length):''}
           ${studio.nextScheduleAt ? `<small>${ui('window')} · ${safe(new Date(studio.nextScheduleAt).toLocaleString(appLocale))}</small>` : ''}
           <dl class="workspace-card-metrics">${metrics(count.running, count.open,studio.id)}</dl>
           ${latest ? `<div><small>${ui('latest')} · ${safe(new Date(latest.updatedAt).toLocaleString(appLocale))}</small> ${taskButton(latest)}</div>` : ''}

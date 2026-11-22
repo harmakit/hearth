@@ -10,6 +10,7 @@ export function tokenCount(locale,count) {
 }
 const locales = Object.keys(localeNames);
 const messages = {
+ today:['Today','今日','Hoy','Aujourd’hui','Сегодня'],
  firstWork:['First eligible tasks after training','培训后首批可开始的任务','Primeras tareas disponibles tras la formación','Premières tâches disponibles après la formation','Первые задачи после подготовки команды'],
  newRoles:['Roles to train','需要培训的角色','Roles que requieren formación','Rôles à former','Роли, которым предстоит обучение'],
  missingFolder:['Project folder unavailable','项目文件夹不可用','Carpeta del proyecto no disponible','Dossier du projet indisponible','Папка проекта недоступна'],

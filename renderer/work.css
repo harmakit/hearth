@@ -105,7 +105,8 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
 
 .work-view .work-board {
   display: grid;
-  grid-template-columns: repeat(6, minmax(116px, 1fr)) minmax(148px, 1.15fr);
+  grid-auto-flow:column;
+  grid-auto-columns:minmax(136px,1fr);
   align-items: start;
   gap: 8px;
   min-width: 0;
@@ -117,10 +118,8 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
 .work-view .work-lane {
   --lane-color: var(--muted);
   min-width: 0;
-  min-height: 128px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface-raised);
+  border-top: 2px solid var(--line);
+  background: var(--paper);
 }
 
 .work-view .work-lane[data-stage="in_progress"],
@@ -143,7 +142,7 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  min-height: 52px;
+  min-height: var(--row-height);
   padding: 8px 9px;
   color: var(--lane-color);
 }
@@ -194,8 +193,8 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
   flex-wrap: wrap;
   gap: 2px 9px;
   width: 100%;
-  min-height: 44px;
-  padding: 6px 0;
+  min-height: 28px;
+  padding: 3px 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -210,8 +209,8 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
 
 .work-view .work-task-link strong {
   min-width: 0;
-  font-size: 14px;
-  font-weight: 620;
+  font-size: 13px;
+  font-weight: 580;
 }
 
 .work-view .work-task-link span,
@@ -255,8 +254,8 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
 
 .work-view .work-records {
   display: grid;
-  gap: 12px;
-  max-width: 860px;
+  gap: 5px;
+  min-width: 0;
 }
 
 .work-view :is(.work-record, .work-empty) {
@@ -284,8 +283,8 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 12px;
-  min-height: 48px;
-  padding: 8px clamp(12px, 2vw, 20px);
+  min-height: var(--row-height);
+  padding: 4px 8px;
   border-radius: var(--radius);
   cursor: pointer;
   list-style: none;
@@ -351,6 +350,31 @@ main:has(.registry) .work-view .work-tabs button { min-height:32px; padding-bloc
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-raised);
+}
+
+.work-view :is(.work-record,.work-story).work-fold {
+  display:block;
+  padding:0 8px 5px;
+  border:0;
+  border-block-start:1px solid var(--line);
+  background:transparent;
+}
+.work-fold > summary { min-height:var(--row-height); padding-block:5px; cursor:pointer; }
+.work-fold > summary .stage-progress { margin-inline-start:8px; }
+.work-fold:focus-within > summary,.work-fold > summary:hover { background:var(--surface-raised); }
+.work-fold > :not(summary) { margin-block-start:6px; }
+.work-view .work-compact-links { gap:0; border-block-start:1px solid var(--line); }
+.work-view .work-compact-links > li { display:flex; gap:8px; flex-wrap:wrap; align-items:center; min-height:var(--row-height); padding:1px 5px; border:0; border-block-end:1px solid var(--line); border-radius:0; background:transparent; }
+.work-view .work-compact-links .work-task-link { flex:1; min-width:160px; }
+.work-ticket-meta,.registry-task { min-width:0; display:flex; gap:5px; align-items:center; justify-content:space-between; }
+.work-wait-mark { display:inline-flex; gap:3px; align-items:center; color:var(--yellow); font-size:12px; min-width:23px; }
+.work-wait-mark svg { width:13px; height:13px; }
+.registry td { height:var(--row-height); }
+.registry-task strong { min-width:0; }
+.registry-task .registry-meta { flex-shrink:0; white-space:nowrap; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+.registry-task .work-task-link strong { display:block; overflow-wrap:anywhere; }
+@media (max-width:1300px) {
+  .owner-layout:has(#owner-inspector:not([hidden])) .registry :is(th,td):nth-child(3) { display:none; }
 }
 
 .work-view .work-text > strong,

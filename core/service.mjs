@@ -935,6 +935,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const studioItem = list('studio_inbox').find(({ id }) => id === inboxId);
     const previous = studioItem ?? read('inbox', inboxId, 'Сообщение');
     if (input.studioId !== undefined && input.studioId !== previous.studioId) throw new Error('Решение принадлежит другой студии.');
+    if (read('studios',previous.studioId,'Студия').archivedAt) throw new Error('Студия в архиве. Восстановите её перед отправкой решения.');
     if (previous.review && input.expectedResult !== undefined && previous.review.key !== input.expectedResult) throw new Error('Версия результата изменилась.');
     validateAttachments(previous.studioId, input.attachmentIds);
     const prepared = prepareInboxAnswer(previous, input);

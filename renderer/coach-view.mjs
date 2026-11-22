@@ -165,10 +165,10 @@ export function renderSkillLibrary({ studio, skills = [], tasks = [], knowledge 
   return copy`<div class="stack skill-library">
     ${roleKnowledge({ studio, tasks, knowledge, customSkills, knowledgeEvents })}
     <section class="stack compact"><h2>Утверждённые навыки</h2>
-      ${skills.length ? skills.map(skill => copy`<article class="panel padded stack compact" data-skill-id="${safe(skill.id)}">
-        <h3>${safe(skill.title || skill.path)}</h3>${skillSource(skill)}
+      ${skills.length ? skills.map(skill => copy`<details class="panel padded work-fold" data-skill-id="${safe(skill.id)}" data-library-detail="imported-${safe(skill.id)}">
+        <summary><strong>${safe(skill.title || skill.path)}</strong></summary>${skillSource(skill)}
         <p>Роли · ${safe((studio?.agents ?? []).filter(agent => agent.skillIds?.includes(skill.id)).map(agentName).join(', ') || copy('Пока нет'))}</p>
-      </article>`).join('') : copy('<p class="panel padded muted">Утверждённых навыков пока нет. Они появляются после ревью обучения.</p>')}
+      </details>`).join('') : copy('<p class="panel padded muted">Утверждённых навыков пока нет. Они появляются после ревью обучения.</p>')}
     </section>
     <section class="panel padded stack compact"><div class="row"><div><h2>Поиск на GitHub</h2>
       <p class="muted">Минимум звёзд · ${skillStarLabel(studio)}</p></div>

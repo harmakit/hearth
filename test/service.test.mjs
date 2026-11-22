@@ -43,6 +43,19 @@ async function until(read, predicate) {
   assert.fail(`State did not converge: ${JSON.stringify(read())}`);
 }
 
+test('stale owner form cannot answer an open question in an archived studio', async t=>{
+  const service=createStudioService({dbPath:':memory:',run:async()=>({text:'{"question":"Как продолжить?"}'})});
+  t.after(()=>service.close());
+  const current=studio(service);
+  const work=task(service,current.id);
+  service.startTask({taskId:work.id});
+  const before=await until(service.snapshot,s=>s.inbox.some(i=>i.kind==='question')&&s.studios[0].activeAttempts===0);
+  const item=before.inbox.find(i=>i.kind==='question');
+  service.setStudioArchived({studioId:current.id,archived:true});
+  assert.throws(()=>service.answerInbox({studioId:current.id,inboxId:item.id,answer:'Продолжить'}),/архив/);
+  assert.equal(service.snapshot().inbox.find(i=>i.id===item.id).status,'open');
+});
+
 test('stores app policy and an explicit empty studio override while preserving legacy role modes', async (t) => {
   const dbPath = database(t);
   const calls = [];

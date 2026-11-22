@@ -1,7 +1,8 @@
 import {textFor} from './locale.mjs';
 import {copy as uiCopy, onCopyLocale , getCopyLocale} from './copy.mjs';
 import { roleNames } from './workshop.mjs';
-import { coachTitle, renderBoardTraining } from './coach-view.mjs';
+import { coachTitle, pendingDependencies } from './coach-view.mjs';
+import {progressMark,stageMark} from './presentation.mjs';
 import { renderEvidence, renderRetrospective } from './legacy-view.mjs';
 
 const makeTabs = () => ({
@@ -20,12 +21,6 @@ const legacyStages = {
   queued: 'ready', scheduled: 'ready', running: 'in_progress', waiting: 'blocked',
   completed: 'done', failed: 'blocked', interrupted: 'blocked', cancelled: 'blocked',
 };
-const makeAttempts = () => ({
-  queued: uiCopy('В очереди'), scheduled: uiCopy('В очереди'), running: uiCopy('Выполняется'), waiting: uiCopy('Ждёт ответа'),
-  completed: uiCopy('Завершена'), failed: uiCopy('Ошибка'), interrupted: uiCopy('Прервана'), cancelled: uiCopy('Отменена'),
-});
-let attempts = makeAttempts();
-onCopyLocale(() => { attempts = makeAttempts(); });
 const makePlanStatuses = () => ({
   draft: uiCopy('Черновик'), pending: uiCopy('Ждёт согласования'), approved: uiCopy('Согласован'), returned: uiCopy('На доработке'),
 });
@@ -72,50 +67,49 @@ function taskLink(task, showStage = true) {
   return `<button type="button" class="work-task-link" data-task="${safe(task.id)}">
     <strong>${safe(nameOf(task, uiCopy('Задача без названия')))}</strong>
     ${task.kind === 'debt' ? uiCopy('<span class="debt-label">Улучшение</span>') : ''}
-    ${showStage ? `<span>${stages[stageOf(task)]}</span>` : ''}
+    ${showStage ? stageMark(stageOf(task),stages[stageOf(task)]) : ''}
   </button>`;
+}
+
+function dependencyLink(task,byTask) {
+  const pending=pendingDependencies(task,byTask), first=pending.find(row=>!row.missing);
+  if(!pending.length)return '';
+  const label=uiCopy`Зависимости · ${pending.length}`;
+  return `<button class="text-button work-wait-mark" type="button" data-task="${safe(first?.id??task.id)}" aria-label="${safe(label)}" title="${safe(label)}">
+    <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m6 6 2-2a2.5 2.5 0 0 1 4 4l-2 2M6 7 4 9a2.5 2.5 0 0 0 4 4l2-2m-4-1 4-4"/></svg>${pending.length}</button>`;
 }
 
 function linkedTasks(tasks, byTask) {
   if (!tasks.length) return '';
-  return `<ul class="work-links">${tasks.map(task => {
-    const dependencies = listed(task.dependencies);
-    return `<li>
+  return `<ul class="work-links work-compact-links">${tasks.map(task => `<li>
       ${taskLink(task)}
-      ${task.artifactPath ? `<p class="work-file">${safe(task.artifactPath)}</p>` : ''}
-      ${bulletBlock(uiCopy('Критерии приёмки'), task.criteria)}
-      ${dependencies.length ? uiCopy`<div class="work-dependencies"><span>Зависимости</span>
-        <ul>${dependencies.map(id => {
-          const dependency = byTask.get(id);
-          return `<li>${dependency ? taskLink(dependency) : `<span>${safe(id)}</span>`}</li>`;
-        }).join('')}</ul>
-      </div>` : ''}
-    </li>`;
-  }).join('')}</ul>`;
+      ${task.artifactPath ? `<small class="work-muted">${safe(task.artifactPath)}</small>` : ''}
+      ${dependencyLink(task,byTask)}
+    </li>`).join('')}</ul>`;
 }
 
-function board(tasks, studio, byTask) {
+function board(tasks, studio, byTask, sprints, showEmpty, allSprints) {
+  const active=sprints.findLast(row=>row.status==='active');
+  if(active&&!allSprints)tasks=tasks.filter(t=>t.sprintId===active.id||active.taskIds?.includes(t.id));
   const replaced = tasks.filter(task => task.stage === 'replaced');
-  if (!tasks.length) return empty(uiCopy('На доске пока пусто'), uiCopy('Задачи появятся здесь после согласования плана или создания вручную.'));
   const byStage = Map.groupBy(tasks.filter(task => task.stage !== 'replaced'), stageOf);
   const agents = new Map((studio.agents ?? []).map(agent => [agent.id, agent]));
-  return uiCopy`<div class="work-board" role="region" aria-label="Доска задач" tabindex="0">
-    ${Object.entries(stages).map(([stage, label]) => {
+  const control = action(showEmpty?uiCopy('Скрыть пустые этапы'):uiCopy('Показать пустые этапы'),'board-empty','toggle')+
+    (active?action(allSprints?uiCopy('Текущий спринт'):uiCopy('Все задачи'),'board-scope','toggle'):'');
+  return uiCopy`<div class="actions">${control}</div>
+  ${!tasks.length&&!showEmpty?empty(uiCopy('На доске пока пусто'),uiCopy('Задачи появятся здесь после согласования плана или создания вручную.')):''}
+  <div class="work-board" role="region" aria-label="Доска задач" tabindex="0">
+    ${Object.entries(stages).filter(([stage])=>showEmpty||byStage.has(stage)).map(([stage, label]) => {
       const lane = byStage.get(stage) ?? [];
       return `<section class="work-lane" data-stage="${stage}" aria-labelledby="work-stage-${stage}">
-        <header><h2 id="work-stage-${stage}">${label}</h2><span>${lane.length}</span></header>
+        <header><h2 id="work-stage-${stage}">${stageMark(stage,label)}</h2><span>${lane.length}</span></header>
         <ul>${lane.map(task => {
           const agent = agents.get(task.agentId);
           const owner = agent ? (agent.systemRole === 'coach' ? coachTitle : agent.name || lookup(roleNames, agent.role)) :
             (task.agentId ? '' : (studio.director?.name || uiCopy('Директор')));
-          const attempt = lookup(attempts, task.status) ?? task.status;
           return `<li class="work-task"${['train', 'debt'].includes(task.kind) ? ` data-task-kind="${task.kind}"` : ''}>
             ${taskLink(task, false)}
-            ${owner ? `<p class="work-owner">${safe(owner)}</p>` : ''}
-            ${task.priority != null ? uiCopy`<p class="work-owner">Приоритет: ${safe(task.priority)}</p>` : ''}
-            ${task.gitDelivery ? uiCopy('<p class="work-owner">Git-доставка</p>') : ''}
-            ${renderBoardTraining(task, agents, byTask)}
-            ${attempt ? uiCopy`<p class="work-attempt" data-attempt="${safe(task.status)}"><span>Попытка</span> ${safe(attempt)}</p>` : ''}
+            <div class="work-ticket-meta"><small class="registry-meta">${safe(task.legacyId||task.id?.slice(0,8))}</small>${dependencyLink(task,byTask)||`<small class="work-owner">${safe(owner)}</small>`}</div>
           </li>`;
         }).join('')}</ul>
       </section>`;
@@ -123,7 +117,7 @@ function board(tasks, studio, byTask) {
   </div>${replaced.length ? uiCopy`<details class="work-record"><summary>Заменённые задачи · ${replaced.length}</summary>${linkedTasks(replaced, byTask)}</details>` : ''}`;
 }
 
-function epicView(epics, stories, tasks, byTask, expandedEpics) {
+function epicView(epics, stories, tasks, byTask, expandedEpics, expandedRecords) {
   const storiesByEpic = groupByField(stories, 'epicId');
   const tasksByStory = groupByField(tasks, 'storyId');
   const tasksByEpic = groupByField(tasks, 'epicId');
@@ -135,12 +129,14 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
     return empty(uiCopy('Эпиков и историй пока нет'), uiCopy('Они появятся здесь после согласования плана.'));
   }
 
-  const showStories = entries => entries.map(story => `<section class="work-story">
-    <h3>${safe(nameOf(story, uiCopy('История без названия')))}</h3>
-    ${textBlock(uiCopy('Цель'), story.goal || story.description)}
-    ${bulletBlock(uiCopy('Критерии приёмки'), story.acceptance ?? story.criteria ?? story.acceptanceCriteria)}
-    ${linkedTasks(tasksByStory.get(story.id) ?? [], byTask)}
-  </section>`).join('');
+  const showStories = entries => entries.map(story => {
+    const children=tasksByStory.get(story.id)??[], key='story:'+story.id;
+    return uiCopy`<details class="work-story work-fold" data-work-record="${safe(key)}"${expandedRecords.has(key)?' open':''}>
+      <summary><span class="work-muted">История</span> <button type="button" class="text-button" data-owner-story="${safe(story.id)}">${safe(nameOf(story,uiCopy('История без названия')))}</button>
+      ${progressMark(children.filter(t=>stageOf(t)==='done').length,children.length)}</summary>
+      ${linkedTasks(children,byTask)}
+    </details>`;
+  }).join('');
 
   return `<div class="work-records">
     ${epics.toSorted((a, b) => (b.priority ?? 0) - (a.priority ?? 0)).map(epic => {
@@ -149,6 +145,7 @@ function epicView(epics, stories, tasks, byTask, expandedEpics) {
       const taskCount = epicStories.reduce((count, story) => count + (tasksByStory.get(story.id)?.length ?? 0), directTasks.length);
       return uiCopy`<details class="work-record work-epic" name="studio-epics" data-epic-section="${safe(epic.id)}"${expandedEpics.has(epic.id) ? ' open' : ''}>
         <summary>
+          <span class="work-muted">Эпик</span>
           <strong>${safe(epic.kind === 'debt' && nameOf(epic) === 'Техдолг' ? uiCopy('Улучшения проекта') : nameOf(epic, uiCopy('Эпик без названия')))}</strong>
           <span class="work-muted">Историй: ${epicStories.length} · Задач: ${taskCount}</span>
         </summary>
@@ -171,7 +168,7 @@ function planButton(plan) {
   return uiCopy`<button type="button" class="work-plan-button" data-plan="${safe(plan.id)}" aria-label="Открыть план «${title}»">Открыть план</button>`;
 }
 
-function sprintView(studio, sprints, plans, tasks, byTask) {
+function sprintView(studio, sprints, plans, tasks, byTask, expandedRecords) {
   const plansById = new Map(plans.map(plan => [plan.id, plan]));
   const plansBySprint = new Map(plans.filter(plan => plan.sprintId).map(plan => [plan.sprintId, plan]));
   const tasksBySprint = groupByField(tasks, 'sprintId');
@@ -188,14 +185,16 @@ function sprintView(studio, sprints, plans, tasks, byTask) {
     const status = lookup(planStatuses, plan?.status ?? sprint.approvalStatus);
     const lifecycle = lookup(sprintStatuses, sprint.status);
     const progress = uiCopy`Задач готово ${done} из ${members.length}`;
-    return `<article class="work-record">
-      <header><h2>${safe(nameOf(sprint, plan?.title || uiCopy('Спринт без названия')))}</h2>
+    const key='sprint:'+sprint.id;
+    return `<details class="work-record work-fold" data-work-record="${safe(key)}"${expandedRecords.has(key)?' open':''}>
+      <summary><strong>${safe(nameOf(sprint, plan?.title || uiCopy('Спринт без названия')))}</strong>
         <div class="work-record-statuses">
           ${sprint.debtSprint || plan?.debtSprint ? uiCopy('<span class="debt-label">Спринт улучшений</span>') : ''}
           ${lifecycle ? `<span class="work-muted">${lifecycle}</span>` : ''}
           ${status ? `<span class="work-approval" data-plan-status="${safe(plan?.status ?? sprint.approvalStatus)}">${status}</span>` : ''}
         </div>
-      </header>
+        ${progressMark(done,members.length)}
+      </summary>
       ${textBlock(uiCopy('Цель'), sprint.goal || plan?.goal)}
       ${members.length ? `<div class="work-progress">
         <p aria-hidden="true">${progress}</p>
@@ -207,7 +206,7 @@ function sprintView(studio, sprints, plans, tasks, byTask) {
       ${sprint.carryovers?.length ? uiCopy`<div class="work-text"><strong>Переносы</strong><ul>${sprint.carryovers.map(row => `<li>
         ${byTask.get(row.taskId) ? taskLink(byTask.get(row.taskId), false) : safe(row.taskId)} · ${safe(row.reason)}</li>`).join('')}</ul></div>` : ''}
       <div class="actions">${plan ? planButton(plan) : ''}${sprint.status === 'active' ? action(uiCopy('Закрыть спринт'), 'close-sprint', sprint.id) : ''}</div>
-    </article>`;
+    </details>`;
   });
   const upcoming = plans.filter(plan => !attachedPlans.has(plan.id) && (plan.kind === 'sprint' || plan.status !== 'approved'));
   const closed=sprints.filter(s=>s.status==='completed');
@@ -239,7 +238,7 @@ function sprintView(studio, sprints, plans, tasks, byTask) {
   </div>`;
 }
 
-function meetingsView(meetings, byTask, sprints) {
+function meetingsView(meetings, byTask, sprints, expandedRecords) {
   const controls = `<div class="actions">${action(uiCopy('Назначить встречу'), 'open', 'meeting')}</div>`;
   if (!meetings.length) return controls + empty(uiCopy('Встреч пока не было'), uiCopy('Здесь сохраняются позиции участников, решения и задачи по итогам встречи.'));
   const bySprint = new Map(sprints.map(sprint => [sprint.id, sprint]));
@@ -251,17 +250,19 @@ function meetingsView(meetings, byTask, sprints) {
       ? `<time datetime="${date.toISOString()}">${meetingDate.format(date)}</time>`
       : '';
     const related = listed(meeting.taskIds).map(id => byTask.get(id)).filter(Boolean);
-    return `<article class="work-record">
-      <header><h2>${safe(nameOf(meeting, kind || uiCopy('Встреча')))}</h2>
+    const key='meeting:'+String(meeting.id??meeting.title??'');
+    return `<details class="work-record work-fold" data-work-record="${safe(key)}"${expandedRecords.has(key)?' open':''}>
+      <summary><strong>${safe(nameOf(meeting, kind || uiCopy('Встреча')))}</strong>
         ${time ? `<span class="work-muted">${time}</span>` : ''}
-      </header>
+        ${meeting.stage ? stageMark(meeting.stage==='resolved'?'done':'review',meetingStages[meeting.stage]??meeting.stage):''}
+      </summary>
       ${meeting.stage ? uiCopy`<p class="work-muted">${safe(meetingStages[meeting.stage] ?? meeting.stage)} · Версия ${safe(meeting.version)}</p>` : ''}
       ${sprint ? `<p class="work-muted">${safe(nameOf(sprint, uiCopy('Спринт')))}</p>` : ''}
       ${textBlock(uiCopy('Итог'), meeting.outcome || meeting.summary)}
       ${bulletBlock(uiCopy('Решения'), listed(meeting.decisions).map(decision => decision.text ?? decision))}
       ${linkedTasks(related, byTask)}
       ${meeting.id ? action(uiCopy('Открыть встречу'), 'meeting-detail', meeting.id) : ''}
-    </article>`;
+    </details>`;
   }).join('')}</div>`;
 }
 
@@ -339,6 +340,7 @@ export function registerRows(tasks, studio, sprints, query, stage, sprintId='', 
   const sprintNames = new Map(sprints.map(s => [s.id, s.title]));
   const needle = query.trim().toLocaleLowerCase();
   const rows = [];
+  const byTask=new Map(tasks.map(task=>[task.id,task]));
   for (const task of tasks) {
     if ((sprintId && task.sprintId!==sprintId) || (agentId && task.agentId!==agentId)) continue;
     const owner = owners.get(task.agentId) || (task.agentId ? uiCopy('Неизвестный агент') : uiCopy('Директор'));
@@ -346,21 +348,21 @@ export function registerRows(tasks, studio, sprints, query, stage, sprintId='', 
     const state = task.stage === 'replaced' ? 'replaced' : stageOf(task);
     if (stage && state !== stage) continue;
     if (![task.title, task.id, owner, sprint, task.prompt].join(' ').toLocaleLowerCase().includes(needle)) continue;
-    rows.push(`<tr><td>${taskLink(task, false)}<small class="registry-meta">${safe(task.legacyId || task.id?.slice(0,8))}${task.priority!=null ? ' · P'+safe(task.priority) : ''}</small></td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${safe(stages[state] || uiCopy('Заменена'))}</td></tr>`);
+    rows.push(`<tr><td><div class="registry-task">${taskLink(task, false)}<small class="registry-meta">${safe(task.legacyId || task.id?.slice(0,8))}${task.priority!=null ? ' · P'+safe(task.priority) : ''}</small></div></td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${stageMark(state,stages[state]||uiCopy('Заменена'))}${dependencyLink(task,byTask)}</td></tr>`);
   }
   return rows.join('') || uiCopy('<tr><td colspan="4">По этим условиям задач нет.</td></tr>');
 }
 
-export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set(), registryQuery = '', registryStage = '', registrySprint = '', registryOwner = '' } = {}) {
+export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set(), expandedRecords=new Set(), boardShowEmpty=false, boardAllSprints=false, registryQuery = '', registryStage = '', registrySprint = '', registryOwner = '' } = {}) {
   const filterSelect=(name,label,items,selected)=>uiCopy`<label class="registry-filter">${label}<select data-registry-${name}><option value="">Все</option>${items.map(i=>`<option value="${safe(i.id)}" ${i.id===selected?'selected':''}>${safe(i.title || i.name || i.roleTitle || i.role || i.id)}</option>`).join('')}</select></label>`;
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
   const views = {
     registry: () => uiCopy`<section><div class="actions"><input type="search" data-registry-query aria-label="Найти задачу" placeholder="Название, ID, агент, спринт" value="${safe(registryQuery)}"><select data-registry-stage aria-label="Этап"><option value="">Все этапы</option>${Object.entries({...stages, replaced: uiCopy('Заменена')}).map(([key,label]) => `<option value="${key}" ${registryStage === key ? 'selected' : ''}>${label}</option>`).join('')}</select>${filterSelect("sprint",uiCopy("Спринт"),sprints,registrySprint)}${filterSelect("owner",uiCopy("Исполнитель"),studio.agents ?? [],registryOwner)}</div><div class="registry-scroll"><table class="registry"><thead><tr><th>Задача</th><th>Ответственный</th><th>Спринт</th><th>Этап</th></tr></thead><tbody data-registry-rows>${registerRows(tasks, studio, sprints, registryQuery, registryStage, registrySprint, registryOwner)}</tbody></table></div></section>`,
-    board: () => board(tasks, studio, byTask),
-    epics: () => epicView(epics, stories, tasks, byTask, expandedEpics),
-    sprints: () => sprintView(studio, sprints, plans, tasks, byTask),
-    meetings: () => meetingsView(meetings, byTask, sprints),
+    board: () => board(tasks, studio, byTask,sprints,boardShowEmpty,boardAllSprints),
+    epics: () => epicView(epics, stories, tasks, byTask, expandedEpics,expandedRecords),
+    sprints: () => sprintView(studio, sprints, plans, tasks, byTask,expandedRecords),
+    meetings: () => meetingsView(meetings, byTask, sprints,expandedRecords),
     artifacts: () => artifactsView(tasks, plans, evidence,studio,sprints),
     planning: () => planningView(studio, phases, tasks),
   };

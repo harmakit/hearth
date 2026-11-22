@@ -2,30 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderWork } from '../renderer/work-view.mjs';
 
-test('board shows every workflow stage and keeps attempt status separate', () => {
+test('board hides empty lanes by default and can show all seven stages', () => {
   const html = renderWork({ tab: 'board', tasks: [
     { id: 'reviewed', title: 'Эскиз карты', stage: 'review', status: 'completed' },
     { id: 'legacy', title: 'Старая задача', status: 'completed' },
   ] });
 
   const stages = [...html.matchAll(/data-stage="([a-z_]+)"/g)].map(match => match[1]);
-  assert.deepEqual(stages, ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'blocked']);
-  assert.match(html, /data-stage="review"[^]*?data-task="reviewed"[^]*?Попытка[^]*?Завершена/);
+  assert.deepEqual(stages, ['review', 'done']);
+  assert.match(html, /data-stage="review"[^]*?data-task="reviewed"/);
+  assert.doesNotMatch(html,/Попытка/);
   assert.match(html, /data-stage="done"[^]*?data-task="legacy"/);
+  const all=renderWork({tab:'board',tasks:[{id:'x',stage:'ready'}],boardShowEmpty:true});
+  assert.equal([...all.matchAll(/data-stage="/g)].length,7);
 });
 
-test('epics include linked stories, acceptance criteria, tasks and dependencies', () => {
+test('epics show typed stories and compact task rows without repeating task criteria', () => {
   const html = renderWork({
     tab: 'epics',
     epics: [{ id: 'epic', title: 'Подготовить мир' }],
     stories: [{ id: 'story', epicId: 'epic', title: 'Создать карту', acceptance: ['Есть легенда'] }],
     tasks: [
-      { id: 'map', title: 'Эскиз карты', storyId: 'story', dependencies: ['palette'] },
-      { id: 'palette', title: 'Цветовая схема', stage: 'done' },
+      { id: 'map', title: 'Эскиз карты', storyId: 'story', criteria:'Секрет критерия задачи',dependencies: ['palette'] },
+      { id: 'palette', title: 'Цветовая схема', stage: 'blocked' },
     ],
   });
-  assert.match(html, /Подготовить мир[^]*?Создать карту[^]*?Есть легенда[^]*?data-task="map"/);
-  assert.match(html, /Зависимости[^]*?data-task="palette"[^]*?Цветовая схема/);
+  assert.match(html, /Подготовить мир[^]*?История[^]*?Создать карту[^]*?data-task="map"/);
+  assert.match(html, /data-owner-story="story"/);
+  assert.doesNotMatch(html,/Секрет критерия задачи|Есть легенда/);
+  assert.match(html, /data-task="palette"[^]*?Цветовая схема/);
 });
 
 test('epics start collapsed and open the requested section with a compact summary', () => {
