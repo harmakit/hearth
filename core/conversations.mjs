@@ -59,7 +59,7 @@ export function createConversations({
   read, list, insert, update, transaction, changed = (value) => value,
   now = () => new Date().toISOString(), queue = () => {},
 }) {
-  function postStudioMessage(input) {
+  function postStudioMessage(input, directorInbox) {
     const studio = read('studios', input.studioId, 'Студия');
     const text = messageText(input.text);
     const attachmentIds = attachments(input.attachmentIds);
@@ -70,14 +70,15 @@ export function createConversations({
     const existing = conversationId ? read('conversations', conversationId, 'Беседа') : null;
     const agentId = input.agentId === undefined ? existing?.agentId ?? null : identifier(input.agentId, 'агент');
     const taskId = input.taskId === undefined ? existing?.taskId ?? null : identifier(input.taskId, 'задача');
-    if (existing && (existing.studioId !== studio.id || existing.agentId !== agentId || existing.taskId !== taskId)) {
+    if (existing && (existing.studioId !== studio.id || existing.agentId !== agentId || existing.taskId !== taskId ||
+      existing.inboxId !== directorInbox?.inboxId)) {
       throw new Error('Беседа относится к другому адресату или задаче.');
     }
     const kind = input.kind ?? (agentId ? 'chat' : 'note');
     if (!['chat', 'note','comment'].includes(kind) || (kind === 'note' && agentId) || (kind === 'comment' && (!taskId || agentId))) {
       throw new Error('Записку можно адресовать директору.');
     }
-    const operationKey = keyFor([agentId, taskId, kind, text, attachmentIds]);
+    const operationKey = keyFor([agentId, taskId, kind, text, attachmentIds, ...(directorInbox ? [directorInbox] : [])]);
     const messageId = operationId ? keyFor([studio.id, operationId]) : randomUUID();
 
     const { message, created } = transaction(() => {
@@ -93,11 +94,14 @@ export function createConversations({
       if (taskId && read('tasks', taskId, 'Задача').studioId !== studio.id) throw new Error('Задача относится к другой студии.');
       const createdAt = now();
       const conversation = existing ?? list('conversations').find((row) =>
-        row.studioId === studio.id && row.agentId === agentId && row.taskId === taskId)
-        ?? insert('conversations', { id: randomUUID(), studioId: studio.id, agentId, taskId, createdAt });
+        row.studioId === studio.id && row.agentId === agentId && row.taskId === taskId && row.inboxId === directorInbox?.inboxId)
+        ?? insert('conversations', { id: randomUUID(), studioId: studio.id, agentId, taskId, createdAt,
+          ...(directorInbox ? {inboxId:directorInbox.inboxId} : {}),
+        });
       const message = insert('conversationMessages', {
         id: messageId, studioId: studio.id, conversationId: conversation.id, author: 'owner',
         kind, status: kind==='comment' ? 'processed' : 'queued', text, attachmentIds, operationId, operationKey, createdAt,
+        ...(directorInbox ? {directorInbox} : {}),
       });
       return { message, created: true };
     });
@@ -112,7 +116,7 @@ export function createConversations({
   function conversationHistory({ studioId, conversationId, agentId = null, taskId = null }) {
     const conversation = conversationId
       ? read('conversations', conversationId, 'Беседа')
-      : list('conversations').find((row) => row.studioId === studioId && row.agentId === agentId && row.taskId === taskId);
+      : list('conversations').find((row) => row.studioId === studioId && row.agentId === agentId && row.taskId === taskId && !row.inboxId);
     if (!conversation || conversation.studioId !== studioId) return [];
     const recent = list('conversationMessages').filter((row) => row.conversationId === conversation.id).slice(-historyLimit);
     let remaining = historyTextLimit;

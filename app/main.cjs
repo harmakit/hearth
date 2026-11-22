@@ -290,6 +290,7 @@ async function start() {
     inspectRuntime: inspect,
     run: async request => run({ ...request, projectRoot: await validateRoot(request.projectRoot) }),
     writeArtifact: artifacts.write,
+    readArtifact: artifacts.read,
     findSkills,
     findMaterials: createMaterialFinder(),
     projectPipeline,

@@ -6,6 +6,7 @@ import { coachFor, ExerciseResponseError, exerciseResult } from './training.mjs'
 import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 import { buildTaskContext } from './checkpoints.mjs';
 import { unconfirmedProviderStop } from './dispatcher.mjs';
+import { inboxSuggestions } from './director-inbox.mjs';
 
 const now = () => new Date().toISOString();
 const trainingFinished = 'Обучение завершено';
@@ -687,7 +688,7 @@ export function createWorkflow({
     }
     if (purpose === 'review') {
       if (typeof data.pass !== 'boolean') throw new Error('Проверяющий не указал результат ревью.');
-      return { pass: data.pass, summary: field(data.summary, 'итог ревью') };
+      return { pass: data.pass, summary: field(data.summary, 'итог ревью'), choices: inboxSuggestions(data.ownerReplies) };
     }
     return data;
   }
@@ -810,7 +811,9 @@ export function createWorkflow({
           return;
         }
         state(studio, 'awaiting-approval', 'План ждёт подтверждения');
-        return addStudioInbox(studio.id, 'plan', { planId: plan.id, title: plan.title, body: plan.goal });
+        return addStudioInbox(studio.id, 'plan', { planId: plan.id, title: plan.title, body: plan.goal,
+          ...(plan.ownerReplies?.length ? {choices:plan.ownerReplies} : {}),
+        });
       }
       case 'publish': {
         const plan = read('plans', job.planId, 'План');
@@ -900,7 +903,7 @@ export function createWorkflow({
         if (task.requiresAcceptance) {
           update('tasks', { ...task, review: result.summary, status: 'waiting', stage: 'qa', updatedAt: now() });
           state(studio, studio.lifecycle === 'paused' ? 'paused' : 'active', 'Результат ждёт приёмки');
-          return addInbox(task, 'acceptance', { title: `Принять результат · ${task.title}`, body: result.summary });
+          return addInbox(task, 'acceptance', { title: `Принять результат · ${task.title}`, body: result.summary, choices: result.choices });
         }
         if (task.deliveryMode === 'git') return readyToMerge(studio, { ...task, review: result.summary });
         return toDirector(studio, task, { review: result.summary });

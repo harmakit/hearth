@@ -124,6 +124,14 @@ const parent=await realpath(await mkdtemp(join(tmpdir(),'hearth-qa-new-')));
 const snap=()=>desktop.request('snapshot');
 const shot=name=>desktop.screenshot(name);
 const choose=async(sel,value)=>{await desktop.set(sel,value);};
+async function sendDirector(option, edited) {
+  const before=(await snap()).conversationMessages.filter(row=>row.directorInbox).length;
+  await desktop.click(`[data-inbox-suggestion="${option}"]`);
+  assert.ok(await desktop.evaluate(()=>document.activeElement.name==='directorReply' && document.activeElement.value.trim()));
+  assert.equal((await snap()).conversationMessages.filter(row=>row.directorInbox).length,before,'Option only fills the editor');
+  if (edited !== undefined) await choose('[name=directorReply]',edited);
+  await desktop.click('[data-director-send]');
+}
 const until=async (fn,label,ms=60000)=>eventually(async()=>fn(await snap()),label,ms);
 async function quitDesktop(instance){
   const exit=new Promise(resolve=>instance.child.once('exit',resolve));
@@ -258,11 +266,23 @@ async function checkOutcomeMotion() {
       label:outcome.querySelector('[role="status"] strong').textContent};
   });
   assert.deepEqual(retained,{sameNode:true,focused:true,samePulse:true,label:appeared},'Result node, focus, and active pulse survive a snapshot');
+  await desktop.evaluate(() => {
+    globalThis.motionOutcomeMedia=matchMedia('(prefers-reduced-motion: reduce)');
+    globalThis.motionOutcomeMedia.addEventListener('change',()=>{globalThis.motionOutcomeMediaChanged=true;},{once:true});
+  });
   await emulateMotion('reduce');
-  await eventually(()=>desktop.evaluate(() => {
+  const motionAfterReduction=()=>desktop.evaluate(() => {
     const outcome=document.querySelector('.today-outcome');
-    return outcome===globalThis.motionOutcomeNode && outcome.querySelector('[role="status"] strong').textContent && !outcome.getAnimations().length;
-  }),'Reducing motion cancels the active pulse and leaves the status');
+    return {sameNode:outcome===globalThis.motionOutcomeNode, label:outcome?.querySelector('[role="status"] strong')?.textContent,
+      reduced:globalThis.motionOutcomeMedia.matches, changed:Boolean(globalThis.motionOutcomeMediaChanged),
+      animations:outcome?.getAnimations().map(animation=>animation.playState)};
+  });
+  await eventually(async()=>{
+    const {sameNode,label,reduced,animations}=await motionAfterReduction();
+    return sameNode && label===appeared && reduced && !animations.length;
+  },'Reducing motion cancels the active pulse and leaves the status').catch(async error=>{
+    throw new Error(`${error.message} ${JSON.stringify(await motionAfterReduction())}`,{cause:error});
+  });
   await emulateMotion('no-preference');
   await desktop.click('[data-view=workspace]');
   await desktop.click('[data-view=today]');
@@ -295,6 +315,42 @@ try {
   if(process.env.HEARTH_QA_LOCALE){
     await appLocale(process.env.HEARTH_QA_LOCALE);
     await desktop.click('[data-view="workspace"]');
+  }
+  if(process.env.HEARTH_QA_HINTS==='1'){
+    await desktop.click('[data-view=today]');
+    await eventually(()=>desktop.evaluate(()=>Boolean(document.querySelector('[data-open="studio"][aria-describedby~="onboarding-description"]'))),'Hint anchored to existing create button');
+    const description=await desktop.evaluate(()=>document.querySelector('#onboarding-description').textContent);
+    const accessibility=await desktop.rpc('Accessibility.getFullAXTree');
+    assert.ok(accessibility.nodes.some(node=>node.role?.value==='button' && node.description?.value===description),
+      'The existing button exposes the contextual description to assistive technology');
+    await desktop.rpc('Emulation.setDeviceMetricsOverride',{width:590,height:470,deviceScaleFactor:1,mobile:false});
+    assert.ok(await desktop.evaluate(()=>{
+      const hint=document.querySelector('.onboarding-hint').getBoundingClientRect();
+      return hint.width>0 && hint.left>=0 && hint.right<=innerWidth+1;
+    }),'Hint fits the narrow window');
+    await desktop.rpc('Emulation.clearDeviceMetricsOverride');
+    await desktop.click('.onboarding-dismiss');
+    assert.ok(await desktop.evaluate(()=>document.querySelector('#onboarding-confirm').open && document.activeElement.hasAttribute('data-hint-cancel')));
+    await desktop.rpc('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await desktop.rpc('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await eventually(()=>desktop.evaluate(()=>!document.querySelector('#onboarding-confirm').open && document.activeElement.classList.contains('onboarding-dismiss')),'Escape keeps hints and returns focus');
+    await desktop.click('.onboarding-dismiss');
+    await desktop.click('[data-hint-disable]');
+    await until(view=>view.onboardingHintsEnabled===false,'Hints disabled for profile');
+    await quitDesktop(desktop);
+    desktop=await launch();
+    assert.equal((await snap()).onboardingHintsEnabled,false);
+    await desktop.click('[data-view=today]');
+    assert.equal(await desktop.evaluate(()=>document.querySelector('.onboarding-hint')),null);
+    await desktop.click('[data-view=app-settings]');
+    await choose('[name=onboardingHints]',true);
+    await until(view=>view.onboardingHintsEnabled===true,'Restore onboarding preference');
+    await desktop.rpc('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+    await desktop.click('[data-view=today]');
+    await eventually(()=>desktop.evaluate(()=>document.querySelector('.onboarding-pointer')?.getAnimations().length===0),'Reduced motion keeps a static hint');
+    await desktop.rpc('Emulation.setEmulatedMedia',{features:[]});
+    await desktop.click('[data-view=workspace]');
+    console.log('PASS onboarding anchor, Escape, profile persistence, settings restore and reduced motion');
   }
   if(['1','dialog'].includes(process.env.HEARTH_QA_MOTION))await checkDialogMotion();
   if (process.env.HEARTH_QA_QUEUE === '1') {
@@ -357,13 +413,15 @@ try {
       await until(view => view.attempts.find(row => row.id === stopHold.attemptId && row.processActive && row.processUnconfirmed), 'Timeout recorded while provider is alive');
       process.kill(pid, 0);
       await desktop.click('[data-inbox="' + stopHold.id + '"]');
-      assert.equal(await desktop.evaluate(() => Boolean(document.querySelector('#dialog-actions button[type=submit]'))), false);
+      assert.equal(await desktop.evaluate(() => Boolean(document.querySelector('[data-inbox-suggestion=retry]'))), false);
       await assert.rejects(desktop.request('resolveReconciliation', { attemptId:stopHold.attemptId, decision:'retry', reason:'QA', confirmProcessExited:true }), /выполняется/);
       await shot('queue-still-stopping');
       process.kill(-pid, 'SIGKILL');
       fixtureStopped = true;
       await until(view => view.attempts.find(row => row.id === stopHold.attemptId && row.processActive === false && row.processUnconfirmed === false), 'Confirmed subprocess exit');
-      await desktop.click('#dialog-actions button[type=submit]');
+      await sendDirector('retry');
+      await until(view=>view.inbox.find(row=>row.id===stopHold.id&&row.status==='resolved'),'Director queues a verified retry');
+      await desktop.click('#dialog-actions [data-close]');
       await desktop.click('[data-run-action=resume]');
       await until(view => view.plans.find(row => row.studioId === stopStudio.id && row.status === 'pending'), 'Retry succeeds after exit');
     } finally {
@@ -530,8 +588,9 @@ try {
     const hold=await until(s=>s.inbox.find(i=>i.studioId===created.id && i.kind==='reconcile'),'Planning hold');
     await desktop.click('[data-inbox="'+hold.id+'"]');
     await eventually(()=>desktop.evaluate(()=>document.querySelector('#dialog-title').textContent==='Подготовка плана прервана'),'Interrupted plan is identified');
-    await desktop.click('#dialog-actions button[type=submit]');
+    await sendDirector('retry');
     await until(s=>s.inbox.find(i=>i.id===hold.id && i.status==='resolved'),'Retry placed in queue');
+    await desktop.click('#dialog-actions [data-close]');
     await desktop.click('[data-run-action="resume"]');
     await until(s=>s.plans.find(p=>p.studioId===created.id && p.status==='pending'),'Retried plan ready for approval');
     await desktop.request('deleteStudio',{studioId:created.id,confirmation:created.name});
@@ -547,6 +606,14 @@ try {
   await desktop.click('[data-initialize]');
   const plan=await until(x=>x.plans.find(p=>p.studioId===s.id&&p.status==='pending'),'Director plan');
   await desktop.click('[data-plan="'+plan.id+'"]');
+  if(process.env.HEARTH_QA_HINTS==='1'){
+    await choose('[name=directorReply]','Черновик примечания');
+    await desktop.click('#dialog .onboarding-dismiss');
+    assert.ok(await desktop.evaluate(()=>document.querySelector('#dialog').open && document.querySelector('#onboarding-confirm').open));
+    await desktop.click('[data-hint-cancel]');
+    assert.equal(await desktop.evaluate(()=>document.querySelector('[name=directorReply]').value),'Черновик примечания');
+    console.log('PASS nested onboarding confirmation preserves the plan and typed reply');
+  }
   if(process.env.HEARTH_QA_MOTION==='1')await desktop.evaluate(() => {
     const dialog=document.querySelector('#dialog');
     for(const animation of dialog.getAnimations()) animation.finish();
@@ -560,7 +627,9 @@ try {
   await choose('[name=sprintReview]','hold');
   await choose('[name=accept0]',false);
   await desktop.click('#dialog-actions button[type=submit]');
-  await desktop.click('[data-approve-plan]');
+  await sendDirector('approve');
+  await until(view=>view.plans.find(row=>row.id===plan.id&&row.status==='approved'),'Director applies plan approval');
+  await desktop.click('#dialog-actions [data-close]');
   const stateAtDecision=await until(x=>x.inbox.some(i=>i.review?.members?.length && i.status==='open')?x:null,'Held sprint acceptance',180000);
   const item=stateAtDecision.inbox.find(i=>i.review?.members?.length && i.status==='open');
   const base=execFileSync('git',['-C',s.root,'rev-parse','main'],{encoding:'utf8'}).trim();
@@ -588,7 +657,7 @@ try {
     });
     observer.observe(document.querySelector('main'),{childList:true,subtree:true});
   });
-  await desktop.click('#dialog-actions button[type=submit]');
+  await sendDirector('approve');
   await until(x=>x.sprints.some(sp=>sp.studioId===s.id&&sp.status==='completed'),'Sprint completion');
   if(process.env.HEARTH_QA_TODAY==='1'){
     await eventually(()=>desktop.evaluate(()=>Boolean(document.querySelector('.today-outcome')?.textContent.includes(
@@ -597,7 +666,7 @@ try {
     console.log('PASS Сегодня → решение → подтверждённое слияние');
     if(['1','feedback'].includes(process.env.HEARTH_QA_MOTION))await checkOutcomeMotion();
     await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+s.id+'"]');
-  }
+  } else await desktop.click('#dialog-actions [data-close]');
   if(await desktop.evaluate(()=>!document.querySelector('#owner-inspector').hidden))await desktop.click('[data-owner-close]');
   await desktop.click('[data-view=inbox]');await desktop.click('[data-scope=resolved]');
   await desktop.click('[data-inbox="'+item.id+'"]');
@@ -618,10 +687,13 @@ try {
   await desktop.click('[data-view=workspace]');
   await shot('02-portfolio');
   const failure=(await snap()).inbox.find(i=>i.taskId===errTask.id && i.status==='open');
-  await desktop.click('[data-decision="'+failure.id+'"]');await desktop.click('#dialog-actions button[type=submit]');
-  await until(x=>x.inbox.find(i=>i.id===failure.id && i.readAt && i.status==='open'),'Reading an error leaves the blocker open');
-  await desktop.click('[data-inbox="'+failure.id+'"]');await desktop.click('[data-retry-from-inbox]');
+  await desktop.click('[data-decision="'+failure.id+'"]');
+  await sendDirector('explain');
+  await until(x=>x.conversationMessages.find(m=>m.status==='processed'&&m.directorInbox?.inboxId===failure.id),'Director explains the error');
+  assert.equal((await snap()).inbox.find(i=>i.id===failure.id).status,'open');
+  await sendDirector('retry');
   await until(x=>x.inbox.find(i=>i.taskId===errTask.id && i.kind==='error' && i.id!==failure.id && i.status==='open'),'Retry reports its actual outcome');
+  if (await desktop.evaluate(()=>document.querySelector('#dialog').open)) await desktop.click('#dialog-actions [data-close]');
   if(process.env.HEARTH_QA_TODAY==='1'){
     await desktop.click('[data-view=today]');await desktop.click('[data-today-id="'+ask.id+'"]');
     await until(x=>x.studios.find(studio=>studio.id===book.id)?.activeAttempts===0,'Question provider has stopped');
@@ -632,8 +704,10 @@ try {
   }else{
     await desktop.click('[data-view=workspace]');await desktop.click('[data-decision="'+ask.id+'"]');
   }
-  await choose('[name=answer]','Подтверждаю QA T-17'); await desktop.click('#dialog-actions button[type=submit]');
+  const edited='Подтверждаю QA T-17, с моим уточнением.';
+  await sendDirector('suggested-0',edited);
   await until(x=>x.tasks.find(t=>t.id===question.id&&t.status==='completed'),'Text result');
+  assert.equal((await snap()).conversationMessages.find(m=>m.directorInbox?.inboxId===ask.id).text,edited);
   for(const task of studioInterfaceFixture())await desktop.request('createTask',{studioId:s.id,...task});
   assert.equal((await snap()).tasks.filter(t=>t.studioId===s.id).length,42);
   await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+s.id+'"]');

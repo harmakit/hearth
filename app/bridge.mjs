@@ -4,14 +4,14 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "assessDebtPolicy", "addAgent", "updateAgent", "createTask",
-  "updateProviderPreference", "updatePlanTasks", "taskHistory", "setAppLocale", "setStudioArchived", "detachProject",
+  "updateProviderPreference", "updatePlanTasks", "taskHistory", "setAppLocale", "setOnboardingHintsEnabled", "setStudioArchived", "detachProject",
   "startTask", "cancelTask", "answerInbox",
   "initializeStudio", "startNextSprint", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
   "configureProject", "previewCleanup", "applyCleanup", "reviseBacklog", "closeSprint", "createPhase", "updatePhase",
   "proposePhaseTransition", "decidePhaseTransition", "updateGrooming", "requestGrooming", "resolveGrooming",
   "openMeeting", "resumeMeeting", "resolveMeeting", "replaceParticipant", "addPrerequisite", "waivePrerequisite",
   "proposeRosterChange", "decideRosterChange", "retirementPlan", "changeKnowledge", "publishLibraryEntry",
-  "postStudioMessage", "applyConversationProposal", "studioUsage", "updateUsageTariff", "setEpicPriority", "diagnoseStudio", "updateNotifications", "resolveReconciliation",
+  "postStudioMessage", "postDirectorInboxReply", "applyConversationProposal", "studioUsage", "updateUsageTariff", "setEpicPriority", "diagnoseStudio", "updateNotifications", "resolveReconciliation",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 

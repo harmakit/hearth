@@ -8,6 +8,15 @@ const threadId = 'c0b00000-1000-4000-a000-1000aaa00001';
 const send = message => console.log(JSON.stringify(message));
 const fixtureSandbox = cwd => ['-p', `(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath ${JSON.stringify(cwd)}))`];
 function response(prompt) {
+  if (prompt.startsWith('Interpret the owner’s visible reply')) {
+    const context=JSON.parse(prompt.split('\n\n').at(-1));
+    const text=context.ownerReply.toLowerCase();
+    const action=/^(подтверди|approve |прими|accept )/u.test(text)?'approve':
+      /^(повтори|retry |возобнови|resume )/u.test(text)?'retry':
+      /^(пересобери|верни|revise |return )/u.test(text)?'revise':
+      text.includes('qa t-17')?'answer':'explain';
+    return {action:context.allowed.includes(action)?action:'explain',text:'QA директор: '+context.ownerReply};
+  }
   if(prompt.includes('QA-FORCED-ERROR')) throw new Error('QA intentional provider failure');
   if (prompt.startsWith('Propose') && /QA-(?:COACH|QUEUE)-SPRINT/.test(prompt)) return {
     title:'План с подготовкой коуча', goal:'Записать два файла',
@@ -53,7 +62,7 @@ function response(prompt) {
   }
   if (prompt.includes('QA-CODEX-QUESTION')) {
     return prompt.includes('Подтверждаю QA T-17') ? { summary:'Codex: QA T-17 подтверждён.', artifact:'# QA ответ\n' }
-      : { summary:'Codex: черновик.', question:'Подтвердить QA T-17?' };
+      : { summary:'Codex: черновик.', question:{body:'Подтвердить QA T-17?',choices:[{label:'Подтвердить',answer:'Подтверждаю QA T-17'}]} };
   }
   if (prompt.startsWith('Review')) return prompt.includes('QA-COACH-REJECT')
     ? {pass:false,summary:'QA: приведите доказательство применимости навыка.'} : {pass:true, summary:'Независимая проверка пройдена.' };

@@ -13,18 +13,24 @@ import { createModelCatalogEditor } from './model-catalog-editor.mjs';
 import { renderWorkspaceHome } from './workspace-view.mjs';
 import { initialWorkspaceView,renderToday,todayItems } from './today-view.mjs';
 import { pulseFeedback } from './motion.mjs';
+import { createOnboardingHints, selectOnboardingHint } from './onboarding-hints.mjs';
 import { progressMark,stageMark } from './presentation.mjs';
 import { taskRecovery } from './task-recovery.mjs';
 import { readStudioDraft,writeStudioDraft,clearStudioDraft } from './studio-draft.mjs';
 import { coachTitle, parseSkillTopics, pendingDependencies, renderSkillLibrary, renderSkillPreview, renderTrainingDetails, roleReadiness, skillMinStars, skillStarLabel } from './coach-view.mjs';
 import { debtPolicyFields, debtPolicyFor, debtPolicyHint, improvementsHelp, renderDebtSettings } from './debt-view.mjs';
-import { answerPayload, questionOptions, renderDelivery, renderDiagnostic, renderEvidence, renderQuestionDetails, renderUsageReport } from './legacy-view.mjs';
+import { renderDelivery, renderDiagnostic, renderEvidence, renderQuestionDetails, renderUsageReport } from './legacy-view.mjs';
 
 const bridge = window.hearth;
 const $ = selector => document.querySelector(selector);
 const content = $('#content');
 const dialog = $('#dialog');
 const ownerPanel = $('#owner-inspector');
+const onboardingHints = createOnboardingHints(document, {
+  disable: async () => { await bridge.request('setOnboardingHintsEnabled', { enabled:false }); await refresh(); },
+  reportError: error => copySystem(error.message),
+  fallbackTarget: () => onboardingSelection(true)?.target.element,
+});
 const ownerTrail = createInspectorHistory();
 let ownerOrigin;
 let ownerMarkup;
@@ -101,7 +107,7 @@ let opener;
 let taskDialog;
 let dialogMeeting;
 let dialogConversation;
-let dialogReconciliation;
+let directorDialog;
 let notificationTarget;
 let openingNotification = false;
 let todayFilter = '';
@@ -238,13 +244,10 @@ async function refresh() {
         meetingDetail(latest);
         $('#dialog-body').scrollTop = scroll;
       }
-    } else if (dialog.open && !dialogBusy && dialogReconciliation) {
-      const item = entries().find(row => row.id === dialogReconciliation.id);
-      if (item && (item.status !== dialogReconciliation.status ||
-          reconciliationPending(item) !== dialogReconciliation.pending ||
-          Boolean(reconciliationAttempt(item)?.processUnconfirmed) !== dialogReconciliation.unconfirmed)) openInbox(item);
+    } else if (dialog.open && directorDialog) {
+      refreshDirectorReply();
     } else if (dialog.open && dialogConversation) {
-      const thread = studioRows('conversations').find(row => (row.agentId ?? null) === dialogConversation.agentId &&
+      const thread = studioRows('conversations').find(row => !row.inboxId && (row.agentId ?? null) === dialogConversation.agentId &&
         (row.taskId ?? null) === dialogConversation.taskId);
       const agent = studio().agents?.find(row => row.id === dialogConversation.agentId);
       const region = $('[data-message-history]');
@@ -260,6 +263,7 @@ async function refresh() {
 }
 
 function render() {
+  onboardingHints.captureFocus();
   const nextKey=JSON.stringify([studioId,view]), sameView=nextKey===renderedViewKey;
   const savedFields=sameView ? ['[data-file-query]','[data-file-from]','[data-file-to]','[data-local-library]','[data-registry-sprint]','[data-registry-owner]']
     .flatMap(selector=>{const el=content.querySelector(selector);return el?[{selector,value:el.value,focus:el===document.activeElement,caret:el.selectionStart}]:[];}) : [];
@@ -335,6 +339,74 @@ function render() {
     topics?.focus();
     topics?.setSelectionRange(...skillFieldSelection);
   }
+  paintOnboardingHints();
+}
+
+function onboardingSelection(enabled) {
+  const targets = [];
+  const offer = (kind, id, element, action) => {
+    if (element?.getClientRects().length && !element.disabled && !element.closest('[hidden]') && getComputedStyle(element).visibility === 'visible') {
+      targets.push({kind,id,element,action});
+    }
+  };
+  const firstSprint = studioRows('sprints')[0];
+  const initialPlan = plans().find(plan => plan.kind === 'initial' && plan.status === 'pending');
+  if (dialog.open) {
+    if (initialPlan?.id && dialog.dataset.reviewPlan === initialPlan.id) {
+      offer('approve',initialPlan.id,dialog.querySelector('[data-inbox-suggestion="approve"]'));
+    }
+    if (taskDialog?.kind === 'train') offer('exercise',taskDialog.id,dialog.querySelector('[data-task-kind=train] summary'));
+    return selectOnboardingHint({enabled,surface:'dialog',targets});
+  }
+  if (!ownerPanel.hidden) {
+    const recovery=ownerPanel.querySelector('.task-recovery button');
+    offer('recover',ownerTrail.current?.id,recovery,recovery?.dataset.taskCheckResults ? 'checks' : undefined);
+    offer('exercise',ownerTrail.current?.id,ownerPanel.querySelector('[data-task-kind=train] summary'));
+    if (targets.length) return selectOnboardingHint({enabled,surface:'inspector',targets});
+  }
+  if (!state.studios.length && ['today','workspace'].includes(view)) {
+    const draft=readStudioDraft(localStorage);
+    offer(draft?.pending || draft?.fields?.name || draft?.fields?.brief || draft?.fields?.root ? 'draft':'create','empty',
+      content.querySelector('[data-open="studio"]'));
+  }
+  if (view==='today') {
+    for (const plan of state.plans ?? []) if (plan.kind==='initial' && plan.status==='pending') {
+      const item=state.inbox.find(row=>row.planId===plan.id && row.status==='open');
+      if(item) offer('plan',plan.id,content.querySelector(`[data-today-id="${CSS.escape(item.id)}"]`));
+    }
+  }
+  if (view==='overview') {
+    const recovery=content.querySelector('.task-recovery button, [data-hint-recovery] button');
+    offer('recover',studioId,recovery,recovery?.dataset.taskCheckResults ? 'checks' : undefined);
+    offer('provider',studioId,content.querySelector('[data-hint-provider]'));
+    if (initialPlan) offer('plan',initialPlan.id,content.querySelector(`[data-plan="${CSS.escape(initialPlan.id)}"]`));
+    offer('initialize',studioId,content.querySelector('[data-initialize]'));
+    if (firstSprint) for (const task of tasks()) {
+      if (task.kind==='train' && task.stage!=='done' && (task.training?.bootstrap || task.sprintId===firstSprint.id)) {
+        offer('training',task.id,content.querySelector(`[data-task="${CSS.escape(task.id)}"]`));
+      }
+    }
+    if (firstSprint && tasks().some(task=>task.sprintId===firstSprint.id && isOnboardingResult(task))) {
+      offer('result',firstSprint.id,content.querySelector('[data-work-pane="artifacts"]'));
+    }
+  }
+  if (view==='work' && firstSprint) for (const task of tasks().filter(task=>task.sprintId===firstSprint.id)) {
+    if (workTab==='artifacts' && isOnboardingResult(task)) {
+      offer(task.artifactPath?'file':'report',task.id,content.querySelector(`[data-${task.artifactPath?'artifact':'task'}="${CSS.escape(task.id)}"]`));
+    } else if (workTab==='board' && task.kind==='train' && task.stage!=='done') {
+      offer('training',task.id,content.querySelector(`[data-task="${CSS.escape(task.id)}"]`));
+    }
+  }
+  return selectOnboardingHint({enabled,surface:view,targets});
+}
+
+function isOnboardingResult(task) {
+  return task.stage==='done' && task.kind!=='train' && !task.packageMembers && (task.artifactPath || task.summary || task.artifact)
+    && (task.deliveryMode!=='git' || task.gitDelivery?.status==='merged');
+}
+
+function paintOnboardingHints() {
+  onboardingHints.paint(onboardingSelection(state.onboardingHintsEnabled !== false));
 }
 
 function work() {
@@ -418,7 +490,8 @@ function openTodayDecision(row) {
   todayContext={row, previousStudioId:studioId, taskId:entry?.taskId};
   todayOutcome=undefined;
   studioId=String(row.studioId);
-  if (row.target.kind==='phase') withRow(studioRows('phases'),row.target.id,phaseTransitionEditor);
+  if (entry) openInbox(entry);
+  else if (row.target.kind==='phase') withRow(studioRows('phases'),row.target.id,phaseTransitionEditor);
   else if (row.target.kind==='roster') withRow(studioRows('rosterProposals'),row.target.id,rosterDecisionEditor);
   else if (row.target.kind==='meeting') withRow(studioRows('meetings'),row.target.id,meetingDetail);
   else if (row.target.kind==='priority') withRow(studioRows('conversationMessages'),row.target.id,message=>{
@@ -427,7 +500,6 @@ function openTodayDecision(row) {
       plain(copy`${proposal.taskTitle} · Приоритет ${proposal.priority}`)+actionFor(copy('Открыть задачу'),'task',proposal.taskId),
       copy('Применить приоритет'),()=>bridge.request('applyConversationProposal',{studioId:row.studioId,messageId:message.id}));
   });
-  else if (entry) openInbox(entry);
   if (!dialog.open) closeTodayContext();
 }
 
@@ -535,7 +607,7 @@ function overview() {
   const failedTask=(decision?.kind==='error'&&all.find(task=>task.id===decision.taskId&&task.status==='failed'))
     ||(!decision&&all.find(task=>task.status==='failed'));
   const failure=failedTask?taskRecoveryBlock(failedTask):'';
-  const last = all.find(task => task.status === 'completed' && (!task.stage || task.stage === 'done'));
+  const last = all.find(task => task.status === 'completed' && task.kind!=='train' && !task.packageMembers && (!task.stage || task.stage === 'done'));
   const rooms = buildRooms({ ...current, agents: activeRoster(current) });
   const workCount = all.filter(task => ['running', 'queued'].includes(task.status)).length;
   const activeAttempts = current.activeAttempts ?? all.filter(task => task.status === 'running').length;
@@ -574,13 +646,13 @@ function overview() {
         <p class="muted">Активные попытки: ${safe(activeAttempts)} из ${safe(current.wipLimit ?? 1)}${current.nextScheduleAt ? copy` · Следующее окно: ${safe(studioDate(current.nextScheduleAt))}` : ''}</p>
         ${unavailable ? fieldHint(copy('Подключите провайдера директора, чтобы подготовить план.')):''}
         <div class="actions">${canInitialize ? button(copy('Подготовить план первого спринта'), 'data-initialize' + (workBusy||unavailable ? ' disabled' : '')) : ''}
-          ${unavailable?button(copy('Настройки приложения'),'data-view="app-settings"',true):''}
+          ${unavailable?button(copy('Настройки приложения'),'data-view="app-settings" data-hint-provider',true):''}
           ${pendingPlan ? actionFor(copy('Посмотреть план'), 'plan', pendingPlan.id, false) : activePlan ? actionFor(copy('Открыть план'), 'plan', activePlan.id) : ''}</div>
       </section>` : ''}
       ${failure || (decision ? copy`<article class="panel padded decision stack compact">
         <div class="row">${badge(decision.kind === 'acceptance' ? copy('На приёмке') : decision.kind === 'question' ? copy('Нужно решение') : copy('Требуется внимание'), 'attention')}<small>${open.length} открыто</small></div>
         <h2>${safe(inboxHeading(decision))}</h2><p class="clamp">${safe(inboxDetail(decision))}</p>
-        <div>${actionFor(decision.kind === 'reconcile' ? copy('Посмотреть прерванный шаг') : copy('Открыть во входящих'), 'inbox', decision.id, false)}</div>
+        <div ${['error','reconcile'].includes(decision.kind)?'data-hint-recovery':''}>${actionFor(decision.kind === 'reconcile' ? copy('Посмотреть прерванный шаг') : copy('Открыть во входящих'), 'inbox', decision.id, false)}</div>
       </article>` : '')}
       <section class="stack compact"><div class="row"><h2>Последний отчёт</h2>${button(copy('Все артефакты'), 'data-work-pane="artifacts"', true)}</div>
         ${last ? `<article class="panel report">
@@ -683,7 +755,7 @@ function inboxCard(item) {
   const blockedCoach = coachBlocked(item, task);
   if (item.kind === 'meeting') return `<article class="panel padded stack compact">
     <div>${badge(item.status === 'open' ? copy('Решение встречи') : copy('Решение сохранено'), item.status === 'open' ? 'warn' : 'good')}</div>
-    <h2>${safe(item.title)}</h2>${plain(item.body)}<div>${actionFor(copy('Открыть встречу'), 'meeting-detail', item.meetingId, false)}</div></article>`;
+    <h2>${safe(item.title)}</h2>${plain(item.body)}<div>${actionFor(copy('Открыть встречу'), 'inbox', item.id, false)}</div></article>`;
   return `<article class="panel padded stack compact">
     <div class="row">${badge(isQuestion ? copy('Вопрос') : isAcceptance ? copy('Приёмка результата') : isReconciliation ? copy('Работа прервана') : blockedCoach ? copy('Нужна доработка') : copy('Ошибка'), isQuestion || isAcceptance ? 'warn' : 'attention')}
       <small class="muted">${safe(task?.title)}</small></div>
@@ -695,7 +767,6 @@ function inboxCard(item) {
       ${isAcceptance ? actionFor(copy('Открыть приёмку'), 'inbox', item.id, false) : ''}
       ${isReconciliation ? actionFor(copy('Посмотреть прерванный шаг'), 'inbox', item.id) : ''}
       ${item.status === 'open' && !isQuestion && !isAcceptance && !isReconciliation ? actionFor(blockedCoach ? copy('Посмотреть замечания директора') : copy('Просмотреть ошибку'), 'inbox', item.id) : ''}
-      ${blockedCoach ? coachRetryActions(task) : ''}
     </div>
   </article>`;
 }
@@ -803,6 +874,8 @@ function appSettings() {
           ${option('system',copy('Системная'),theme)}${option('light',copy('Светлая'),theme)}${option('dark',copy('Тёмная'),theme)}</select></label>
         ${select(copy('Плотность строк'),'density',option('compact',copy('Компактно'),document.documentElement.dataset.density)+
           option('roomy',copy('Свободно'),document.documentElement.dataset.density))}
+        <label class="checkbox-field"><input type="checkbox" name="onboardingHints"${state.onboardingHintsEnabled !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Показывать подсказки</span></label>
+        ${fieldHint(copy('Короткие пояснения рядом с рабочими действиями.'))}
         <label class="checkbox-field"><input type="checkbox" name="appNotifications"${state.notificationPreferences?.enabled !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Показывать системные уведомления</span></label>
         ${fieldHint(copy('При выключении macOS не уведомляет о событиях Hearth. Вопросы и решения остаются во «Входящих».'))}
       </div></section>
@@ -864,14 +937,15 @@ function settings() {
       </div></section></div>`;
 }
 
-function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusSummary = false } = {}) {
+function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusSummary = false, inlineSubmit = false } = {}) {
+  onboardingHints.captureFocus();
   delete dialog.dataset.reviewPlan;
   dialogLoadVersion++;
   catalogEditor = undefined;
   dialogAttachments = undefined;
   dialogMeeting = undefined;
   dialogConversation = undefined;
-  dialogReconciliation = undefined;
+  directorDialog = undefined;
   opener = dialog.open ? opener : document.activeElement;
   taskDialog = undefined;
   submission = submit;
@@ -881,13 +955,14 @@ function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusS
   $('#dialog-body').innerHTML = (linked.length?copy`<details class="advanced today-linked"><summary>Связанных задач: ${linked.length}</summary>
     <ul class="legacy-list">${linked.map(task=>`<li>${actionFor(task.title,'task',task.id)} ${status(task)}</li>`).join('')}</ul></details>`:'')+body;
   $('#dialog-actions').innerHTML = button(submit ? copy('Отмена') : copy('Закрыть'), 'data-close', true) +
-    (submit ? `<button type="submit" class="action">${safe(submitLabel)}</button>` : '');
+    (submit && !inlineSubmit ? `<button type="submit" class="action">${safe(submitLabel)}</button>` : '');
   dialogError();
   configureDialogSize(adjustable);
   $('#dialog-body').scrollTop = 0;
   if (!dialog.open) dialog.showModal();
   const initialFocus = focusSummary ? $('#dialog-title') : dialogBodyFocus();
   (initialFocus ?? dialog.querySelector('[data-close]'))?.focus();
+  queueMicrotask(paintOnboardingHints);
 }
 
 function dialogBodyFocus() {
@@ -1092,7 +1167,7 @@ function messageHistoryMarkup(thread, agent) {
 }
 
 function conversationsDialog() {
-  const rows = studioRows('conversations');
+  const rows = studioRows('conversations').filter(row=>!row.inboxId);
   const current = studio();
   const recipient = row => nameFor(current.agents?.find(agent => agent.id === row.agentId));
   const conversationList = rows.length ? `<ul class="legacy-list">${rows.map(row => {
@@ -1110,7 +1185,7 @@ function messageEditor({ conversation, agentId = conversation?.agentId, taskId =
   const current = studio();
   const agent = current.agents?.find(row => String(row.id) === String(agentId));
   const task = tasks().find(row => String(row.id) === String(taskId));
-  const thread = conversation ?? studioRows('conversations').find(row =>
+  const thread = conversation ?? studioRows('conversations').find(row => !row.inboxId &&
     (row.agentId ?? null) === (agent?.id ?? null) && (row.taskId ?? null) === (task?.id ?? null));
   const op = operationId();
   const selectedAttachments = [];
@@ -1965,6 +2040,7 @@ function paintInspector(focus) {
     }
     if (focus) $('#owner-title').focus({preventScroll:true});
     ownerPanel.scrollTop = pos;
+    paintOnboardingHints();
   };
   if (record.kind==='task') { openTask(obj,show); return; }
   if (['skills','knowledge','customSkills'].includes(record.kind)) {
@@ -2141,76 +2217,145 @@ function confirmWorktreeReview(task) {
     });
 }
 
+function directorReplyRecord(item) {
+  const messages=state.conversationMessages ?? [];
+  const request=messages.findLast(row=>row.studioId===item.studioId && row.directorInbox?.inboxId===item.id);
+  return {request, reply:request && messages.find(row=>row.replyTo===request.id)};
+}
+
+function replyDraftKey(item) { return 'inbox-reply:'+JSON.stringify([item.studioId,item.id]); }
+
+function readReplyDraft(item) {
+  try { return JSON.parse(stored(replyDraftKey(item)) ?? '{}') ?? {}; } catch { return {}; }
+}
+
+function saveReplyDraft(item, patch) {
+  stored(replyDraftKey(item),JSON.stringify({...readReplyDraft(item),...patch}));
+}
+
+function directorOptionButtons(item) {
+  const options=(item.directorSuggestions ?? []).map(option=>
+    `<button type="button" class="action secondary" data-inbox-suggestion="${safe(option.id)}">${safe(option.label)}</button>`).join('');
+  return options+button(copy('Свой вариант'),'data-inbox-custom',true);
+}
+
+function renderDirectorComposer(item, text) {
+  return `<section class="director-composer stack compact">
+    <div class="director-replies" role="status"></div>
+    <div class="director-fields stack compact">
+      <div class="actions director-options">${directorOptionButtons(item)}</div>
+      <div class="director-editor">${textarea(copy('Ответ директору'),'directorReply',text,'required maxlength="12000"')}
+        <button type="submit" class="action" data-director-send>${safe(copy('Отправить'))}</button></div>
+    </div>
+  </section>`;
+}
+
+function presentDirectorInbox(item, title, body, {plan, extras=''} = {}) {
+  const draft=readReplyDraft(item);
+  const captured={ studioId:item.studioId,inboxId:item.id,version:item.version??1,
+    expectedResult:item.review?.key,expectedEditVersion:plan ? plan.editVersion??0 : undefined,
+    expectedMeetingVersion:item.meetingId ? studioRows('meetings').find(meeting=>meeting.id===item.meetingId)?.version : undefined,
+  };
+  const {request}=directorReplyRecord(item);
+  const sentContext=JSON.stringify(captured);
+  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? request?.text ?? ''),
+    undefined,async ({directorReply:text})=>{
+      const before=readReplyDraft(item);
+      const id=before.sentText===text && before.sentContext===sentContext && before.operationId ? before.operationId : operationId();
+      saveReplyDraft(item,{text,sentText:text,sentContext,operationId:id});
+      await bridge.request('postDirectorInboxReply',{...captured,text,operationId:id});
+      await refresh();
+      return false;
+    },{adjustable:true,focusSummary:true,inlineSubmit:true});
+  directorDialog={ item, captured, origin:todayContext, optionsKey:JSON.stringify([state.appLocale,item.directorSuggestions]) };
+  if (plan) dialog.dataset.reviewPlan=plan.id;
+  if (extras) $('#dialog-actions').insertAdjacentHTML('beforeend',extras);
+  refreshDirectorReply();
+  paintOnboardingHints();
+}
+
+function refreshDirectorReply() {
+  const context=directorDialog;
+  if (!context || !dialog.open) return;
+  const item=(state.inbox??[]).find(row=>row.id===context.item.id&&row.studioId===context.item.studioId) ?? context.item;
+  const {request,reply}=directorReplyRecord(item);
+  const busy=request && ['queued','received'].includes(request.status);
+  const region=dialog.querySelector('.director-replies');
+  const fields=dialog.querySelector('.director-fields');
+  if (!region || !fields) return;
+  const options=fields.querySelector('.director-options');
+  const optionsKey=JSON.stringify([state.appLocale,item.directorSuggestions]);
+  if(!dialogBusy && context.optionsKey!==optionsKey){
+    const focus=options.contains(document.activeElement);
+    options.innerHTML=directorOptionButtons(item);
+    context.optionsKey=optionsKey;
+    if(focus)form.elements.directorReply.focus({preventScroll:true});
+  }
+  context.item=item;
+  const draft=readReplyDraft(item);
+  if (reply && request.operationId===draft.operationId) {
+    saveReplyDraft(item,{operationId:undefined,sentText:undefined,...(reply.outcome==='applied'?{text:'',custom:''}:{})});
+    if (reply.outcome==='applied' && !dialogBusy) form.elements.directorReply.value='';
+  }
+  const message=busy ? copy(request.status==='queued'?'Ответ в очереди директора.':'Директор обрабатывает ответ.') :
+    reply ? copySystem(reply.text) : item.status!=='open' ? item.answer || copy('Решение сохранено') : '';
+  const markup=message?(reply ? `<div class="muted">${safe(request.text)}</div>` : '')+plain(message):'';
+  if(region.innerHTML!==markup)region.innerHTML=markup;
+  fields.hidden=item.status!=='open';
+  if(!dialogBusy)for(const control of fields.querySelectorAll('button,textarea'))control.disabled=Boolean(busy);
+  if(!dialogBusy && reply?.outcome==='applied' && item.status!=='open' && context.origin && todayContext===context.origin){
+    finishTodayDecision(item.taskId,undefined,context.origin);
+  }
+}
+
+form.addEventListener('click', event=>{
+  const trigger=event.target.closest('[data-inbox-suggestion], [data-inbox-custom]');
+  if (!trigger || !directorDialog) return;
+  const {item}=directorDialog;
+  const input=form.elements.directorReply;
+  const draft=readReplyDraft(item);
+  if (trigger.hasAttribute('data-inbox-custom')) {
+    input.value=draft.custom ?? input.value;
+    saveReplyDraft(item,{text:input.value,suggested:false});
+  } else {
+    const suggestion=item.directorSuggestions?.find(option=>option.id===trigger.dataset.inboxSuggestion);
+    if (!suggestion) return;
+    if (!draft.suggested) saveReplyDraft(item,{custom:input.value});
+    input.value=suggestion.text;
+    saveReplyDraft(item,{text:input.value,suggested:true});
+  }
+  input.focus();
+  input.setSelectionRange(input.value.length,input.value.length);
+});
+
+form.addEventListener('input',event=>{
+  if (directorDialog && event.target.name==='directorReply'){
+    saveReplyDraft(directorDialog.item,{text:event.target.value,custom:event.target.value,suggested:false});
+  }
+});
+
 function openInbox(item) {
-  if(item.kind==='roster'&&item.proposalId){
-    withRow(studioRows('rosterProposals'),item.proposalId,rosterDecisionEditor);
-    return;
-  }
-  if (item.kind === 'meeting') {
-    const meeting = studioRows('meetings').find(entry => entry.id === item.meetingId);
-    if (meeting) meetingDetail(meeting);
-    return;
-  }
-  if (item.kind === 'reconcile' && item.attemptId) {
-    openReconciliation(item);
-    return;
-  }
   if (item.kind === 'plan') {
     const plan = planById(String(item.planId));
     if (plan) openPlan(plan);
     return;
   }
-  const task = tasks().find(row => row.id === item.taskId);
-  if (coachBlocked(item, task)) {
-    dialogTo(inboxHeading(item), plain(inboxDetail(item)) +
-      copy`<details class="advanced"><summary>Замечания директора</summary>${plain(item.body)}</details>` +
-      `<div class="actions">${coachRetryActions(task)}${actionFor(copy('Открыть задачу'), 'task', task.id)}</div>`,
-      undefined, undefined, { adjustable: true, focusSummary: true });
-    return;
-  }
-  const question = item.kind === 'question';
-  const origin=todayContext;
-  const open = item.status === 'open';
-  const op = operationId();
-  const selectedAttachments = [];
-  const choices = questionOptions(item);
-  const body = `<div>${badge(question ? copy('Вопрос') : copy('Ошибка'), question ? 'warn' : 'attention')}</div>` + plain(item.body) +
-    (item.kind === 'error' && open && item.readAt ? copy('<p>Ошибка просмотрена и всё ещё требует решения.</p>') : '') +
-    (question ? renderQuestionDetails(item) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
-    (item.answer ? copy`<section class="inline-result"><h3>Ответ</h3>${plain(item.answer)}</section>` : '');
-  inboxScope = open ? actionableInboxIds().has(item.id)?'open':'waiting' : 'resolved';
+  if (item.kind === 'reconcile') { openReconciliation(item); return; }
+  if (item.kind === 'acceptance') { openAcceptance(item); return; }
+  inboxScope = item.status==='open' ? actionableInboxIds().has(item.id)?'open':'waiting' : 'resolved';
   if (view !== 'inbox' && !ownerTrail.current && !todayContext) route('inbox');
-  if (item.kind === 'acceptance') {
-    openAcceptance(item);
-    return;
-  }
-  dialogTo(inboxLabel(item), body + (open && question
-    ? (choices.length ? select(copy('Выберите вариант'), 'choiceId', option('', copy('Свой ответ')) + choices.map(choice => option(String(choice.id), choice.label ?? choice.title ?? choice.text ?? choice.id)).join('')) : '') +
-      textarea(copy('Ваш ответ'), 'answer') + attachmentFields()
-    : item.taskId ? actionFor(copy('Открыть задачу'), 'task', item.taskId) +
-      (open && item.kind==='error' && tasks().some(t=>t.id===item.taskId && t.status==='failed' && (!t.workflowManaged || studio().wipLimit>1)) ? actionFor(copy('Повторить запуск'),'retry-from-inbox',item.taskId) : '')
-      + button(copy('Настройки приложения'),'data-error-settings',true) : '')+
-      (todayContext?.row.action==='resume'?actionFor(copy('Возобновить'),'run-action','resume',false):'')+
-      (todayContext?.row.action==='settings'&&!item.taskId?button(copy('Настройки приложения'),'data-error-settings',true):'')+
-      (todayContext?.row.action==='project'?actionFor(copy('Настройки студии'),'project-settings',item.studioId):''),
-    question ? copy('Отправить ответ') : copy('Отметить просмотренной'), open && (question || !item.readAt) ? async ({ answer, choiceId }) => {
-      if (question && !answer && !choiceId && !selectedAttachments.length) throw new Error(copy('Выберите вариант, напишите ответ или приложите файл.'));
-      await bridge.request('answerInbox', answerPayload(item, {
-        answer, choiceId, attachmentIds: selectedAttachments.map(row => row.id), operationId: op,
-      }));
-      if(question && item.taskId) return showDecisionOutcome(item.taskId,origin);
-    } : undefined, { adjustable: question || (item.body?.length ?? 0) > 240 });
-  if (open && question) dialogAttachments = selectedAttachments;
+  const question=item.kind==='question';
+  const body=plain(inboxDetail(item)) +
+    (question ? renderQuestionDetails(item) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
+    (item.taskId ? actionFor(copy('Открыть задачу'), 'task', item.taskId) : '') +
+    (item.meetingId ? actionFor(copy('Открыть протокол'), 'meeting-detail', item.meetingId) : '');
+  presentDirectorInbox(item,inboxHeading(item),body);
 }
 
 const reconciliationAttempt = item => studioRows('attempts').find(row => row.id === item.attemptId);
-const reconciliationPending = item => Boolean(reconciliationAttempt(item)?.processActive);
 const isPlanReconciliation = item => item.kind === 'reconcile' && reconciliationAttempt(item)?.purpose === 'plan';
 const coachBlocked = (item, task = tasks().find(row => row.id === item.taskId)) =>
   item.status === 'open' && item.kind === 'error' && task?.training?.bootstrap && task.status === 'failed' && task.failedReviews >= 3;
-const coachRetryActions = task => studio().manualPaused
-  ? actionFor(copy('Возобновить'), 'run-action', 'resume', false)
-  : actionFor(copy('Повторить подготовку коуча'), 'retry-from-inbox', task.id, false);
 const inboxHeading = item => isPlanReconciliation(item) ? copy('Подготовка плана прервана')
   : coachBlocked(item) ? copy('Подготовка коуча не прошла проверку') : inboxLabel(item);
 const inboxDetail = item => isPlanReconciliation(item)
@@ -2219,58 +2364,28 @@ const inboxDetail = item => isPlanReconciliation(item)
   : item.kind === 'reconcile' ? copy('Рабочий шаг прервался. Перед повтором проверьте файлы, если шаг мог их изменить.') : item.body;
 
 function openReconciliation(item) {
-  const attempt = reconciliationAttempt(item);
-  const pending = reconciliationPending(item);
-  const plan = isPlanReconciliation(item);
-  const open = item.status === 'open';
-  const canResolve = open && !pending && Boolean(attempt);
-  const canComplete = ['artifact', 'publish'].includes(attempt?.purpose);
-  const unconfirmed = Boolean(attempt?.processUnconfirmed);
-  const replaced = tasks().some(task => task.id === item.taskId && task.stage === 'replaced');
-  const fields = !canResolve || plan ? '' :
-    select(copy('Что сделать с прерванным шагом?'), 'decision', (replaced ? '' : option('retry', copy('Повторить шаг')) +
-      (canComplete ? option('complete', copy('Подтвердить выполненный шаг')) : '')) + option('discard', copy('Отказаться от шага'))) +
-    textarea(copy('Что вы проверили?'), 'reason', '', 'required');
-  const confirmation = canResolve && unconfirmed
-    ? copy`<p>Hearth не получил подтверждение остановки. Проверьте прежний процесс перед продолжением.</p>
-      <label class="checkbox-field"><input type="checkbox" name="confirmProcessExited" required> <span>Я проверил, что прежний процесс завершился.</span></label>` : '';
-  const detail = pending && unconfirmed ? copy('<p role="status">Прежний процесс не остановился вовремя. Hearth ждёт подтверждения его завершения.</p>') :
-    pending ? copy('<p role="status">Hearth завершает прежний запуск. Действия появятся здесь, когда он остановится.</p>') :
-    !attempt && open ? plain(copy('Запись прерванного запуска недоступна. Подробности можно проверить в диагностике студии.')) :
-      canResolve && studio().manualPaused ? plain(copy('Повтор добавит шаг в очередь. Чтобы запустить его, нажмите «Возобновить» в обзоре.')) : '';
-  dialogTo(inboxHeading(item), plain(inboxDetail(item)) + detail + confirmation + fields + (item.answer ? plain(item.answer) : ''),
-    plan ? copy('Повторить подготовку плана') : copy('Сохранить решение'),
-    canResolve ? values => bridge.request('resolveReconciliation', { attemptId: item.attemptId,
-      ...(plan ? { decision: 'retry', reason: copy('Подготовка плана поставлена в очередь повторно.') } : values),
-      confirmProcessExited: values.confirmProcessExited === 'on',
-    }) : undefined, { focusSummary: true });
-  dialogReconciliation = { id: item.id, status: item.status, pending, unconfirmed };
+  const attempt=reconciliationAttempt(item);
+  const detail=attempt?.processActive ? copy('Прежний запуск ещё завершается. Директор может объяснить, что происходит.') :
+    attempt?.processUnconfirmed || attempt?.reason==='restart' || attempt?.reason==='lease-expired'
+      ? copy('Завершение прежнего запуска пока не подтверждено. Директор проверит доступные сведения.')
+      : copy('Директор проверит состояние рабочего шага перед повтором.');
+  presentDirectorInbox(item,inboxHeading(item),plain(detail) +
+    (item.taskId ? actionFor(copy('Открыть задачу'), 'task', item.taskId) : ''));
 }
 
-function openAcceptance(item, revise = false) {
+function openAcceptance(item) {
   const task = tasks().find(entry => entry.id === item.taskId);
   const pending = item.status === 'open';
   const review = item.review;
   const git = review ? review.delivery : task?.gitDelivery;
-  const targetRef = review?.targetRef ?? studio().projectGit?.targetRef;
-  const operation = operationId();
-  const origin=todayContext;
-  const send = async (decision, answer,reworkTaskId) => {
-    await bridge.request('answerInbox', { studioId:item.studioId, inboxId: item.id, expectedResult:review?.key, operationId:operation, decision, answer,reworkTaskId });
-    return showDecisionOutcome(item.taskId,origin);
-  };
-  dialogTo(inboxLabel(item), `<div>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>` +
+  const body = `<div>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>` +
     plain(item.body) + (review ? `<p>${safe(review.summary)}</p>${review.criteria ? plain(listText(review.criteria)) : ''}<small>${safe(review.key.slice(0,12))}</small>` : '') +
     (review?.members ? `<section><h3>${ui('members')}</h3>${review.members.map(m=>`<div>${actionFor(m.title,'task',m.taskId)} · ${safe(m.revision)}${plain(m.summary)}</div>`).join('')}</section>` : '') +
     (review?.artifactPath ? `<div class="actions">${actionFor(copy('Открыть файл этой версии'),'review-file',item.id)}${actionFor(copy('Показать в папке'),'reveal-review-file',item.id)}${actionFor(copy('Копировать путь'),'copy-review-file',item.id)}</div>` :
       !review && task?.artifactPath ? actionFor(copy('Открыть файл'),'artifact',task.id) : '') +
     (git ? renderDelivery({ checks:git.checks, delivery:git, receipts:git.receipt ? [git.receipt] : [],
-      evidence: studioRows('evidence').filter(row => (review ? review.evidenceIds.includes(row.id) : row.taskId === task.id) && row.kind !== 'attachment') }) : '') +
-    (item.answer ? copy`<section class="inline-result"><h3>Решение</h3>${plain(item.answer)}</section>` : '') +
-    (pending ? revise ? (review?.members ? select(copy('Задача'),'reworkTaskId',review.members.map(m=>option(m.taskId,m.title)).join('')) : '')+textarea(copy('Что нужно исправить?'), 'answer', '', 'required')
-      : actionFor(copy('Вернуть на доработку'), 'revise-result', item.id) : ''),
-    revise ? copy('Отправить на доработку') : git && targetRef ? copy('Принять и слить в ')+targetRef.replace(/^refs\/heads\//,'') : copy('Принять результат'),
-    pending ? ({ answer,reworkTaskId }) => send(revise ? 'revise' : 'approve', answer,reworkTaskId) : undefined, { adjustable: true, focusSummary: !revise });
+      evidence: studioRows('evidence').filter(row => (review ? review.evidenceIds.includes(row.id) : row.taskId === task.id) && row.kind !== 'attachment') }) : '');
+  presentDirectorInbox(item,inboxLabel(item),body);
 }
 
 const listText = value => Array.isArray(value) ? value.join('\n') : value;
@@ -2346,19 +2461,14 @@ function planAgentModelSummary(agent, showMode = true) {
     + (agent.recommendation ? copy`<p class="muted">Предложение директора на первый спринт: ${safe(summary(agent.recommendation))}</p>` : '');
 }
 
-function openPlan(plan, revise = false, feedbackDraft = '') {
-  const pending = plan.status === 'pending';
-  dialogTo(plan.title || (plan.kind === 'initial' ? copy('План инициализации') : copy('План спринта')),
-    planBody(plan) + (pending
-      ? (revise ? textarea(copy('Что изменить в плане?'), 'feedback', feedbackDraft, 'required') : '') + autonomyHint()
-      : ''),
-    revise && pending ? copy('Отправить на доработку') : undefined, revise && pending ? ({ feedback }) =>
-      bridge.request('decidePlan', { planId: plan.id, expectedEditVersion: plan.editVersion ?? 0, decision: 'revise', feedback }) : undefined, { adjustable: true, focusSummary: !revise });
-  dialog.dataset.reviewPlan=plan.id;
-  if (pending && !revise) $('#dialog-actions').insertAdjacentHTML('beforeend',
-    actionFor(copy('Изменить задачи и приёмку'), 'edit-plan-tasks', plan.id) +
-    (plan.kind === 'initial' && plan.agents?.length ? actionFor(copy('Изменить состав'), 'edit-plan-team', plan.id) : '') +
-    actionFor(copy('Вернуть на доработку'), 'revise-plan', plan.id) + button(copy('Подтвердить и запустить'), `data-approve-plan="${safe(plan.id)}" data-edit-version="${safe(plan.editVersion ?? 0)}"`, false));
+function openPlan(plan) {
+  const item = entries().find(row=>row.planId===plan.id && row.kind==='plan');
+  const title = plan.title || (plan.kind === 'initial' ? copy('План инициализации') : copy('План спринта'));
+  const body = planBody(plan) + (plan.status==='pending' ? autonomyHint() : '');
+  const edits = plan.status==='pending' ? actionFor(copy('Изменить задачи и приёмку'), 'edit-plan-tasks', plan.id) +
+    (plan.kind === 'initial' && plan.agents?.length ? actionFor(copy('Изменить состав'), 'edit-plan-team', plan.id) : '') : '';
+  if (item) presentDirectorInbox(item,title,body,{plan,extras:edits});
+  else dialogTo(title,body,undefined,undefined,{adjustable:true,focusSummary:true});
 }
 
 function planTasksEditor(plan) {
@@ -2471,28 +2581,6 @@ function planTeamEditor(plan) {
       return false;
     }, { adjustable: true });
   $('#dialog-actions [data-close]').outerHTML = actionFor(copy('Назад к плану'), 'cancel-plan-team', plan.id);
-}
-
-async function approvePlan(raw, expectedEditVersion) {
-  const plan = planById(raw);
-  if (!plan || plan.status !== 'pending') return;
-  dialogError();
-  setDialogBusy(true);
-  const origin=todayContext;
-  try {
-    await bridge.request('decidePlan', { planId: plan.id, expectedEditVersion, decision: 'approve' });
-    if (origin) {
-      await refresh();
-      finishTodayDecision(undefined,undefined,origin);
-      return;
-    }
-    dialog.close();
-    await refresh();
-  } catch (error) {
-    dialogError(error.message || copy('Не удалось согласовать план.'));
-  } finally {
-    setDialogBusy(false);
-  }
 }
 
 function datalist(id, values) {
@@ -2951,10 +3039,9 @@ document.addEventListener('click', event => {
     historyLimits.set(key,(historyLimits.get(key) ?? 20)+30);
     if(dialog.open && taskDialog)openTask(taskDialog);else if(ownerTrail.current)paintInspector(false);
   } else if(data.refreshPlan) {
-    const draft=form.elements.feedback?.value;
     const original=planById(data.refreshPlan);
     const latest=original?.status==='pending' ? original : plans().findLast(p=>p.status==='pending');
-    if(latest)openPlan(latest,draft!==undefined,draft);
+    if(latest)openPlan(latest);
   } else if(data.usedMaterial && ['skills','knowledge','customSkills'].includes(data.kind))inspectObject(data.kind,data.usedMaterial);
   else if (data.copyId!==undefined) void bridge.request('copyTaskId',{studioId,taskId:data.copyId})
     .then(()=>notice(copy('ID задачи скопирован.'))).catch(e=>notice(e.message,true));
@@ -3047,13 +3134,9 @@ document.addEventListener('click', event => {
   } else if (data.editPlanTeam !== undefined) {
     const plan = planById(data.editPlanTeam);
     if (plan) planTeamEditor(plan);
-  } else if (data.plan !== undefined || data.revisePlan !== undefined || data.cancelPlanTeam !== undefined) {
-    const plan = planById(data.plan ?? data.revisePlan ?? data.cancelPlanTeam);
-    if (plan) openPlan(plan, data.revisePlan !== undefined);
-  } else if (data.approvePlan !== undefined) void approvePlan(data.approvePlan, Number(data.editVersion));
-  else if (data.reviseResult !== undefined) {
-    const item = entries().find(entry => same(entry.id, data.reviseResult) && entry.kind === 'acceptance');
-    if (item) openAcceptance(item, true);
+  } else if (data.plan !== undefined || data.cancelPlanTeam !== undefined) {
+    const plan = planById(data.plan ?? data.cancelPlanTeam);
+    if (plan) openPlan(plan);
   }
   else if (data.fileAction && ['openArtifact','revealArtifact','copyArtifactPath'].includes(data.fileAction)) {
     const payload = data.fileSource==='plan' ? {planId:data.fileId,path:data.filePath} : {taskId:data.fileId,versionPath:data.filePath};
@@ -3138,6 +3221,7 @@ form.addEventListener('submit', async event => {
     dialogError(error.message || copy('Не удалось сохранить изменения.'));
   } finally {
     setDialogBusy(false);
+    if (directorDialog) refreshDirectorReply();
   }
 });
 
@@ -3191,6 +3275,7 @@ content.addEventListener('change', ({ target }) => {
   else if(target.name==='density'){stored('density',target.value);document.documentElement.dataset.density=target.value;}
   else if (target.name === 'approveSprints') void workCommand('updateStudio', { studioId: studio().id, approveSprints: target.checked });
   else if (target.name === 'appNotifications') void workCommand('updateNotifications', { enabled: target.checked });
+  else if (target.name === 'onboardingHints') void workCommand('setOnboardingHintsEnabled', { enabled: target.checked });
   else if (target.dataset.providerEnabled) void workCommand('updateProviderPreference', { runtime: target.dataset.providerEnabled, enabled: target.checked });
   else if (target.id === 'theme-select') {
     stored('theme', target.value);
@@ -3257,10 +3342,11 @@ dialog.addEventListener('close', () => {
   if(dialog.open)return;
   closeTodayContext();
   taskDialog = undefined;
-  dialogReconciliation = undefined;
+  directorDialog = undefined;
   catalogEditor = undefined;
   if (opener?.isConnected) opener.focus();
   else content.focus();
+  paintOnboardingHints();
   if (notificationTarget && !dialog.open) void goToNotification();
 });
 

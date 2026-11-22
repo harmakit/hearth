@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="./model-policy.css">
     <link rel="stylesheet" href="./workspace.css">
     <link rel="stylesheet" href="./motion.css">
+    <link rel="stylesheet" href="./onboarding-hints.css">
     <script type="module" src="./app.mjs"></script>
   </head>
   <body>
@@ -49,6 +50,15 @@
       </form>
       <button type="button" class="dialog-width" data-dialog-width aria-label="Ширина окна" hidden></button>
       <button type="button" class="dialog-resize" data-dialog-resize aria-label="Изменить размер окна стрелками" title="Потяните угол или используйте стрелки" hidden></button>
+    </dialog>
+    <dialog id="onboarding-confirm" aria-labelledby="onboarding-confirm-title">
+      <div class="stack compact">
+        <h2 id="onboarding-confirm-title"></h2>
+        <p class="onboarding-confirm-note"></p>
+        <p class="error" role="alert" hidden></p>
+        <footer class="actions"><button class="action secondary" type="button" data-hint-cancel></button>
+          <button class="action" type="button" data-hint-disable></button></footer>
+      </div>
     </dialog>
   </body>
 </html>

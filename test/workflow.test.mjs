@@ -362,8 +362,9 @@ test('scheduled workflows retain a queued continuation after hours, manual pause
   assert.deepEqual(calls, ['plan', 'task', 'review', 'director']);
   const other = service.createStudio({ name: 'Other', root: '/project' });
   service.deleteStudio({ studioId, confirmation: 'Writer' });
-  const { studios, modelPolicy, notificationPreferences, appLocale, training, ...records } = service.snapshot();
+  const { studios, modelPolicy, notificationPreferences, appLocale, onboardingHintsEnabled, training, ...records } = service.snapshot();
   assert.equal(appLocale, 'en');
+  assert.equal(onboardingHintsEnabled, true);
   assert.deepEqual(notificationPreferences, { enabled: true, studios: {} });
   assert.deepEqual(modelPolicy, { configured: false, allowed: [] });
   assert.deepEqual(studios.map(({ id }) => id), [other.id]);
