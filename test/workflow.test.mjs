@@ -273,7 +273,7 @@ test('approval creates one dependency-aware sprint, writes the artifact and runs
     run: async ({ purpose }) => {
       calls.push(purpose);
       const result = {
-        plan: () => draft,
+        plan: () => decisions ? { ...draft, tasks: [{ ...draft.tasks[0], artifactPath: 'next-outline.md' }, draft.tasks[1]] } : draft,
         task: () => ({ summary: 'Done', artifact: '# Outline' }),
         review: () => ({ pass: true, summary: 'Accepted' }),
         director: () => (++decisions === 1 ? { action: 'next', taskKey: 'second' } : { action: 'nextSprint' }),
@@ -406,6 +406,30 @@ test('planning repairs one invalid director response and accepts criteria lists'
   assert.equal(result.plans[0].story.acceptance, '- Readable outline');
   assert.deepEqual(result.inbox.map(row => row.kind), ['plan']);
   assert.equal(result.attempts.filter(row => row.purpose === 'plan').length, 1);
+});
+
+test('the next sprint sees completed artifacts and repairs reuse of an occupied path', async t => {
+  let planning = 0;
+  const plan = { ...draft, tasks: [draft.tasks[0]] };
+  const service = createStudioService({ dbPath: ':memory:', writeArtifact: async ({path}) => ({path}), run: async ({purpose,prompt}) => {
+    if (purpose === 'plan') {
+      planning++;
+      if (planning > 1) assert.match(prompt, /"recentCompleted"/);
+      if (planning === 3) assert.match(prompt, /outline\.md/);
+      return { text: JSON.stringify(planning === 3 ? {...plan, tasks:[{...plan.tasks[0],artifactPath:'outline-edited.md'}]} : plan) };
+    }
+    return {text:JSON.stringify({task:{summary:'First outline saved',artifact:'# Outline'},review:{pass:true,summary:'OK'},director:{action:'finish'}}[purpose])};
+  } });
+  t.after(() => service.close());
+  const {id:studioId} = service.createStudio({ root:'/project', name:'Prior sprint artifacts' });
+  service.initializeStudio({studioId});
+  const first = await until(service.snapshot, s => s.plans[0]?.status === 'pending');
+  service.decidePlan({planId:first.plans[0].id,decision:'approve'});
+  await until(service.snapshot,s=>s.sprints[0]?.status==='completed');
+  service.startNextSprint({studioId});
+  const next = await until(service.snapshot,s=>s.plans.some(p=>p.kind==='sprint'&&p.status==='pending')||s.studios[0].lifecycle==='error');
+  assert.equal(next.plans.find(p=>p.kind==='sprint')?.tasks[0].artifactPath,'outline-edited.md');
+  assert.equal(planning,3);
 });
 
 test('a revised initialization survives restart and later plans can run without approval', async (t) => {

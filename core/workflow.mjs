@@ -530,6 +530,7 @@ export function createWorkflow({
     let prompt;
     let sources;
     let debt;
+    let publishedPaths;
     switch (purpose) {
       case 'plan': {
         const previous = job.previousPlanId ? read('plans', job.previousPlanId, 'План') : undefined;
@@ -539,11 +540,22 @@ export function createWorkflow({
           debt = debtPlanContext(studio, list('tasks'), list('sprints'), initialPlanIds);
         }
         const sameStudio = table => list(table).filter(record => record.studioId === studio.id);
+        const studioTasks = sameStudio('tasks');
+        const usedPaths = new Set(job.kind === 'sprint' ? [
+          ...studioTasks.flatMap(task => [task.artifactPath, ...(task.artifactVersions ?? [])]),
+          ...sameStudio('plans').flatMap(plan => plan.publishedFiles ?? []),
+        ].filter(path => typeof path === 'string' && path) : []);
+        publishedPaths = new Set(Array.from(usedPaths, path => path.normalize('NFC').toLowerCase()));
         const planningContext = {
           epics: sameStudio('epics').slice(-20).map(({ id, title, priority, status }) => ({ id, title, priority, status })),
           stories: sameStudio('stories').slice(-30).map(({ id, epicId, title }) => ({ id, epicId, title })),
           phases: sameStudio('phases').filter(({ status }) => status === 'active').slice(-10).map(({ id, title, goal, criteria }) => ({ id, title, goal, criteria })),
-          backlog: sameStudio('tasks').filter(task => !task.sprintId && task.kind !== 'train' && task.status === 'queued' &&
+          ...(job.kind === 'sprint' ? {
+            recentCompleted: studioTasks.filter(task => task.stage === 'done' && task.kind !== 'train' && !task.packageMembers)
+              .slice(-24).map(({title, sprintId, artifactPath, summary}) => ({title, sprintId, artifactPath, summary: summary?.slice(0,400)})),
+            reservedArtifactPaths: [...usedPaths].slice(-80),
+          } : {}),
+          backlog: studioTasks.filter(task => !task.sprintId && task.kind !== 'train' && !task.packageMembers && task.status === 'queued' &&
             (task.dependencies ?? []).every(id => read('tasks', id, 'Зависимость').stage === 'done'))
             .slice(0, 40).map(({ id, title, criteria, points, priority, kind }) => ({ id, title, criteria, points, priority, kind })),
         };
@@ -613,6 +625,9 @@ export function createWorkflow({
       const validate = response => {
         const plan = validatePlan(parseResponse(response), read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
         if (plan.tasks.some(task => task.deliveryMode === 'git') && !studio.projectGit?.enabled) throw new Error('План запрашивает недоступную запись в Git.');
+        const pathTaken = [...plan.files.map(file => file.path), ...plan.tasks.map(task => task.artifactPath).filter(Boolean)]
+          .find(path => publishedPaths.has(path.normalize('NFC').toLowerCase()));
+        if (pathTaken) throw new Error(`Путь «${pathTaken}» уже занят опубликованным результатом. Выберите новый путь.`);
         validateDebtPlan(plan.tasks, debt);
         return { ...plan, ...(debt?.active ? { debtSprint: true } : {}) };
       };
