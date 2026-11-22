@@ -2,12 +2,10 @@ import {inboxLabelIn} from './copy.mjs';
 import {textFor} from './locale.mjs';
 import {progressMark,stageMark} from './presentation.mjs';
 import {copy} from './copy.mjs';
+import {studioActivityStatus} from './owner-facts.mjs';
 const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const safe = value => String(value ?? '').replace(/[&<>"']/g, symbol => entities[symbol]);
-const statuses = {
-  draft: 'Черновик', planning: 'Готовит план', 'awaiting-approval': 'Ждёт согласования', active: 'В работе',
-  paused: 'На паузе', idle: 'Без активных задач', error: 'Нужно внимание',
-};
+const statuses = new Set(['draft', 'planning', 'awaiting-approval', 'active', 'paused', 'idle', 'error', 'stopped']);
 
 export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprints=[], inbox = [], appLocale = 'ru', projectAvailability={}, hasDraft=false }) {
   const ui = key=>textFor(appLocale,key);
@@ -25,17 +23,22 @@ export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprint
   const metrics = (running, open,id) => metric(ui('running'),running,liveTasks.filter(t=>!id || t.studioId===id),taskButton)+metric(ui('open'),open,inbox.filter(i=>(!id || i.studioId===id) && i.status==='open'),requestButton);
   if (!studios.length) return `<header class="page-heading"><h1>${ui('workspace')}</h1></header>
     <div class="panel empty"><h2>${ui('empty')}</h2><p class="muted">${ui('start')}</p>${create}</div>${archive}`;
-  const counts = new Map(studios.map(({ id }) => [String(id), { running: 0, open: 0 }]));
+  const counts = new Map(studios.map(({ id }) => [String(id), { running: 0, open: 0, needsAttention: false }]));
   let running = 0;
   let open = 0;
   for (const item of liveTasks) {
     const count = counts.get(String(item.studioId));
     if (count) { count.running++; running++; }
   }
+  for (const task of tasks) {
+    const count = counts.get(String(task.studioId));
+    if (count && task.status === 'failed') count.needsAttention = true;
+  }
   for (const item of inbox) {
     const count = counts.get(String(item.studioId));
     if (!count || item.status !== 'open') continue;
     count.open++; open++;
+    if (item.kind === 'error' || item.kind === 'reconcile') count.needsAttention = true;
     const blocking = Boolean(item.blockedTaskIds?.length || item.taskId || item.kind === 'plan');
     const oldest = item.createdAt || '9999';
     if (!count.decision || (blocking && !count.blocking) || (blocking === count.blocking && oldest < count.oldest)) {
@@ -49,12 +52,13 @@ export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprint
         const id = safe(studio.id);
         const name = safe(studio.name);
         const count = counts.get(String(studio.id));
+        const status = studioActivityStatus(studio, studio.activeAttempts ?? count.running, count.needsAttention);
         const sprint = sprints.findLast(s=>s.studioId===studio.id && s.status==='active');
         const members=sprint?tasks.filter(t=>t.studioId===studio.id&&t.stage!=='replaced'&&(t.sprintId===sprint.id||sprint.taskIds?.includes(t.id))):[];
         const latest = tasks.filter(t=>t.studioId===studio.id && t.updatedAt).toSorted((a,b)=>b.updatedAt.localeCompare(a.updatedAt))[0];
         return `<article class="panel padded stack compact workspace-card">
           <header><h2><button type="button" class="workspace-studio-name" data-enter-studio="${id}">${name}</button></h2>
-          ${stageMark(studio.lifecycle==='active'&&!studio.manualPaused?'in_progress':'backlog',ui(studio.manualPaused ? 'paused' : studio.lifecycle === 'stopped' || Object.hasOwn(statuses,studio.lifecycle) ? studio.lifecycle : 'idle'))}</header>
+          ${stageMark(status === 'active' ? 'in_progress' : status === 'error' ? 'blocked' : 'backlog', ui(statuses.has(status) ? status : 'idle'))}</header>
           ${studio.root ? `<p class="muted workspace-path">${safe(studio.root)}</p>` : ''}
           ${studio.projectDetached || projectAvailability[studio.id]?.available===false ? `<button type="button" class="text-button" data-project-settings="${id}">${ui(studio.projectDetached?'detached':'missingFolder')}</button>` : ''}
           ${sprint?.goal || studio.brief ? `<p>${ui('goal')} · ${safe(sprint?.goal || studio.brief)}</p>` : ''}

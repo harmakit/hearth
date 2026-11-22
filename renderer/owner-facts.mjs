@@ -1,3 +1,10 @@
+export function studioActivityStatus(studio, activeAttempts, needsAttention) {
+  if (studio.manualPaused || studio.lifecycle === 'paused') return 'paused';
+  if (activeAttempts > 0 && ['active', 'idle'].includes(studio.lifecycle)) return 'active';
+  if (['active', 'idle'].includes(studio.lifecycle)) return needsAttention ? 'error' : 'idle';
+  return studio.lifecycle;
+}
+
 // Derive the inspector from the same published snapshot as the board.
 export function taskFacts(snapshot, studioId, taskId) {
   const rows = name => (snapshot[name] ?? []).filter(row => row.studioId === studioId);

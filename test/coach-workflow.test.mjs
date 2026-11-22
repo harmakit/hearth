@@ -74,6 +74,67 @@ test('resuming the studio keeps the failed coach and its request until an explic
   assert.equal(service.snapshot().inbox.find(row=>row.id===inboxId).status,'resolved');
 });
 
+test('a coach exercise repairs malformed replies once per attempt and unblocks dependent work after review', async t => {
+  const director = Promise.withResolvers();
+  let reviewPrompt;
+  let exercises = 0;
+  let guides = 0;
+  const published = [];
+  const service = createStudioService({
+    dbPath: database(t),
+    onChange: snapshot => published.push(snapshot),
+    run: async ({ purpose, prompt, onEvent }) => {
+      if (purpose === 'task' && prompt.startsWith('Prepare a studio agent')) {
+        if (prompt.includes('"bootstrap": true')) guides++;
+        return json({ summary: 'Guide', selectedSkillIds: [], guide: 'Check the source.' });
+      }
+      if (purpose === 'training-exercise' && prompt.includes('"bootstrap": true')) {
+        onEvent?.({ type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } });
+        exercises++;
+        if (exercises === 1) return json({ result: 'Wrong field' });
+        if (exercises === 3) throw Object.assign(new Error('Provider returned an empty answer'), { code: 'EMPTY_RESPONSE' });
+        assert.match(prompt, /previous answer/i);
+        if (exercises === 2) return json({ summary: ' ' });
+        return json({ summary: 'Defer use until the license can be verified at the pinned revision.' });
+      }
+      if (purpose === 'training-exercise') return json({ summary: 'Trainee sample' });
+      if (purpose === 'review' && prompt.includes('"bootstrap": true')) {
+        reviewPrompt = prompt;
+        await director.promise;
+      }
+      if (purpose === 'review') return json({ pass: true, summary: 'Reviewed' });
+      return json({ summary: 'Dependent work delivered' });
+    },
+  });
+  t.after(() => { director.resolve(); return service.close(); });
+  const studio = service.createStudio({ root: '/project', name: 'Coach exercise recovery', wipLimit: 5 });
+  const coach = studio.agents.find(agent => agent.systemRole === 'coach');
+  const hire = service.addAgent({ studioId: studio.id, role: 'editor', name: 'Writer' });
+  const work = service.createTask({ studioId: studio.id, agentId: hire.id, title: 'Outline', prompt: 'Write the outline' });
+  const coachTask = snapshot => snapshot.tasks.find(task => task.id === coach.trainingTaskId);
+  service.startTask({ taskId: work.id });
+  const failure = await until(service.snapshot, snapshot => coachTask(snapshot).status === 'failed');
+  assert.equal(exercises, 2);
+  assert.match(coachTask(failure).error, /пуст/i);
+  assert.equal(failure.tasks.find(task => task.id === work.id).stage, 'backlog');
+  assert.ok(published.some(snapshot => coachTask(snapshot)?.status === 'failed' && snapshot.studios[0].activeAttempts === 0));
+  assert.equal(reviewPrompt, undefined);
+
+  service.startTask({ taskId: coach.trainingTaskId });
+  await until(() => reviewPrompt, Boolean);
+  assert.match(reviewPrompt, /Defer use until the license can be verified/);
+  assert.equal(service.snapshot().tasks.find(task => task.id === work.id).stage, 'backlog');
+  director.resolve();
+  const done = await until(service.snapshot, snapshot => snapshot.tasks.find(task => task.id === work.id).stage === 'done');
+  assert.equal(done.studios[0].agents.find(agent => agent.id === coach.id).trainingStatus, 'ready');
+  assert.equal(done.tasks.find(task => task.id === hire.trainingTaskId).stage, 'done');
+  assert.equal(guides, 1);
+  assert.equal(exercises, 4);
+  const retries = done.attempts.filter(attempt => attempt.taskId === coach.trainingTaskId && attempt.purpose === 'training-exercise');
+  assert.deepEqual(retries.map(attempt => attempt.calls.length), [2, 2]);
+  for (const attempt of retries) assert.equal(done.usageEvents.filter(event => event.attemptId === attempt.id).length, 2);
+});
+
 test('a manual hire is gated by coach bootstrap, trainee exercise, and Director review', async (t) => {
   const calls = [];
   let review;

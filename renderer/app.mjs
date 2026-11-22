@@ -4,7 +4,7 @@ import { agentActivity, actorState, buildRooms, languageChoices, pendingStudioPl
 import { paintRooms } from './room-art.mjs';
 import {localeNames, textFor,tokenCount} from './locale.mjs';
 import {createInspectorHistory, membersOfEpic} from './inspector.mjs';
-import { taskFacts } from './owner-facts.mjs';
+import { studioActivityStatus, taskFacts } from './owner-facts.mjs';
 import { publishedPaths, renderWork, registerRows } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
 import { installInspectorResize } from './inspector-size.mjs';
@@ -492,6 +492,9 @@ function overview() {
   const rooms = buildRooms({ ...current, agents: activeRoster(current) });
   const workCount = all.filter(task => ['running', 'queued'].includes(task.status)).length;
   const activeAttempts = current.activeAttempts ?? all.filter(task => task.status === 'running').length;
+  const needsAttention = all.some(task => task.status === 'failed') || open.some(item => item.kind === 'error' || item.kind === 'reconcile');
+  const displayStatus = studioActivityStatus(current, activeAttempts, needsAttention);
+  const waitingForSchedule = current.scheduleWaiting && displayStatus !== 'error';
   const pendingPlan = pendingStudioPlan(plans(), current.id);
   const activePlan = plans().findLast(plan => plan.status === 'approved');
   const sprint = studioRows('sprints').findLast(s=>s.status==='active');
@@ -510,16 +513,15 @@ function overview() {
       `data-run-action="pause" title="${safe(copy('Дать текущим шагам закончиться. Новые пока не запускать.'))}"`, true) + stop : '';
   const intro = canInitialize ? copy('<p class="muted">Нажмите кнопку ниже. Директор подготовит команду и план по вашей первой задаче. Работа по плану начнётся после вашего согласования.</p>')
     : current.lifecycle === 'planning' ? copy('<p class="muted">Когда план будет готов, он появится здесь и во входящих.</p>') : '';
-  const activity = current.scheduleWaiting ? copy('Новые задачи запустятся в рабочее время студии.') :
-    current.lifecycle==='idle'&&failedTask ? copy('Продолжение ждёт решения по задаче.') :
+  const activity = waitingForSchedule ? copy('Новые задачи запустятся в рабочее время студии.') :
+    displayStatus === 'error' && current.lifecycle !== 'error' ? copy('Продолжение ждёт решения по задаче.') :
+    displayStatus === 'idle' && current.lifecycle === 'active' ? '' :
     copySystem(current.activity) || (current.lifecycle === 'planning' ? copy('Директор готовит предложение по проекту.') : '');
   return heading(copy('Обзор студии'), current.name, button(copy('Связь с командой'), 'data-open="messages"', true) + (canInitialize ? '' : button(copy('Новая задача'), 'data-open="task"')) + runButtons) +
     copy`<div class="split"><div class="stack">
       ${current.lifecycle || activity || pendingPlan ? copy`<section class="panel padded stack compact">
-        <div class="row"><h2>${canInitialize ? copy('Начало работы') : copy('Студия')}</h2>${current.scheduleWaiting ? badge(copy('Ждёт рабочего времени'), 'warn') :
-          manuallyPaused ? badge(copy('На паузе'), 'warn') :
-          current.lifecycle==='idle'&&failedTask ? badge(copy('Требуется внимание'),'attention') :
-          studioStatuses[current.lifecycle] ? badge(...studioStatuses[current.lifecycle]) : ''}</div>
+        <div class="row"><h2>${canInitialize ? copy('Начало работы') : copy('Студия')}</h2>${waitingForSchedule ? badge(copy('Ждёт рабочего времени'), 'warn') :
+          studioStatuses[displayStatus] ? badge(...studioStatuses[displayStatus]) : ''}</div>
         ${intro}${activity ? `<p class="activity" role="status">${safe(activity)}</p>` : ''}
         ${sprint ? progressMark(sprintTasks.filter(t=>t.stage==='done').length,sprintTasks.length) : ''}
         <p class="muted">Активные попытки: ${safe(activeAttempts)} из ${safe(current.wipLimit ?? 1)}${current.nextScheduleAt ? copy` · Следующее окно: ${safe(studioDate(current.nextScheduleAt))}` : ''}</p>
@@ -558,7 +560,8 @@ function taskRecoveryBlock(task) {
   const current=studio();
   const recovery=taskRecovery(task,current,studioRows('attempts'),entries());
   if(!recovery)return '';
-  const {kind,reason,action}=recovery;
+  const {kind,action}=recovery;
+  const reason=copySystem(recovery.reason);
   const next = {
     resume: task.training?.bootstrap ? copy('Возобновите студию, затем повторите подготовку коуча из задачи.')
       : copy('Возобновите студию, чтобы продолжить работу.'),

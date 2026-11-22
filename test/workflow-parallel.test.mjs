@@ -18,6 +18,20 @@ async function until(predicate, diagnostics) {
   assert.fail(`Время ожидания рабочего шага истекло. ${JSON.stringify(diagnostics())}`);
 }
 
+test('the final manual task completion publishes zero active attempts', async t => {
+  const worker = Promise.withResolvers();
+  let published;
+  const service = createStudioService({ dbPath: ':memory:', onChange: snapshot => { published = snapshot; }, run: () => worker.promise });
+  t.after(() => { worker.resolve(reply({ summary: 'Delivered' })); return service.close(); });
+  const studio = service.createStudio({ root: '/project', name: 'Manual task counts', wipLimit: 5 });
+  const task = service.createTask({ studioId: studio.id, title: 'Write a note', prompt: 'Deliver a note' });
+  service.startTask({ taskId: task.id });
+  await until(() => published.studios[0].activeAttempts === 1, service.snapshot);
+  worker.resolve(reply({ summary: 'Delivered' }));
+  await until(() => published.tasks.find(row => row.id === task.id).status === 'completed', service.snapshot);
+  assert.equal(published.studios[0].activeAttempts, 0);
+});
+
 test('an owner question frees one of two studio slots and a duplicate answer starts no duplicate work', async (t) => {
   const gates = new Map(['First', 'Second', 'Third'].map((title) => [title, Promise.withResolvers()]));
   const started = [];

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { posix, resolve } from 'node:path';
 import { allowedTuples, tupleKey, completeInitialRoster, directorPrompt, field, newDirectorHire, object, parseResponse, planPrompt, publishableArtifactPath, reviewPrompt, roleTitle, trainingTopics, validatePlan } from './protocol.mjs';
-import { coachFor } from './training.mjs';
+import { coachFor, ExerciseResponseError, exerciseResult } from './training.mjs';
 import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 import { buildTaskContext } from './checkpoints.mjs';
 
@@ -576,6 +576,24 @@ export function createWorkflow({
         }));
         break;
     }
+    if (purpose === 'training-exercise') {
+      const exercise = async (exercisePrompt) => {
+        const response = await runTracked({
+          runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt: exercisePrompt, signal,
+        }).catch(error => {
+          if (error?.code === 'EMPTY_RESPONSE') return undefined;
+          throw error;
+        });
+        return exerciseResult(response);
+      };
+      try {
+        return await exercise(prompt);
+      } catch (error) {
+        if (!(error instanceof ExerciseResponseError)) throw error;
+        signal.throwIfAborted();
+        return exercise(prompt + '\n\nYour previous answer did not follow the response format. Complete the exercise and return only the JSON object with the required, nonempty "summary" text.');
+      }
+    }
     let scoped;
     let result;
     try {
@@ -598,7 +616,6 @@ export function createWorkflow({
       validateDebtPlan(plan.tasks, debt);
       return { ...plan, ...(debt?.active ? { debtSprint: true } : {}) };
     }
-    if (purpose === 'training-exercise') return field(data.summary, 'результат упражнения');
     if (purpose === 'task') {
       if (lesson) return training.selection(task, data, sources);
       const parsed = report(result);

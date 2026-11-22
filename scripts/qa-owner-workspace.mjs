@@ -164,6 +164,46 @@ try {
     await appLocale(process.env.HEARTH_QA_LOCALE);
     await desktop.click('[data-view="workspace"]');
   }
+  if (process.env.HEARTH_QA_COACH_EXERCISE === '1') {
+    await appLocale('ru');
+    const project = join(run, 'coach-exercise-project');
+    await mkdir(project);
+    const studio = await desktop.request('createStudio', { root: project, name:'QA: упражнение коуча', brief:'QA-COACH-EXERCISE', wipLimit:5 });
+    const coach = studio.agents.find(agent => agent.systemRole === 'coach');
+    const hire = await desktop.request('addAgent', { studioId:studio.id, role:'editor', name:'QA: редактор' });
+    const work = await desktop.request('createTask', { studioId:studio.id, agentId:hire.id, title:'QA: правка текста', prompt:'Проверить черновик.' });
+    const coachTask = snapshot => snapshot.tasks.find(task => task.id === coach.trainingTaskId);
+    await desktop.request('startTask', { taskId:work.id });
+    await until(snapshot => coachTask(snapshot).status === 'failed', 'Malformed coach answer must leave a retryable failure');
+    const blocked = await snap();
+    assert.equal(blocked.studios.find(row => row.id === studio.id).activeAttempts, 0);
+    assert.equal(blocked.tasks.find(row => row.id === work.id).stage, 'backlog');
+    assert.equal(blocked.attempts.some(row => row.taskId === coach.trainingTaskId && row.purpose === 'review'), false);
+
+    await desktop.request('updateStudio', { studioId:studio.id, schedule:{ enabled:true, days:[(new Date().getDay() + 1) % 7], start:'09:00', end:'18:00' } });
+    assert.ok((await snap()).studios.find(row => row.id === studio.id).scheduleWaiting);
+    await desktop.click('[data-view=workspace]');
+    await eventually(() => desktop.evaluate(id => document.querySelector('[data-enter-studio="' + id + '"]').closest('header').textContent.includes('Нужно внимание'), studio.id), 'Workspace must show the failure');
+    await desktop.click('[data-enter-studio="' + studio.id + '"]');
+    await eventually(() => desktop.evaluate(() => document.querySelector('main .split .status')?.textContent.includes('Требуется внимание')), 'Overview must show attention at zero active attempts');
+    assert.doesNotMatch(await desktop.evaluate(() => document.querySelector('main .activity').textContent), /Агент выполняет/);
+    await desktop.click('main [data-task="' + coach.trainingTaskId + '"]');
+    await eventually(() => desktop.evaluate(() => document.querySelector('#owner-body .task-recovery')?.textContent.includes('Агент вернул пустой результат')), 'Exercise failure explains the bad reply');
+    await shot('coach-exercise-failed');
+    await desktop.request('updateStudio', { studioId:studio.id, schedule:{ enabled:false } });
+    await desktop.click('#owner-body .task-recovery [data-retry-from-inbox]');
+    await until(snapshot => snapshot.tasks.find(task => task.id === work.id).stage === 'done', 'Retry must unblock the dependent assignment');
+    const done = await snap();
+    assert.match(coachTask(done).training.exercise, /не допускать навык/);
+    assert.equal(coachTask(done).review, 'QA: директор проверил решение по лицензии.');
+    assert.equal(done.tasks.find(task => task.id === hire.trainingTaskId).stage, 'done');
+    assert.deepEqual(done.attempts.filter(row => row.taskId === coach.trainingTaskId && row.purpose === 'training-exercise').map(row => row.calls?.length), [2, 2]);
+    await shot('coach-exercise-approved');
+    await desktop.click('[data-owner-close]');
+    await desktop.request('deleteStudio', { studioId:studio.id, confirmation:studio.name });
+    await desktop.click('[data-view=workspace]');
+    console.log('PASS ответ коуча → ошибка без ложного статуса → повтор → проверка директором → завершение зависимой задачи');
+  }
   if(process.env.HEARTH_QA_POLISH==='1'){
     await desktop.click('[data-view=app-settings]');
     await choose('#theme-select','dark');

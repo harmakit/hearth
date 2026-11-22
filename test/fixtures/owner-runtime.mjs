@@ -1,5 +1,7 @@
 import { createInterface } from 'node:readline';
 import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const [provider, ...args] = process.argv.slice(2);
 const threadId = 'c0b00000-1000-4000-a000-1000aaa00001';
@@ -16,8 +18,22 @@ function response(prompt) {
       : {key:'git-file',title:'Git доставка QA',prompt:'QA-GIT-EDIT',criteria:'Файл проверен',agentKey:'maker',reviewerKey:'reader',deliveryMode:'git',requiresAcceptance:true}],
     files:[],
   };
-  if (prompt.startsWith('Prepare a studio agent')) return { summary:prompt.includes('QA-COACH-REJECT')?'QA-COACH-REJECT':'Учебный план.', selectedSkillIds:[], guide:'Проверьте документ.' };
-  if (prompt.startsWith('Practice the studio assignment')) return { summary:'Практика завершена.' };
+  if (prompt.startsWith('Prepare a studio agent')) return { summary:prompt.includes('QA-COACH-REJECT')?'QA-COACH-REJECT':'Учебный план.',
+    selectedSkillIds:[], guide:prompt.includes('QA-COACH-EXERCISE')?'QA-COACH-EXERCISE':'Проверьте документ.' };
+  if (prompt.startsWith('Practice the studio assignment')) {
+    if (prompt.includes('QA-COACH-EXERCISE') && prompt.includes('"bootstrap": true')) {
+      const countFile = join(process.env.TMPDIR, 'qa-coach-exercise-count');
+      const call = Number(readFileSync(countFile, { encoding: 'utf8', flag: 'a+' })) + 1;
+      writeFileSync(countFile, String(call));
+      if (call !== 4 || !prompt.includes('Your previous answer')) return { result:'QA: результат пришёл под другим ключом.' };
+      return { summary:'QA: не допускать навык до проверки лицензии на указанном коммите.' };
+    }
+    return { summary:'Практика завершена.' };
+  }
+  if (prompt.startsWith('Review the studio agent') && prompt.includes('QA-COACH-EXERCISE') && prompt.includes('"bootstrap": true')) {
+    if (!prompt.includes('QA: не допускать навык до проверки лицензии')) return { pass:false, summary:'QA: проверяющий не получил упражнение.' };
+    return { pass:true, summary:'QA: директор проверил решение по лицензии.' };
+  }
   if (prompt.includes('QA-CODEX-QUESTION')) {
     return prompt.includes('Подтверждаю QA T-17') ? { summary:'Codex: QA T-17 подтверждён.', artifact:'# QA ответ\n' }
       : { summary:'Codex: черновик.', question:'Подтвердить QA T-17?' };

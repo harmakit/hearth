@@ -489,6 +489,10 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const studios = list('studios').map(visibleStudio);
     const agentsByStudio = new Map(studios.map(({ id, agents }) => [id, agents]));
     const tasks = list('tasks').map(visibleTask);
+    const activeWorkflow = new Map();
+    for (const { studioId } of dispatcher.activeAttempts()) {
+      activeWorkflow.set(studioId, (activeWorkflow.get(studioId) ?? 0) + 1);
+    }
     return {
       modelPolicy,
       appLocale: readAppLocale(),
@@ -498,7 +502,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         const { workflowJob, manualPaused, resumeDraft, importedPaused, ...studio } = record;
         return { ...studio, effectiveAllowed: modelPolicyFor(record, modelPolicy).allowed, manualPaused: Boolean(manualPaused),
           scheduleWaiting: waitingForSchedule(record, date), nextScheduleAt: nextScheduleWindow(record.schedule, date)?.toISOString(),
-          activeAttempts: activeCount(studio.id),
+          activeAttempts: Number(active.has(studio.id)) + parallelManual(studio.id).length + (activeWorkflow.get(studio.id) ?? 0),
         };
       }),
       tasks,
@@ -1082,8 +1086,10 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
 
   async function trackedRun({ studio, task, agent, attemptId, usedTraining, request }) {
     const existing = db.prepare('SELECT data FROM attempts WHERE id = ?').get(attemptId);
+    let callIndex = 0;
     if (existing) {
       const attempt = JSON.parse(existing.data);
+      callIndex = attempt.calls?.length ?? 0;
       const call = {purpose:request.purpose ?? attempt.purpose,runtime:request.runtime,model:request.model ?? null,
         effort:request.effort ?? null,agentId:agent?.id ?? null,role:agent?.roleTitle || agent?.role || 'director',startedAt:now()};
       if (usedTraining) call.materials=['skills','knowledge','customSkills'].flatMap(kind=>
@@ -1097,7 +1103,8 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         if (!closed && event?.type === 'usage' && event.usage) {
           const current = { studioId: studio.id, attemptId, runtime: request.runtime, model: request.model, role: agent?.roleTitle || agent?.role || 'director' };
           const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = event.usage;
-          usage.recordUsage({ eventId: `${request.purpose || 'task'}:${event.eventId ?? 'provider-total'}`, input: inputTokens, output: outputTokens,
+          const callId = callIndex ? `call-${callIndex}:` : '';
+          usage.recordUsage({ eventId: `${callId}${request.purpose || 'task'}:${event.eventId ?? 'provider-total'}`, input: inputTokens, output: outputTokens,
             cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens }, current);
         }
       },
@@ -1296,6 +1303,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       if (queue.size && activeCount(studioId) < studio.wipLimit) wake(studioId);
     } else active.set(studioId, activity);
     const isCurrent = () => !closed && !controller.signal.aborted;
+    let inboxItem;
 
     try {
       changed(running);
@@ -1314,31 +1322,31 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
         signal: controller.signal,
       } }));
       if (!isCurrent()) return;
-      const item = transaction(() => {
+      inboxItem = transaction(() => {
         const { summary, artifact, question, improvements } = result;
         const finished = taskState(running, question ? 'waiting' : 'completed', { summary, artifact, improvements });
         if (!question) planning.addReportedImprovements(finished);
         update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'completed', finishedAt: now() });
         return question && addInbox(running, 'question', question);
       });
-      changed();
-      notifyInbox(item);
     } catch (error) {
       if (!isCurrent()) return;
       const body = error instanceof Error ? error.message : String(error);
-      const item = transaction(() => {
+      inboxItem = transaction(() => {
         taskState(running, 'failed', { error: body });
         update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'failed', finishedAt: now() });
         return addInbox(running, 'error', { title: `Ошибка · ${running.title}`, body });
       });
-      changed();
-      notifyInbox(item);
     } finally {
       if (!closed && controller.signal.aborted) update('attempts', { ...read('attempts',attemptId,'Запуск'), status: 'interrupted', finishedAt: now() });
       if (isParallel) manualParallel.delete(taskId);
       else active.delete(studioId);
       finished.resolve();
-      if (!closed) onAvailable(studioId);
+      if (!closed) {
+        changed();
+        notifyInbox(inboxItem);
+        onAvailable(studioId);
+      }
     }
   }
 

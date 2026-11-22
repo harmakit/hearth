@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderWork } from '../renderer/work-view.mjs';
+import { renderWorkspaceHome } from '../renderer/workspace-view.mjs';
 import { createCommandRouter } from '../app/bridge.mjs';
+
+test('the workspace shows an idle studio with a failed task as needing attention', () => {
+  const studio = { id: 's', name: 'Studio', lifecycle: 'active', activeAttempts: 0 };
+  const task = { id: 't', studioId: 's', status: 'failed' };
+  const idle = renderWorkspaceHome({ studios: [studio], tasks: [task], attempts: [] });
+  assert.match(idle, /Нужно внимание/);
+  assert.doesNotMatch(idle, />В работе</);
+  const active = renderWorkspaceHome({ studios: [{ ...studio, activeAttempts: 1 }], tasks: [task] });
+  assert.match(active, />В работе</);
+});
 
 test('registry names the assignee and searches title, ID and sprint without dropping the board', () => {
   const html = renderWork({ tab: 'registry', registryQuery: 'Спринт 41', studio: { agents: [{ id: 'a', name: 'Ира' }] },

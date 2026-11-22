@@ -145,7 +145,7 @@ export function createRuntimes({
       signal?.throwIfAborted();
       const result = await provider.run(binary, { cwd: root, env, timeoutMs, prompt, model, effort, nativeId, signal, emit, scope, isolateCommand });
       const text = typeof result.text === 'string' ? result.text.trim() : '';
-      if (!text) throw new Error(`${provider.label} вернул пустой ответ.`);
+      if (!text) throw Object.assign(new Error(`${provider.label} вернул пустой ответ.`), { code: 'EMPTY_RESPONSE' });
       emit('completed');
       if (!nativeIdPattern.test(result.nativeId ?? '')) return { text };
       const handle = Buffer.from(JSON.stringify([runtime, root, result.nativeId])).toString('base64url');

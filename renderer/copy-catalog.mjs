@@ -1,5 +1,8 @@
 // Authored interface strings. Order: English, Spanish, French, Simplified Chinese.
 export const catalogue = {
+  "Агент вернул нечитаемый результат упражнения.": ["The agent returned an unreadable exercise result.", "El agente devolvió un resultado ilegible del ejercicio.", "L’agent a renvoyé un résultat d’exercice illisible.", "智能体返回的练习结果无法读取。"],
+  "Агент вернул пустой результат упражнения или прислал его не в виде текста.": ["The agent returned an empty or non-text exercise result.", "El agente devolvió un resultado vacío o no textual.", "L’agent a renvoyé un résultat d’exercice vide ou non textuel.", "智能体返回的练习结果为空或不是文本。"],
+  "Агент вернул слишком длинный результат упражнения.": ["The agent returned an exercise result that was too long.", "El agente devolvió un resultado demasiado largo.", "L’agent a renvoyé un résultat d’exercice trop long.", "智能体返回的练习结果过长。"],
   "Возобновить студию": ["Resume studio", "Reanudar estudio", "Reprendre le studio", "恢复工作室"],
   "Открыть результаты проверок": ["Open check results", "Abrir los resultados de las comprobaciones", "Ouvrir les résultats des vérifications", "打开检查结果"],
   "Продолжение ждёт решения по задаче.": ["Work is waiting for a task decision.", "El trabajo está a la espera de una decisión sobre la tarea.", "Le travail attend une décision sur la tâche.", "工作正在等待任务决定。"],
