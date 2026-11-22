@@ -73,7 +73,7 @@ export function verifyWriteRoots({ root, scratch, access }) {
   }
 }
 
-function seatbeltProfile(paths, network) {
+function seatbeltProfile(paths, network, privateProject, workspace) {
   const portalServices = [
     'com.apple.system.opendirectoryd.libinfo', 'com.apple.bsd.dirhelper',
   ];
@@ -88,6 +88,11 @@ function seatbeltProfile(paths, network) {
     '(allow process-exec process-fork)',
     '(allow signal process-info* (target same-sandbox))',
     '(allow file-read* sysctl-read)',
+    ...(privateProject?[
+      `(deny file-read* (subpath ${JSON.stringify(privateProject.state)}))`,
+      `(deny file-read* (require-all (subpath ${JSON.stringify(privateProject.worktrees)}) (require-not (subpath ${JSON.stringify(workspace)}))))`,
+      `(deny file-read* (subpath ${JSON.stringify(join(privateProject.root,'.git'))}))`,
+    ]:[]),
     '(allow file-write-data (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))',
     `(allow file-write* ${writable})`,
     '(deny file-link)',
@@ -102,14 +107,14 @@ function seatbeltProfile(paths, network) {
   ].join('\n');
 }
 
-export function scopedCommand(command, args, { root, scratch, access, network = false, env = process.env }) {
+export function scopedCommand(command, args, { root, scratch, access, network = false, env = process.env, privateProject }) {
   if (process.platform !== 'darwin') {
     throw isolationError('Изоляция процесса доступна на macOS. Выполните проверку или запись на поддерживаемой системе.');
   }
   const scope = executionScope({ root, scratch, access });
   verifyWriteRoots(scope);
   const paths = scope.access === 'worktree-write' ? [scope.root, scope.scratch] : [scope.scratch];
-  const profile = ['-p', seatbeltProfile(paths, network === true)];
+  const profile = ['-p', seatbeltProfile(paths, network === true, privateProject, scope.root)];
   const scopedEnv = { ...env, TMPDIR: scope.scratch, TMP: scope.scratch, TEMP: scope.scratch };
   const probe = spawnSync(seatbelt, [...profile, '/usr/bin/true'], {
     cwd: scope.root, env: scopedEnv, stdio: 'ignore', timeout: 3000,

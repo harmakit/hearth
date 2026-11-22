@@ -1,6 +1,6 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, protocol, shell } = require("electron");
 const { existsSync, mkdirSync } = require("node:fs");
-const { access, writeFile } = require("node:fs/promises");
+const { access, mkdir, mkdtemp, rm, writeFile } = require("node:fs/promises");
 const { X_OK } = require("node:fs").constants;
 const { randomUUID } = require("node:crypto");
 const { homedir } = require("node:os");
@@ -188,14 +188,16 @@ async function start() {
     { createTransferController },
     { createGitHubSkillFinder },
     { createMaterialFinder },
-    { createGitWorktrees, git },
-    { createGitDelivery },
+    { createGitWorktrees, createProjectWorktrees, git },
+    { createGitDelivery,createProjectDelivery },
     { createProjectChecks },
     { createProjectPipeline },
     { createEvidenceStore },
     { createWorktreeCleanup },
     { scopedCommand },
     { createPowerController },
+    { createProjectStudioFiles },
+    { createPortableStudioManager,nativeRoleName },
   ] = await Promise.all([
     import("./bridge.mjs"),
     import("../core/service.mjs"),
@@ -213,6 +215,8 @@ async function start() {
     import("./worktree-cleanup.mjs"),
     import("../runtimes/scope.mjs"),
     import("./power.mjs"),
+    import("./project-studio-files.mjs"),
+    import("./portable-studio.mjs"),
   ]);
   protocol.handle("hearth", async ({ url }) => {
     try {
@@ -244,10 +248,28 @@ async function start() {
     protectedRoots.push(process.env.HEARTH_LEGACY_ROOT);
   }
   const validateRoot = root => validateProjectRoot(root, protectedRoots);
-  const artifacts = createArtifactStore({ receipts: path.join(dataDir, "artifact-receipts"), validateRoot });
-  const evidence = createEvidenceStore({ storageDir: path.join(dataDir, "evidence") });
-  const worktrees = createGitWorktrees({ storageDir: path.join(dataDir, "worktrees"), validateRepository: validateRoot });
-  const delivery = createGitDelivery({ storageDir: path.join(dataDir, "candidates") });
+  const legacyArtifacts=createArtifactStore({receipts:path.join(dataDir,'artifact-receipts'),validateRoot});
+  const artifactFolder=root=>path.join(root,'.hearth','state','artifact-receipts');
+  const artifactsFor=root=>service?.snapshot().studios.some(studio=>studio.portable&&studio.root===root)
+    ? createArtifactStore({receipts:artifactFolder(root),validateRoot,portable:true})
+    : legacyArtifacts;
+  const artifacts={...legacyArtifacts,
+    write:input=>artifactsFor(input.root).write(input),
+    discard:input=>artifactsFor(input.root).discard(input),
+  };
+  const legacyEvidence=createEvidenceStore({storageDir:path.join(dataDir,'evidence')});
+  const projectEvidence=root=>createEvidenceStore({storageDir:path.join(root,'.hearth','state','evidence'),portable:true});
+  const evidenceFor=({studioId})=>{
+    const studio=service?.snapshot().studios.find(row=>row.id===studioId);
+    return studio?.portable?projectEvidence(studio.root):legacyEvidence;
+  };
+  const evidence=Object.fromEntries(Object.keys(legacyEvidence).map(method=>
+    [method,(record,...args)=>evidenceFor(record)[method](record,...args)]));
+  const projectFiles=createProjectStudioFiles({validateRoot});
+  const legacyTrees=createGitWorktrees({ storageDir: path.join(dataDir,"worktrees"),validateRepository:validateRoot });
+  const worktrees=createProjectWorktrees({legacy:legacyTrees,validateRepository:validateRoot,studios:()=>service?.snapshot().studios??[]});
+  let portable;
+  const delivery=createProjectDelivery(createGitDelivery({storageDir:path.join(dataDir,'candidates')}));
   const workerHost = process.env.HEARTH_CHECK_WORKER_SSH;
   const externalCheck = workerHost ? (await import("./isolated-check-executor.mjs")).createSshCheckExecutor(workerHost, {
     config: process.env.HEARTH_CHECK_WORKER_SSH_CONFIG,
@@ -272,6 +294,10 @@ async function start() {
   });
   const cleanup = createWorktreeCleanup({
     git, worktrees, delivery, storageDir: path.join(dataDir, "cleanup-journal"),
+    studioStorage(studioId){
+      const studio=service?.snapshot().studios.find(row=>row.id===studioId);
+      return studio?.portable?path.join(studio.root,'.hearth','state','cleanup-journal'):undefined;
+    },
     async inspectUsage(worktree) {
       const { task, activeLease, evidence: savedEvidence } = service.cleanupState(worktree);
       const evidenceIds = task?.gitDelivery?.checks?.flatMap(({ evidenceIds = [] }) => evidenceIds) ?? [];
@@ -288,7 +314,29 @@ async function start() {
   service = createStudioService({
     dbPath: path.join(dataDir, "studio.sqlite3"),
     inspectRuntime: inspect,
-    run: async request => run({ ...request, projectRoot: await validateRoot(request.projectRoot) }),
+    async run(request) {
+      const root=await validateRoot(request.projectRoot);
+      const studio=request.studioId && service.snapshot().studios.find(entry=>entry.id===request.studioId);
+      if(!studio?.portable || studio.root!==root)return run({...request,projectRoot:root});
+      await portable.publish(studio);
+      const agent=studio.agents.find(entry=>entry.id===request.agentId);
+      let scope=request.scope;
+      let scratch;
+      let prepared;
+      try {
+        if(!scope && process.platform==='darwin'){
+          const runs=path.join(dataDir,'attempt-scratch');
+          await mkdir(runs,{recursive:true,mode:0o700});
+          scratch=await mkdtemp(path.join(runs,'role-'));
+          scope={root,scratch,access:'read'};
+        }
+        prepared=await projectFiles.prepareRole(root,scope?.root??root,nativeRoleName(agent),request.runtime);
+        return await run({...request,projectRoot:root,scope,nativeRole:prepared.role,portableProject:true});
+      } finally {
+        try {await prepared?.release();}
+        finally {if(scratch)await rm(scratch,{recursive:true,force:true});}
+      }
+    },
     writeArtifact: artifacts.write,
     readArtifact: artifacts.read,
     findSkills,
@@ -309,8 +357,23 @@ async function start() {
       if (record.size > 120_000 || !(/^(text\/|application\/json)/).test(record.contentType)) return undefined;
       return (await evidence.readEvidence(record)).toString("utf8").slice(0, 8_000);
     },
-    onChange: broadcast,
+    onChange(snapshot) {
+      broadcast(snapshot);
+      if(portable)for(const studio of snapshot.studios.filter(row=>row.portable&&!row.projectDetached)){
+        void portable.publish(studio).catch(error=>console.warn("Hearth Studio:",error.message));
+      }
+    },
     notify,
+  });
+  portable=createPortableStudioManager({service,files:projectFiles,worktrees,validateRoot,
+    async migrateEvidence(studio){
+      if(studio.portable)return;
+      await legacyArtifacts.migrateReceipts(studio.root,artifactFolder(studio.root));
+      const target=projectEvidence(studio.root);
+      for(const record of service.snapshot().evidence.filter(row=>row.studioId===studio.id)){
+        await target.importEvidence(record,await legacyEvidence.readEvidence(record));
+      }
+    },
   });
   void service.refreshProviders();
   const transfer = createTransferController({
@@ -330,7 +393,7 @@ async function start() {
   scheduleTimer.unref();
   powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
-    service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,readArtifact:artifacts.read,
+    service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,readArtifact:artifacts.read,portable,
     copyTaskId: id => clipboard.writeText(id),
     restart() {
       launchRequests.relaunch();

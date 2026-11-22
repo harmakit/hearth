@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { appendFileSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { join } from 'node:path';
 
 const [runtime, mode, tracePath, ...args] = process.argv.slice(2);
 const sessionId = '12345678-1234-1234-1234-123456789abc';
@@ -10,6 +11,7 @@ const readingProfile = 'hearth-studio-read-only';
 const profile = JSON.parse(args.find(arg => arg.startsWith('default_permissions='))?.split('=').at(-1) ?? 'null');
 const writing = ['write', 'wrong-write-profile', 'no-write-sandbox', 'scoped-background'].includes(mode);
 const scopedRead = mode === 'scoped-read';
+const native = ['native-contract','native-skill-missing'].includes(mode);
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 
 if (args[0] === '--version') {
@@ -61,6 +63,11 @@ if (args[0] === '--version') {
       process.exitCode = 1;
     } else {
       const resumed = args.includes(`--resume=${sessionId}`);
+      if(native){
+        assert.equal(args[args.indexOf('--agent')+1],'researcher');
+        assert.equal(JSON.parse(args[args.indexOf('--agents')+1]).researcher.prompt,'Check each date.');
+        assert.deepEqual(JSON.parse(args[args.indexOf('--json-schema')+1]).required,['summary']);
+      }
       if (mode === 'scoped-background') {
         const child = spawn(process.execPath, ['-e',
           'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "late"), 300)', process.env.TEST_SCOPED_OUTPUT,
@@ -70,7 +77,8 @@ if (args[0] === '--version') {
       const usage = mode === 'usage' ? {
         input_tokens: 20, output_tokens: 5, cache_read_input_tokens: 7, cache_creation_input_tokens: 3,
       } : undefined;
-      send({ type: 'result', subtype: 'success', is_error: false, result: mode === 'blank' ? ' ' : resumed ? 'Claude resumed' : 'Claude answer', session_id: sessionId, usage });
+      send({ type: 'result', subtype: 'success', is_error: false, result: mode === 'blank' ? ' ' : resumed ? 'Claude resumed' : 'Claude answer', session_id: sessionId, usage,
+        structured_output:native?{summary:'contract'}:undefined });
     }
   }
 } else {
@@ -113,6 +121,7 @@ if (args[0] === '--version') {
       } else if (method === 'model/list') {
         reply({ data: [{ model: 'fixture-model', displayName: 'Fixture model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }] });
       } else if (method === 'thread/start') {
+        if(native)assert.equal(params.developerInstructions,'Check each date.');
         assert.equal(params.ephemeral, true);
         assert.equal(params.cwd, process.cwd());
         assert.deepEqual(params.runtimeWorkspaceRoots, [process.cwd()]);
@@ -126,8 +135,14 @@ if (args[0] === '--version') {
         if (mode !== 'missing-ephemeral') thread.ephemeral = mode !== 'persistent-thread';
         reply({ thread, cwd: params.cwd, approvalPolicy: 'never', model: params.model,
           activePermissionProfile: { id: ['wrong-sandbox', 'wrong-write-profile'].includes(mode) ? ':danger-full-access' : profile, extends: null }, runtimeWorkspaceRoots: [process.cwd()] });
+      } else if (method === 'skills/list') {
+        assert.ok(native);
+        reply({data:[{cwd:process.cwd(),skills:mode==='native-contract'?[{name:'chronology',
+          path:join(process.cwd(),'.agents/skills/chronology/SKILL.md'),enabled:true}]:[]}]});
       } else if (method === 'turn/start') {
-        assert.deepEqual(params.input, [{ type: 'text', text: 'Test prompt', text_elements: [] }]);
+        assert.deepEqual(params.input, [{ type: 'text', text: 'Test prompt', text_elements: [] },...(native?[{type:'skill',name:'chronology',
+          path:join(process.cwd(),'.agents/skills/chronology/SKILL.md')}]:[])]);
+        if(native)assert.deepEqual(params.outputSchema.required,['summary']);
         assert.equal(params.effort, 'high');
         assert.equal(params.permissions, profile);
         reply({ turn: { id: turnId, status: 'inProgress' } });
@@ -136,7 +151,7 @@ if (args[0] === '--version') {
         event('item/completed', { turnId, item: { type: 'agentMessage', text: 'commentary', phase: 'commentary' } });
         if (mode === 'failure') event('turn/completed', { turn: { id: turnId, status: 'failed', error: { message: 'fixture failure' } } });
         else {
-          if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: 'Codex answer', phase: 'final_answer' } });
+          if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: native?'{"summary":"contract"}':'Codex answer', phase: 'final_answer' } });
           if (mode === 'usage') {
             const total = { inputTokens: 30, outputTokens: 5, cachedInputTokens: 7, cacheWriteInputTokens: 3 };
             event('thread/tokenUsage/updated', { turnId, tokenUsage: { total: { inputTokens: 10 }, last: { inputTokens: 5 } } });

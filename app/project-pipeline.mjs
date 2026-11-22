@@ -10,7 +10,7 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
   }
 
   async function boundWorktree(studio, task, worktreeId) {
-    const tree = await worktrees.getWorktree(worktreeId);
+    const tree = await worktrees.getWorktree(worktreeId,true,studio.id);
     if (!tree || (tree.studioId && tree.studioId !== studio.id) || (tree.taskId && tree.taskId !== task.id) ||
         (tree.repository && tree.repository !== studio.root) || (tree.targetRef && tree.targetRef !== studio.projectGit?.targetRef)) {
       throw new Error('Рабочее дерево нужно заново сверить с задачей и проектом.');
@@ -38,7 +38,7 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
       workspace = await scratch();
       const records = [];
       const published = [];
-      const verify = () => delivery.verifyCheckout?.({ root: capture.root, revision: capture.revision, signal });
+      const verify = () => delivery.verifyCheckout?.({ worktree,root: capture.root, revision: capture.revision, signal });
       const readResult = async check => {
         signal?.throwIfAborted();
         const evidenceIds = [];

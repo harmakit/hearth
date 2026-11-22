@@ -6,7 +6,7 @@ export async function inspectClaude(binary, options) {
   return typeof loggedIn === 'boolean' ? { authenticated: loggedIn } : {};
 }
 
-export function runClaude(binary, { model, effort, prompt, nativeId, emit, signal, scope, isolateCommand, ...options }) {
+export function runClaude(binary, { model, effort, prompt, nativeId, emit, signal, scope, isolateCommand, nativeRole, outputSchema, ...options }) {
   const scoped = Boolean(scope.scratch);
   const tools = !scoped ? '' : scope.access === 'worktree-write' ? 'Read,Glob,Grep,Edit,Write' : 'Read,Glob,Grep';
   const args = [
@@ -20,6 +20,10 @@ export function runClaude(binary, { model, effort, prompt, nativeId, emit, signa
   if (model) args.push(`--model=${model}`);
   if (effort) args.push(`--effort=${effort}`);
   if (nativeId) args.push(`--resume=${nativeId}`);
+  if (nativeRole) args.push('--agent',nativeRole.name,'--agents',JSON.stringify({[nativeRole.name]:{
+    description:nativeRole.description,prompt:nativeRole.instructions,skills:nativeRole.requiredSkills.map(skill=>skill.name),
+  }}));
+  if (outputSchema) args.push('--json-schema',JSON.stringify(outputSchema));
 
   return new Promise((resolve, reject) => {
     const invocation = scoped ? isolateCommand(binary.command, [...(binary.args ?? []), ...args], {
@@ -72,8 +76,10 @@ export function runClaude(binary, { model, effort, prompt, nativeId, emit, signa
         finish(providerError(result.errors?.[0] || result.result, 'Claude Code завершил задачу с ошибкой.'));
       } else if (nativeId && nativeId !== result.session_id) {
         finish(new Error('Claude Code вернул другую сессию.'));
+      } else if (outputSchema && (result.structured_output === null || typeof result.structured_output !== 'object' || Array.isArray(result.structured_output))) {
+        finish(new Error('Claude Code не вернул ответ по схеме.'));
       } else {
-        finish(null, { text: result.result, nativeId: scoped ? undefined : result.session_id });
+        finish(null, { text:outputSchema ? JSON.stringify(result.structured_output) : result.result, nativeId: scoped ? undefined : result.session_id });
       }
     });
     signal?.addEventListener('abort', abort, { once: true });

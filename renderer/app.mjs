@@ -893,6 +893,9 @@ function settings() {
         ${current.brief ? plain(current.brief) : ''}<dl class="studio-meta"><dt>Рабочая папка</dt><dd>${safe(current.root || copy('Не выбрана'))}</dd><dt>Язык отчётов</dt><dd>${safe(current.language || copy('Не выбран'))}</dd>
           ${current.projectLanguage ? copy`<dt>Язык материалов</dt><dd>${safe(current.projectLanguage)}</dd>` : ''}</dl>
         ${current.root ? `<div>${button(copy('Открыть папку проекта'), 'data-open="project-folder"', true)}</div>` : ''}
+        ${current.root && !current.projectDetached ? `<div class="actions">${current.portable
+          ? button(copy('Подготовить папку к копированию'),'data-open="prepare-portable"',true)
+          : button(copy('Перенести данные в папку'),'data-open="migrate-portable"',true)}</div>` : ''}
       </div></section>
       <section class="stack compact" id="autonomy" tabindex="-1"><h2>Автономность</h2><div class="panel padded stack compact">
         <label class="checkbox-field"><input type="checkbox" name="approveSprints"${current.approveSprints !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Согласовывать план спринта</span></label>
@@ -2219,18 +2222,27 @@ function confirmWorktreeReview(task) {
 
 function directorReplyRecord(item) {
   const messages=state.conversationMessages ?? [];
-  const request=messages.findLast(row=>row.studioId===item.studioId && row.directorInbox?.inboxId===item.id);
-  return {request, reply:request && messages.find(row=>row.replyTo===request.id)};
+  const replies=new Map(messages.filter(row=>row.studioId===item.studioId && row.replyTo)
+    .map(row=>[row.replyTo,row]));
+  const history=messages.filter(row=>row.studioId===item.studioId && row.directorInbox?.inboxId===item.id)
+    .map(request=>({request,reply:replies.get(request.id)}));
+  return {history,...history.at(-1)};
 }
 
 function replyDraftKey(item) { return 'inbox-reply:'+JSON.stringify([item.studioId,item.id]); }
 
 function readReplyDraft(item) {
-  try { return JSON.parse(stored(replyDraftKey(item)) ?? '{}') ?? {}; } catch { return {}; }
+  try {
+    const local=stored(replyDraftKey(item));
+    return local!==null && local!==undefined?JSON.parse(local)??{}:
+      state.inboxDrafts?.find(row=>row.studioId===item.studioId && row.inboxId===item.id)?.draft ?? {};
+  } catch { return {}; }
 }
 
 function saveReplyDraft(item, patch) {
-  stored(replyDraftKey(item),JSON.stringify({...readReplyDraft(item),...patch}));
+  const draft={...readReplyDraft(item),...patch};
+  stored(replyDraftKey(item),JSON.stringify(draft));
+  void bridge.request('saveInboxDraft',{studioId:item.studioId,inboxId:item.id,draft}).catch(()=>{});
 }
 
 function directorOptionButtons(item) {
@@ -2241,7 +2253,8 @@ function directorOptionButtons(item) {
 
 function renderDirectorComposer(item, text) {
   return `<section class="director-composer stack compact">
-    <div class="director-replies" role="status"></div>
+    <div class="director-replies" role="log"></div>
+    <div class="director-status" role="status" hidden></div>
     <div class="director-fields stack compact">
       <div class="actions director-options">${directorOptionButtons(item)}</div>
       <div class="director-editor">${textarea(copy('Ответ директору'),'directorReply',text,'required maxlength="12000"')}
@@ -2256,9 +2269,8 @@ function presentDirectorInbox(item, title, body, {plan, extras=''} = {}) {
     expectedResult:item.review?.key,expectedEditVersion:plan ? plan.editVersion??0 : undefined,
     expectedMeetingVersion:item.meetingId ? studioRows('meetings').find(meeting=>meeting.id===item.meetingId)?.version : undefined,
   };
-  const {request}=directorReplyRecord(item);
   const sentContext=JSON.stringify(captured);
-  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? request?.text ?? ''),
+  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? ''),
     undefined,async ({directorReply:text})=>{
       const before=readReplyDraft(item);
       const id=before.sentText===text && before.sentContext===sentContext && before.operationId ? before.operationId : operationId();
@@ -2278,9 +2290,10 @@ function refreshDirectorReply() {
   const context=directorDialog;
   if (!context || !dialog.open) return;
   const item=(state.inbox??[]).find(row=>row.id===context.item.id&&row.studioId===context.item.studioId) ?? context.item;
-  const {request,reply}=directorReplyRecord(item);
+  const {request,reply,history}=directorReplyRecord(item);
   const busy=request && ['queued','received'].includes(request.status);
   const region=dialog.querySelector('.director-replies');
+  const activity=dialog.querySelector('.director-status');
   const fields=dialog.querySelector('.director-fields');
   if (!region || !fields) return;
   const options=fields.querySelector('.director-options');
@@ -2294,13 +2307,26 @@ function refreshDirectorReply() {
   context.item=item;
   const draft=readReplyDraft(item);
   if (reply && request.operationId===draft.operationId) {
-    saveReplyDraft(item,{operationId:undefined,sentText:undefined,...(reply.outcome==='applied'?{text:'',custom:''}:{})});
-    if (reply.outcome==='applied' && !dialogBusy) form.elements.directorReply.value='';
+    const clear=draft.text===draft.sentText && reply.outcome!=='failed' && reply.outcome!=='interrupted';
+    saveReplyDraft(item,{operationId:undefined,sentText:undefined,...(clear?{text:'',custom:'',suggested:false}:{})});
+    if (clear) form.elements.directorReply.value='';
   }
   const message=busy ? copy(request.status==='queued'?'Ответ в очереди директора.':'Директор обрабатывает ответ.') :
-    reply ? copySystem(reply.text) : item.status!=='open' ? item.answer || copy('Решение сохранено') : '';
-  const markup=message?(reply ? `<div class="muted">${safe(request.text)}</div>` : '')+plain(message):'';
-  if(region.innerHTML!==markup)region.innerHTML=markup;
+    !history.length && item.status!=='open' ? item.answer || copy('Решение сохранено') : '';
+  activity.hidden=!message;
+  if(activity.textContent!==message)activity.textContent=message;
+  const entries=history.map(({request,reply})=>({
+    id:request.id,
+    markup:`<div class="muted">${safe(request.text)}</div>`+(reply ? plain(copySystem(reply.text)) : ''),
+  }));
+  const present=new Map(Array.from(region.children,element=>[element.dataset.exchange,element]));
+  for(const {id,markup} of entries){
+    const element=present.get(id) ?? region.appendChild(document.createElement('div'));
+    element.dataset.exchange=id;
+    if(element.innerHTML!==markup)element.innerHTML=markup;
+    present.delete(id);
+  }
+  for(const element of present.values())element.remove();
   fields.hidden=item.status!=='open';
   if(!dialogBusy)for(const control of fields.querySelectorAll('button,textarea'))control.disabled=Boolean(busy);
   if(!dialogBusy && reply?.outcome==='applied' && item.status!=='open' && context.origin && todayContext===context.origin){
@@ -2902,11 +2928,43 @@ function exportEditor(mode) {
     });
 }
 
+async function openStudioFolder() {
+  try {
+    const root=await bridge.request('pickFolder');
+    if(!root)return;
+    const info=await bridge.request('inspectStudioFolder',{root});
+    const other=info.otherRoot && info.otherRoot!==info.root;
+    const current=other?plain(copy('Сейчас открыта другая копия этой студии.'))+plain(info.otherRoot):'';
+    dialogTo(copy('Открыть папку студии'),plain(info.name)+plain(info.root)+current+plain(copy('Студия откроется на паузе. Проверьте папку перед запуском.')),
+      copy(other?'Переключить папку':'Открыть'),async ()=>{
+        const opened=await bridge.request('openStudioFolder',{root:info.root,replaceRoot:Boolean(other)});
+        await refresh();
+        selectStudio(opened.id);
+        route('overview');
+      });
+  }catch(error){notice(copySystem(error.message),true);}
+}
+
+function portableFolderEditor(migrate){
+  const current=studio();
+  const label=copy(migrate?'Перенести данные в папку':'Подготовить папку к копированию');
+  const explanation=migrate?'Hearth сохранит настройки, историю и рабочие копии в этой папке. Студия будет на паузе.':
+    'Hearth поставит студию на паузу. Когда запусков не останется, можно скопировать всю папку вместе со скрытыми файлами.';
+  dialogTo(label,plain(current.root)+plain(copy(explanation)),label,async ()=>{
+    await bridge.request(migrate?'migrateStudioFolder':'prepareStudioCopy',{studioId:current.id});
+    await refresh();
+    notice(copy(migrate?'Данные студии сохранены в папке.':'Папка студии готова к копированию.'));
+  });
+}
+
 const commands = {
   studio: () => studioEditor(),
   'edit-studio': () => studioEditor(studio()),
   'delete-studio': deleteStudioEditor,
   'project-folder': () => void workCommand('openProject', { studioId: studio().id }),
+  'studio-folder': () => void openStudioFolder(),
+  'migrate-portable': () => portableFolderEditor(true),
+  'prepare-portable': () => portableFolderEditor(false),
   schedule: scheduleEditor,
   task: () => taskEditor(),
   director: directorEditor,

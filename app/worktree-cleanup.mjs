@@ -20,17 +20,18 @@ async function pathExists(path) {
   }
 }
 
-export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, record, storageDir }) {
+export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, record, storageDir, studioStorage }) {
   const previews = new Map();
   const inMemoryJournal = new Map();
   let previousOperation = Promise.resolve();
 
   async function journalPath(key) {
-    if (!storageDir) return null;
-    await mkdir(storageDir, { recursive: true, mode: 0o700 });
-    if (await realpath(storageDir) !== storageDir) throw new Error("Папка журнала уборки недоступна.");
+    const folder=studioStorage?.(JSON.parse(key)[0]) ?? storageDir;
+    if (!folder) return null;
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    if (await realpath(folder) !== folder) throw new Error("Папка журнала уборки недоступна.");
     const digest = createHash("sha256").update(key).digest("hex");
-    return join(storageDir, `${digest}.json`);
+    return join(folder, `${digest}.json`);
   }
 
   async function loadJournal(key) {
@@ -138,7 +139,7 @@ export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, 
   }
 
   async function finishRemoval(item, id) {
-    await worktrees.markCleaned(id);
+    await worktrees.markCleaned(id,item.studioId);
     return { id, path: item.path, taskId: item.taskId, status: "removed", reasons: [] };
   }
 
@@ -183,7 +184,8 @@ export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, 
   }
 
   async function removeCandidate({ studioId, id, journal, key }) {
-    const item = await worktrees.getWorktree(id, false);
+    const item = await worktrees.getWorktree(id, false,studioId);
+    if(!item)return {id,status:'skipped',reasons:['unregistered-worktree']};
     const pending = journal.pending;
     if (pending && !matchesRegistration(pending.registration, item)) {
       return { id, status: "skipped", reasons: ["registration-mismatch"] };
@@ -204,7 +206,7 @@ export function createWorktreeCleanup({ git, worktrees, delivery, inspectUsage, 
     const path = parkedPath(tag);
     journal.pending = { registration: item, tag, refs: state.refs };
     await saveJournal(key, journal);
-    const current = await worktrees.getWorktree(id).catch(() => null);
+    const current = await worktrees.getWorktree(id,true,studioId).catch(() => null);
     if (!matchesRegistration(item, current)) {
       return { id, status: "skipped", reasons: ["registration-mismatch"] };
     }

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, realpath, unlink } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 
 const maxBytes = 1024 * 1024;
@@ -129,7 +129,7 @@ async function ownsFile(path, receipt, checkDigest = true) {
   }
 }
 
-export function createArtifactStore({ receipts, validateRoot }) {
+export function createArtifactStore({ receipts, validateRoot, portable = false }) {
   function receiptKey(operationId) {
     if (typeof operationId !== "string" || !operationId.trim() || operationId.length > 600) {
       throw new Error("Некорректная операция записи артефакта.");
@@ -144,8 +144,9 @@ export function createArtifactStore({ receipts, validateRoot }) {
     const recordFile = receiptKey(operationId);
     const project = await validateRoot(root);
     const file = await fileInProject(project, path, true);
-    const record = { root: project, path, digest: hash(content) };
+    const record = { root: portable ? "." : project, path, digest: hash(content) };
     await mkdir(receipts, { recursive: true, mode: 0o700 });
+    if(await realpath(receipts)!==receipts)throw new Error("Папка квитанций артефактов недоступна.");
     let previous = await getReceipt(recordFile);
     if (!previous) {
       if (await metadata(file)) throw new Error(`Файл «${record.path}» уже существует.`);
@@ -171,6 +172,7 @@ export function createArtifactStore({ receipts, validateRoot }) {
       }
     }
     if (!await ownsFile(file, previous)) {
+      if (portable && await metadata(file) && hash(await readText(file))===previous.digest) return {path:record.path};
       throw new Error(`Файл «${record.path}» уже существует или был изменён.`);
     }
     if (temp && await ownsFile(temp, previous, false)) await unlinkIfPresent(temp);
@@ -198,7 +200,7 @@ export function createArtifactStore({ receipts, validateRoot }) {
       return;
     }
     const project = await validateRoot(root);
-    if (previous.root !== project) return;
+    if (previous.root !== (portable ? "." : project)) return;
     const file = await fileInProject(project, path, false, true);
     if (file) {
       const temp = stagedPath(file, previous);
@@ -208,5 +210,21 @@ export function createArtifactStore({ receipts, validateRoot }) {
     await unlinkIfPresent(recordFile);
   }
 
-  return { write, openable, read, discard };
+  async function migrateReceipts(root,destination){
+    const project=await validateRoot(root);
+    const filenames=await readdir(receipts).catch(error=>{if(error.code==='ENOENT')return [];throw error;});
+    for(const name of filenames.filter(value=>/^[a-f0-9]{64}\.json$/u.test(value))){
+      const record=await getReceipt(join(receipts,name));
+      if(record?.root!==project)continue;
+      await mkdir(destination,{recursive:true,mode:0o700});
+      if(await realpath(destination)!==destination)throw new Error('Папка квитанций артефактов недоступна.');
+      const target=join(destination,name);
+      const next={...record,root:'.'};
+      try {await createReceipt(target,next);}
+      catch(error){
+        if(error.code!=='EEXIST' || !matches(await getReceipt(target),next))throw error;
+      }
+    }
+  }
+  return { write, openable, read, discard,migrateReceipts };
 }

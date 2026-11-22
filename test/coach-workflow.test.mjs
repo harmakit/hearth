@@ -112,6 +112,34 @@ test('automatic sprint training still requires an exercise and review when GitHu
   assert.equal(result.tasks.find(task => task.key === 'report').stage, 'done');
 });
 
+test('a technical blocker goes to the director and the task retries with a recovery plan before asking the owner', async t => {
+  let attempts=0;
+  let triaged=0;
+  const service=createStudioService({dbPath:':memory:',writeArtifact:async ({path})=>({path}),run:async request=>{
+    if(request.purpose==='resolve-blocker'){
+      triaged++;
+      return json({nextStep:'Use available local evidence and label pending claims.'});
+    }
+    if(request.purpose==='task' && request.prompt.includes('"title": "Report"') && request.prompt.includes('"task": "Write the report"')){
+      if(++attempts===1)return json({summary:'Source host offline',artifact:'Existing material.',
+        question:{kind:'technical',title:'Unavailable source',body:'The external source is unreachable.'}});
+      assert.match(request.prompt,/Use available local evidence and label pending claims/);
+    }
+    return fileSprintReply(request);
+  }});
+  t.after(()=>service.close());
+  const studio=service.createStudio({root:'/project',name:'Recover from blocker'});
+  service.initializeStudio({studioId:studio.id});
+  const ready=await until(service.snapshot,view=>view.plans[0]?.status==='pending');
+  service.decidePlan({planId:ready.plans[0].id,decision:'approve'});
+  const view=await until(service.snapshot,s=>s.sprints.some(sprint=>sprint.status==='completed') ||
+    s.inbox.some(item=>item.kind==='question' && item.status==='open'));
+  assert.equal(view.sprints[0].status,'completed');
+  assert.equal(view.inbox.some(item=>item.kind==='question' && item.status==='open'),false);
+  assert.equal(triaged,1);
+  assert.equal(attempts,2);
+});
+
 test('a saved studio left idle after coaching resumes its approved sprint on restart', async t => {
   const dbPath = database(t);
   const review = Promise.withResolvers();

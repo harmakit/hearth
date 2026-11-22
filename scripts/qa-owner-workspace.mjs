@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod,cp,mkdir,mkdtemp,readFile,writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const run = await (async()=>{await mkdir(join(root,'.tmp'),{recursive:true});return mkdtemp(join(root,'.tmp','owner-qa-'));})();
 console.log('QA profile:', run);
 const [profile, work, editorial, home, bin] = ['profile','git-work','editorial','home','bin'].map(p => join(run, p));
+let workingProfile=profile;
 await Promise.all([profile, work, editorial, home, bin].map(p => mkdir(p)));
 const git = (...args) => execFileSync('/usr/bin/git', args, { cwd: work, encoding:'utf8', env: { PATH:'/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM:'1', GIT_CONFIG_GLOBAL:'/dev/null' } }).trim();
 await writeFile(join(work, 'README.md'), '# QA base\n');
@@ -35,6 +36,7 @@ async function eventually(check, label, timeout = 15000) {
 }
 
 async function launch() {
+  const profile=workingProfile;
   const inspectMain = process.env.HEARTH_QA_ZOOM === '1' || process.env.HEARTH_QA_QUEUE === '1';
   const child = spawn(bundle || require('electron'), [...(bundle ? [] : [root]), ...(inspectMain ? ['--inspect=127.0.0.1:0'] : []), '--remote-debugging-port=0', '--user-data-dir=' + profile], {
     cwd: root, env: { HOME:home, PATH:bin + ':/opt/homebrew/bin:/usr/bin:/bin', LANG:'en_US.UTF-8', HEARTH_DATA_DIR:profile, CODEX_HOME:join(home,'.codex'), CLAUDE_CONFIG_DIR:join(home,'.claude'), TMPDIR:run, GIT_CONFIG_NOSYSTEM:'1', GIT_CONFIG_GLOBAL:'/dev/null' },
@@ -601,7 +603,7 @@ try {
   await choose('[name=name]','Edition');await choose('[name=brief]','Prepare a book for release.');
   await desktop.click('[data-wizard-next]');await choose('[name=root]',parent);await choose('[name=newFolderName]','Edition');
   await desktop.click('[data-wizard-next]'); await desktop.click('#dialog-actions button[type=submit]');
-  const s=await until(x=>x.studios.find(s=>s.name==='Edition'),'Create new project');
+  let s=await until(x=>x.studios.find(s=>s.name==='Edition'),'Create new project');
   assert.ok(s.projectGit.enabled);
   await desktop.click('[data-initialize]');
   const plan=await until(x=>x.plans.find(p=>p.studioId===s.id&&p.status==='pending'),'Director plan');
@@ -636,6 +638,34 @@ try {
   const target=s.projectGit.targetRef;
   const ref=()=>execFileSync('git',['-C',s.root,'rev-parse',target],{encoding:'utf8'}).trim();
   assert.equal(ref(),base);
+  let sourceRoot;
+  let gitRecipeRoot;
+  if(process.env.HEARTH_QA_PORTABLE==='1'){
+    assert.equal(s.portable,true);
+    sourceRoot=s.root;
+    const task=stateAtDecision.tasks.find(row=>row.studioId===s.id&&row.gitDelivery?.worktreeId&&!row.packageMembers);
+    const relativeTree=join('.hearth','worktrees',task.gitDelivery.worktreeId);
+    await writeFile(join(sourceRoot,relativeTree,'uncommitted-draft.txt'),'Source draft');
+    await desktop.request('prepareStudioCopy',{studioId:s.id});
+    await quitDesktop(desktop);
+    const copied=join(run,'Copied studio with spaces');
+    await cp(sourceRoot,copied,{recursive:true,verbatimSymlinks:true});
+    workingProfile=join(run,'copied-profile');
+    await mkdir(workingProfile);
+    desktop=await launch();
+    assert.equal((await snap()).studios.length,0);
+    const restored=await desktop.request('openStudioFolder',{root:copied});
+    assert.equal(restored.id,s.id);
+    assert.equal(restored.manualPaused,true);
+    assert.equal((await snap()).inbox.find(row=>row.id===item.id).review.key,item.review.key);
+    assert.equal(await readFile(join(copied,relativeTree,'uncommitted-draft.txt'),'utf8'),'Source draft');
+    s=restored;
+    await appLocale('ru');
+    await desktop.request('setStudioRunning',{studioId:s.id,action:'resume'});
+    await desktop.click('[data-view=workspace]');
+    await desktop.click('[data-enter-studio="'+s.id+'"]');
+    console.log('PASS full folder in a clean profile keeps pending approval and uncommitted changes');
+  }
   if(process.env.HEARTH_QA_TODAY==='1'){
     await desktop.click('[data-view=today]');await desktop.click('[data-today-id="'+item.id+'"]');
   } else {
@@ -675,6 +705,19 @@ try {
   await desktop.click('#dialog-actions [data-close]');
   assert.notEqual(ref(),base);
   assert.ok(execFileSync('git',['-C',s.root,'show',target+':delivery.md'],{encoding:'utf8'}).includes('QA deliverable'));
+  if(sourceRoot){
+    assert.equal(execFileSync('git',['-C',sourceRoot,'rev-parse',target],{encoding:'utf8'}).trim(),base);
+    execFileSync('git',['-C',s.root,'add','--','.gitignore','.hearth/studio.json','.hearth/roles','.codex/agents','.claude/agents']);
+    execFileSync('git',['-C',s.root,'-c','user.name=QA','-c','user.email=qa@example.invalid','commit','-qm','Publish studio settings']);
+    const clone=join(run,'git recipe');
+    execFileSync('git',['clone','-q',s.root,clone]);
+    const listing=execFileSync('git',['-C',clone,'ls-files'],{encoding:'utf8'});
+    assert.match(listing,/\.hearth\/studio\.json/u);
+    assert.match(listing,/\.codex\/agents\//u);
+    assert.doesNotMatch(listing,/\.hearth\/(state|worktrees)\//u);
+    gitRecipeRoot=clone;
+    console.log('PASS copy merge does not change the original and Git clone contains only the studio recipe');
+  }
   console.log('PASS held sprint: worktree > review > owner approval > Git delivery');
   const book=await desktop.request('createStudio',{root:editorial,name:'Редакция',brief:'Рассказ'});
   const question=await desktop.request('createTask',{studioId:book.id,title:'QA Question',prompt:'QA-CODEX-QUESTION'});
@@ -691,6 +734,17 @@ try {
   await sendDirector('explain');
   await until(x=>x.conversationMessages.find(m=>m.status==='processed'&&m.directorInbox?.inboxId===failure.id),'Director explains the error');
   assert.equal((await snap()).inbox.find(i=>i.id===failure.id).status,'open');
+  const firstReply=await eventually(()=>desktop.evaluate(()=>document.querySelector('.director-replies')?.textContent),'First reply is visible');
+  const followUp='Уточни, что произойдёт при повторе.';
+  await sendDirector('explain',followUp);
+  await until(x=>x.conversationMessages.filter(m=>m.status==='processed'&&m.directorInbox?.inboxId===failure.id).length===2,'Director answers the follow-up');
+  await desktop.click('#dialog-actions [data-close]');
+  await desktop.click('[data-inbox="'+failure.id+'"]');
+  await eventually(()=>desktop.evaluate(({first,second})=>{
+    const history=document.querySelector('.director-replies');
+    return history.children.length===2 && history.textContent.startsWith(first) &&
+      history.textContent.includes(second) && document.querySelector('[name=directorReply]').value==='';
+  },{first:firstReply,second:followUp}),'Inbox shows every exchange after reopening and leaves a blank editor');
   await sendDirector('retry');
   await until(x=>x.inbox.find(i=>i.taskId===errTask.id && i.kind==='error' && i.id!==failure.id && i.status==='open'),'Retry reports its actual outcome');
   if (await desktop.evaluate(()=>document.querySelector('#dialog').open)) await desktop.click('#dialog-actions [data-close]');
@@ -818,6 +872,23 @@ try {
     console.log('PASS native reveal request for archived diff',result.name,'fallback:',result.parentOpened);
   }
   console.log('PASS three studios, text answer, restored state, five locales, inspector and package');
+  if(gitRecipeRoot){
+    await quitDesktop(desktop);
+    workingProfile=join(run,'recipe-profile');
+    await mkdir(workingProfile);
+    desktop=await launch();
+    const recipe=await desktop.request('openStudioFolder',{root:gitRecipeRoot});
+    assert.equal(recipe.id,s.id);
+    assert.equal(recipe.manualPaused,true);
+    assert.equal((await snap()).sprints.length,0);
+    const roleFiles=await readFile(join(gitRecipeRoot,'.hearth','roles','director.md'),'utf8');
+    assert.match(roleFiles,/Coordinate this studio/u);
+    await desktop.request('setStudioRunning',{studioId:recipe.id,action:'resume'});
+    await desktop.request('initializeStudio',{studioId:recipe.id});
+    await until(x=>x.plans.some(plan=>plan.studioId===recipe.id&&plan.status==='pending'),'Clean Git recipe starts native planning');
+    assert.equal(await readFile(join(gitRecipeRoot,'.hearth','roles','director.md'),'utf8'),roleFiles);
+    console.log('PASS clean Git clone opens its stored native roles and starts with fresh studio history');
+  }
 } catch(error) {
   if(desktop.child.exitCode===null) {
     console.error('Test UI state:',await desktop.evaluate(()=>({focus:document.activeElement?.outerHTML.slice(0,300),

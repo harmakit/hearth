@@ -55,6 +55,27 @@ test('reuses a registered worktree across requests and app restarts', async t =>
   assert.equal(run(repository, 'status', '--porcelain'), '');
 });
 
+test('portable worktrees keep staged and untracked files after copying the entire project',async t=>{
+  const {root,repository,request}=await fixture(t);
+  const portable=path=>createGitWorktrees({projectRoot:path,validateRepository:candidate=>candidate===path});
+  const tree=await portable(repository).ensureWorktree(request);
+  assert.equal(tree.path,join(repository,'.hearth','worktrees',tree.id));
+  assert.match(await readFile(join(tree.path,'.git'),'utf8'),/^gitdir: \.\.\//u);
+  await writeFile(join(tree.path,'project.txt'),'staged');
+  run(tree.path,'add','--','project.txt');
+  await writeFile(join(tree.path,'project.txt'),'working change');
+  await writeFile(join(tree.path,'draft.txt'),'draft');
+  const copy=join(root,'restored studio');
+  await cp(repository,copy,{recursive:true,verbatimSymlinks:true});
+  const restored=await portable(copy).getWorktree(tree.id);
+  assert.equal(restored.repository,copy);
+  assert.equal(run(restored.path,'show',':project.txt'),'staged');
+  assert.equal(await readFile(join(restored.path,'project.txt'),'utf8'),'working change');
+  assert.equal(await readFile(join(restored.path,'draft.txt'),'utf8'),'draft');
+  await writeFile(join(restored.path,'draft.txt'),'copy changed');
+  assert.equal(await readFile(join(tree.path,'draft.txt'),'utf8'),'draft');
+});
+
 test('release preparation combines a reviewed package with an advanced target without changing the target',async t=>{
   const {repository,root,options}=await fixture(t);
   const stage='refs/heads/hearth-packages/sprint';

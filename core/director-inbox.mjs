@@ -32,6 +32,30 @@ export function explicitExitAndRetry(text) {
     '我已确认先前的进程已退出。重试此步骤。'].map(normalized).includes(normalized(text));
 }
 
+const useAvailable = ['Продолжи с доступными материалами. Отметь, что ещё требует проверки.',
+  'Continue with the available materials. Mark what still needs verification.',
+  'Continúa con el material disponible. Señala lo que queda por verificar.',
+  'Continue avec les éléments disponibles. Signale ce qui reste à vérifier.',
+  '用现有资料继续。标明仍需核实的内容。'];
+const findSources = ['Найди другие источники и попробуй сверить факты по ним.',
+  'Find alternative sources and try to verify the facts against them.',
+  'Busca otras fuentes e intenta verificar los hechos con ellas.',
+  'Cherche d’autres sources et essaie d’y vérifier les faits.',
+  '寻找其他来源，并尝试用它们核实事实。'];
+const findAnotherWay = ['Проверь материалы студии и попробуй другой способ выполнить задачу.',
+  'Check the studio materials and try another way to complete the task.',
+  'Revisa el material del estudio e intenta resolver la tarea de otro modo.',
+  'Examine les éléments du studio et essaie une autre façon de réaliser la tâche.',
+  '检查工作室的资料，并尝试用其他办法完成任务。'];
+const continueLabel = ['Продолжить с тем, что есть','Continue with what’s available','Continuar con lo que hay',
+  'Continuer avec les éléments disponibles','使用现有资料继续'];
+const sourcesLabel = ['Найти другие источники','Find alternative sources','Buscar otras fuentes','Chercher d’autres sources','寻找其他来源'];
+const alternativeLabel = ['Попробовать другой способ','Try another approach','Intentar otro método','Essayer une autre méthode','尝试其他办法'];
+
+export function continueFromInbox(text) {
+  return [...useAvailable,...findSources,...findAnotherWay].map(normalized).includes(normalized(text));
+}
+
 export function inboxSuggestions(value) {
   if (!Array.isArray(value)) return [];
   return value.slice(0,3).flatMap((choice,index)=>{
@@ -52,12 +76,17 @@ const defaults = {
 export function directorInboxSuggestions(item, locale, { branch, retry } = {}) {
   const index=Math.max(0,locales.indexOf(locale));
   const out=[];
-  const append=(id, text)=>{if(text && !out.some(option=>option.text===text))out.push({id,label:text,text});};
+  const append=(id, text, label=text)=>{if(text && !out.some(option=>option.text===text))out.push({id,label,text});};
   const key=item.kind==='acceptance' && branch ? 'merge' : item.kind;
   if (approval[key]) append('approve', key==='merge'?approval.merge[index]+branch:approval[key][index]);
   const revision = {plan:'planRevision',acceptance:'reviewRevision',roster:'rejectRoster'}[item.kind];
   if (revision) append('revise', defaults[revision][index]);
   if (retry) append('retry', defaults.retry[index]);
+  if (item.kind==='question' && (item.classification==='technical' || !(item.choices?.length || item.options?.length))) {
+    const sources=/источник|справк|dns|sources?|fuentes?|来源|资料/iu.test(item.body ?? '');
+    append('alternative',sources?findSources[index]:findAnotherWay[index],sources?sourcesLabel[index]:alternativeLabel[index]);
+    append('continue',useAvailable[index],continueLabel[index]);
+  }
   const suggested=item.choices ?? item.options;
   for (const [i, choice] of (Array.isArray(suggested)?suggested:[]).entries()) {
     if (out.length>=2 && item.kind!=='question') break;

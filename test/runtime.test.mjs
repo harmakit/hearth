@@ -39,6 +39,32 @@ async function workScope(t) {
   return { root: await realpath(root), scratch: await realpath(scratch), access: 'worktree-write' };
 }
 
+test('Codex passes the native role, exact local skills and output schema through App Server', async t => {
+  const scope = await workScope(t);
+  const definitionPath = '.codex/agents/researcher.toml';
+  const path = '.agents/skills/chronology/SKILL.md';
+  for (const file of [definitionPath, path]) await mkdir(dirname(join(scope.root, file)), {recursive:true});
+  await writeFile(join(scope.root, definitionPath), 'name = "researcher"');
+  await writeFile(join(scope.root, path), '---\nname: chronology\ndescription: Check dates.\n---\n');
+  const nativeRole = { name:'researcher', definitionPath, description:'Check references', instructions:'Check each date.',
+    requiredSkills:[{name:'chronology',path}] };
+  const outputSchema = {type:'object',properties:{summary:{type:'string'}},required:['summary'],additionalProperties:false};
+  const result = await adapter('native-contract').run({...request,projectRoot:scope.root,nativeRole,outputSchema});
+  assert.equal(result.text,'{"summary":"contract"}');
+  await assert.rejects(adapter('native-skill-missing').run({...request,projectRoot:scope.root,nativeRole,outputSchema}),/chronology/);
+});
+
+test('Claude selects the role using native options and reads structured output instead of prose', async t => {
+  const scope = await workScope(t);
+  const definitionPath = '.claude/agents/researcher.md';
+  await mkdir(dirname(join(scope.root,definitionPath)),{recursive:true});
+  await writeFile(join(scope.root,definitionPath),'---\nname: researcher\n---\nCheck each date.');
+  const outputSchema = {type:'object',properties:{summary:{type:'string'}},required:['summary'],additionalProperties:false};
+  const result = await adapter('native-contract').run({...request,runtime:'claude',projectRoot:scope.root,outputSchema,
+    nativeRole:{name:'researcher',definitionPath,description:'Check references', instructions:'Check each date.',requiredSkills:[]}});
+  assert.equal(result.text,'{"summary":"contract"}');
+});
+
 test('Codex opens a verified write scope on the managed root and denies a substituted native profile', async t => {
   const scope = await workScope(t);
   const scopedRequest = { ...request, scope };

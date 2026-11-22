@@ -42,6 +42,11 @@ async function codexConfiguration(binary, scope) {
     ? '":workspace_roots"={"."="write",".git"="read","*/**/.[gG][iI][tT]"="deny","*/**/.[gG][iI][tT]/**"="deny"}'
     : '":workspace_roots"={"."="read"}';
   const filesystem = ['":root"="deny"', '":minimal"="read"', workspace, ...executableRules];
+  if(scope?.privateProject){
+    const {root,state,worktrees}=scope.privateProject;
+    filesystem.push(`${JSON.stringify(state)}="deny"`);
+    if(scope.root===root)filesystem.push(`${JSON.stringify(worktrees)}="deny"`,`${JSON.stringify(join(root,'.git'))}="deny"`);
+  }
   if (scope?.scratch) {
     const gitdir = await linkedGitDirectory(scope.root);
     if (gitdir) filesystem.push(`${JSON.stringify(gitdir)}="read"`);
@@ -200,7 +205,7 @@ export async function inspectCodex(binary, options) {
   });
 }
 
-export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope: execution, ...options }) {
+export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope: execution, nativeRole, outputSchema, ...options }) {
   const settings = await codexConfiguration(binary, execution);
   const { profile } = settings;
   const probeOptions = { cwd, ...options, timeoutMs: Math.min(options.timeoutMs, 8000) };
@@ -220,7 +225,7 @@ export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope
       const scope = { cwd, runtimeWorkspaceRoots: [cwd], permissions: profile, approvalPolicy: 'never' };
       let thread;
       try {
-        thread = await rpc('thread/start', { ...scope, model, ephemeral: true });
+        thread = await rpc('thread/start', { ...scope, model, ephemeral: true,developerInstructions:nativeRole?.instructions });
       } catch (error) {
         throw new Error(`Не удалось открыть временную сессию Codex. ${error.message}`, { cause: error });
       }
@@ -235,8 +240,16 @@ export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope
         throw isolationError('Codex не подтвердил изоляцию рабочей папки и запрошенный профиль доступа.');
       }
       if (model && thread.model !== model) throw new Error('Codex не применил выбранную модель.');
+      const skills=nativeRole?.requiredSkills ?? [];
+      if(skills.length){
+        const listed=await rpc('skills/list',{cwds:[cwd],forceReload:true});
+        const available=listed.data?.find(entry=>entry.cwd===cwd)?.skills ?? [];
+        for(const skill of skills) if(!available.some(entry=>entry.enabled && entry.name===skill.name && entry.path===skill.path)){
+          throw new Error(`Обязательный навык «${skill.name}» недоступен в Codex.`);
+        }
+      }
       return runTurn(server, {
-        ...scope, threadId, effort, prompt, signal, emit,
+        ...scope, threadId, effort, prompt, signal, emit,skills,outputSchema,
         onUsage(measured) { usage = measured; },
       });
     }, mcpOverrides);
@@ -257,7 +270,7 @@ function codexUsage(total) {
   return Object.keys(usage).length ? usage : undefined;
 }
 
-function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit, onUsage, ...scope }) {
+function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit, onUsage, skills, outputSchema, ...scope }) {
   return new Promise((resolve, reject) => {
     const { threadId } = scope;
     let turnId;
@@ -298,7 +311,8 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
       reject(new DOMException('Запуск Codex отменён.', 'AbortError'));
       return;
     }
-    rpc('turn/start', { ...scope, effort, input: [{ type: 'text', text: prompt, text_elements: [] }] })
+    const input=[{ type:'text', text:prompt, text_elements:[] },...skills.map(skill=>({type:'skill',...skill}))];
+    rpc('turn/start', { ...scope, effort, input, outputSchema })
       .then(result => {
         turnId = result.turn?.id;
         if (!turnId) throw new Error('Codex не вернул идентификатор запуска.');

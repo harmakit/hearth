@@ -457,3 +457,19 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
 
   return { freezeWork, prepareCandidate, getCandidate, releaseCandidate, verifyCheckout, integrate, isMerged };
 }
+
+export function createProjectDelivery(legacy,git=defaultGit){
+  const projects=new Map();
+  const forWorktree=worktree=>{
+    if(worktree?.layout!=='project')return legacy;
+    if(!projects.has(worktree.repository)){
+      projects.set(worktree.repository,createGitDelivery({
+        storageDir:join(worktree.repository,'.hearth','worktrees','.delivery'),git,
+      }));
+    }
+    return projects.get(worktree.repository);
+  };
+  const methods=Object.fromEntries(['freezeWork','prepareCandidate','getCandidate','releaseCandidate','verifyCheckout','integrate']
+    .map(method=>[method,request=>forWorktree(request.worktree)[method](request)]));
+  return {...methods,isMerged:worktree=>forWorktree(worktree).isMerged(worktree)};
+}

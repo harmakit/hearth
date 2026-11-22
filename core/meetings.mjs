@@ -301,8 +301,8 @@ export function createMeetings({
     if (current) return changed(current);
   }
 
-  function recoverMeetings() {
-    const recovered = transaction(() => list('meetings').filter(({ activeStep }) => activeStep).map((meeting) => {
+  function recoverMeetings(studioId) {
+    const recovered = transaction(() => list('meetings').filter(row=>row.activeStep && (!studioId || studioId===row.studioId)).map((meeting) => {
       return hold(meeting, 'Hearth перезапустился во время этапа встречи.', 'interrupted');
     }));
     if (recovered.length) changed();

@@ -1,5 +1,6 @@
 import { posix, win32 } from 'node:path';
 import { inboxSuggestions } from './director-inbox.mjs';
+import { omitAbsentFields } from './response-schemas.mjs';
 
 const roles = ['library', 'engineer', 'editor', 'artist', 'other'];
 const keyPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
@@ -82,7 +83,8 @@ export function parseResponse(result) {
   const response = field(result?.text, 'ответ рантайма', 1_000_000);
   const json = response.match(/^```(?:json)?\s*\n([\s\S]+?)\n```$/i)?.[1] ?? response;
   try {
-    return object(JSON.parse(json), 'ответ рантайма');
+    const parsed=JSON.parse(json);
+    return object(result.structured ? omitAbsentFields(parsed) : parsed,'ответ рантайма');
   } catch {
     throw new Error('Рантайм вернул некорректный JSON.');
   }

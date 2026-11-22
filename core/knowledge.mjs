@@ -25,7 +25,8 @@ export function materialMetadata(input) {
 export function customSkillDraft(input) {
   const skill = object(input, 'пользовательский навык');
   const key = stableKey(skill.key);
-  return { key, title: field(skill.title, 'название навыка', 120), content: field(skill.content, 'содержание навыка', 4000) };
+  return { key, title: field(skill.title, 'название навыка', 120), content: field(skill.content, 'содержание навыка', 4000),
+    ...(skill.description===undefined?{}:{description:field(skill.description,'когда применять навык',400)}) };
 }
 
 function stableKey(value) {

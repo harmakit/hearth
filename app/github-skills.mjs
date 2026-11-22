@@ -20,6 +20,7 @@ const SHA = /^[a-f0-9]{40}$/;
 const REPO_NAME = /^[a-z\d][a-z\d-]{0,38}\/[a-z\d_.-]{1,100}$/i;
 const TOPIC = /^[\p{L}\p{N}][\p{L}\p{M}\p{N}-]*(?: [\p{L}\p{N}][\p{L}\p{M}\p{N}-]*)*$/u;
 const GENERAL_TOPICS = new Set(['skill', 'skills', 'agent skill', 'agent skills']);
+const shareableLicenses=new Set(['MIT','BSD-2-Clause','BSD-3-Clause','ISC','Apache-2.0','CC0-1.0','Unlicense']);
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 class GitHubReadError extends Error {
@@ -300,6 +301,7 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Da
         let commit;
         let files;
         let singleSkill;
+        let licenseText;
         try {
           const head = await get(`${repoUrl}/commits/${encodeURIComponent(repo.default_branch)}`, MAX_SEARCH_RESPONSE_BYTES);
           const treeSha = head?.commit?.tree?.sha;
@@ -310,6 +312,13 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Da
           if (tree.truncated) warnings.push(`GitHub returned an incomplete Git tree for ${repo.full_name}.`);
           const skillEntries = tree.tree.filter(validSkill);
           singleSkill = skillEntries.length === 1 && !tree.truncated;
+          const licenseEntry=tree.tree.find(entry=>/^(?:licen[cs]e|copying)(?:\.(?:md|txt))?$/iu.test(entry.path??'')
+            && entry.type==='blob' && entry.mode==='100644' && SHA.test(entry.sha??'') && Number.isSafeInteger(entry.size) && entry.size<=MAX_SKILL_BYTES);
+          if(!tree.truncated && licenseEntry && shareableLicenses.has(repo.license?.spdx_id) && blobRequests<MAX_BLOBS){
+            blobRequests++;
+            const licenseBlob=await get(`${repoUrl}/git/blobs/${licenseEntry.sha}`,MAX_BLOB_RESPONSE_BYTES);
+            licenseText=readSkill(licenseBlob,licenseEntry.sha);
+          }
           files = skillEntries
             .map(entry => ({ entry, relevance: relevance(entry.path, specificTopics) }))
             .sort((a, b) => b.relevance - a.relevance || a.entry.path.localeCompare(b.entry.path))
@@ -338,6 +347,7 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Da
               license: typeof license === 'string' && license !== 'NOASSERTION' ? license : repo.license?.name ?? null,
               url: `${WEB_ORIGIN}/${repo.full_name}/blob/${commit}/${path.split('/').map(encodeURIComponent).join('/')}`,
               content,
+              ...(licenseText?{redistributable:true,files:{'LICENSE.txt':licenseText}}:{}),
             });
           } catch (error) {
             if (reportFailure(`skill read for ${repo.full_name}`, error)) return results();

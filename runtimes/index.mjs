@@ -1,7 +1,7 @@
 import { access, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { delimiter, isAbsolute, join, relative, sep } from 'node:path';
 import { capture } from './process.mjs';
 import { inspectCodex, runCodex } from './codex.mjs';
 import { inspectClaude, runClaude } from './claude.mjs';
@@ -115,7 +115,7 @@ export function createRuntimes({
     }
   }
 
-  async function run({ runtime, projectRoot, scope: requestedScope, prompt, model, effort, signal, onEvent, sessionId }) {
+  async function run({ runtime, projectRoot, scope: requestedScope, prompt, model, effort, signal, onEvent, sessionId, nativeRole, outputSchema, portableProject }) {
     const provider = providerFor(runtime);
     const emit = (type, fields = {}) => onEvent?.({ runtime, type, ...fields });
     try {
@@ -127,6 +127,29 @@ export function createRuntimes({
         projectRoot: source, requireScratch: false,
       });
       const { root } = scope;
+      if(portableProject){
+        scope.privateProject={root:source,state:join(source,'.hearth','state'),worktrees:join(source,'.hearth','worktrees')};
+      }
+      if(nativeRole){
+        const within=async path=>{
+          if(typeof path!=='string' || isAbsolute(path) || path.split(/[\\/]/u).includes('..')) throw new Error('Неверный путь к определению роли или навыка.');
+          const file=await realpath(join(root,path));
+          const subpath=relative(root,file);
+          if(!subpath || isAbsolute(subpath) || subpath==='..' || subpath.startsWith('..'+sep) || !(await stat(file)).isFile()){
+            throw new Error('Определение роли или навыка находится за пределами рабочей копии.');
+          }
+          return file;
+        };
+        if(!/^[a-z][a-z0-9-]{0,62}$/u.test(nativeRole.name) || typeof nativeRole.instructions!=='string' ||
+          !nativeRole.instructions.trim() || !Array.isArray(nativeRole.requiredSkills)) throw new Error('Некорректное определение роли.');
+        await within(nativeRole.definitionPath);
+        const skills=[];
+        for(const skill of nativeRole.requiredSkills){
+          try { skills.push({name:skill.name,path:await within(skill.path)}); }
+          catch(error){ throw new Error(`Обязательный навык «${skill.name}» недоступен.`,{cause:error}); }
+        }
+        nativeRole={...nativeRole,requiredSkills:skills};
+      }
       if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('Запрос для подключения пуст.');
       if (model != null && (typeof model !== 'string' || !/^[a-z\d][a-z\d._:/-]*$/i.test(model))) {
         throw new Error(`Некорректная модель ${provider.label}.`);
@@ -143,13 +166,14 @@ export function createRuntimes({
       const binary = await locate(runtime, env);
       await checkVersion(binary, provider, { cwd, env, timeoutMs: inspectTimeoutMs, signal });
       signal?.throwIfAborted();
-      const result = await provider.run(binary, { cwd: root, env, timeoutMs, prompt, model, effort, nativeId, signal, emit, scope, isolateCommand });
+      const result = await provider.run(binary, { cwd: root, env, timeoutMs, prompt, model, effort, nativeId, signal, emit, scope, isolateCommand, nativeRole, outputSchema });
       const text = typeof result.text === 'string' ? result.text.trim() : '';
       if (!text) throw Object.assign(new Error(`${provider.label} вернул пустой ответ.`), { code: 'EMPTY_RESPONSE' });
       emit('completed');
-      if (!nativeIdPattern.test(result.nativeId ?? '')) return { text };
+      const response={text,...(outputSchema?{structured:true}:{})};
+      if (!nativeIdPattern.test(result.nativeId ?? '')) return response;
       const handle = Buffer.from(JSON.stringify([runtime, root, result.nativeId])).toString('base64url');
-      return { text, sessionId: handle };
+      return { ...response, sessionId: handle };
     } catch (error) {
       const failure = error.code === 'ENOENT' ? new Error(`${provider.label}: исполняемый файл или рабочая папка не найдены.`) : error;
       emit(failure.name === 'AbortError' ? 'interrupted' : 'failed', { message: failure.message });

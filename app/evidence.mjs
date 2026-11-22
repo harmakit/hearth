@@ -108,7 +108,7 @@ function provenance(record) {
   return { studioId, taskId, attemptId, kind, revision: structuredClone(revision) };
 }
 
-export function createEvidenceStore({ storageDir, maxBytes = defaultMaxBytes }) {
+export function createEvidenceStore({ storageDir, maxBytes = defaultMaxBytes, portable = false }) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > defaultMaxBytes) {
     throw new Error("Некорректный лимит размера доказательства.");
   }
@@ -178,7 +178,7 @@ export function createEvidenceStore({ storageDir, maxBytes = defaultMaxBytes }) 
     }
     await checkedDirectory(directory);
     const path = join(directory, storedRef);
-    const { bytes, identity } = await readStable(path, maxBytes, imported ? undefined : record.identity);
+    const { bytes, identity } = await readStable(path, maxBytes, imported || portable ? undefined : record.identity);
     matchPayload(record, bytes);
     return { path, bytes, identity };
   }

@@ -13,7 +13,7 @@ const coachGuidance = [
   'Prepare the guide in the studio language. Project files must stay unchanged.',
 ];
 
-const roleKnowledgeGuidance = 'Optionally include "selectedMaterialIds" (up to three IDs from materialCandidates), "knowledge" (up to 3000 characters of reusable notes for the role), "knowledgeKey", "knowledgeReason", and "customSkills" (up to three objects with "key", "title", and "content"). Ground notes in the selected materials and distinguish project-specific observations. Custom skills are reference text to be tested in the exercise. Use a stable lowercase ASCII key with digits, hyphens or underscores for each subject and skill. Reuse an existing key when revising the same knowledge or skill and explain the revision in knowledgeReason. Apply the approved studio decisions before other reference material.';
+const roleKnowledgeGuidance = 'Optionally include "selectedMaterialIds" (up to three IDs from materialCandidates), "knowledge" (up to 3000 characters of reusable notes for the role), "knowledgeKey", "knowledgeReason", and "customSkills" (up to three objects with "key", "title", "description" explaining when to apply the skill, and "content"). Ground notes in the selected materials and distinguish project-specific observations. Custom skills are reference text to be tested in the exercise. Use a stable lowercase ASCII key with digits, hyphens or underscores for each subject and skill. Reuse an existing key when revising the same knowledge or skill and explain the revision in knowledgeReason. Apply the approved studio decisions before other reference material.';
 
 const coachExerciseCase = {
   fictional: true,

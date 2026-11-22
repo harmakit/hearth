@@ -7,6 +7,7 @@ import { debtPlanContext, eligibleDebt, validateDebtPlan } from './debt.mjs';
 import { buildTaskContext } from './checkpoints.mjs';
 import { unconfirmedProviderStop } from './dispatcher.mjs';
 import { inboxSuggestions } from './director-inbox.mjs';
+import { responseSchemas } from './response-schemas.mjs';
 
 const now = () => new Date().toISOString();
 const trainingFinished = 'Обучение завершено';
@@ -517,6 +518,10 @@ export function createWorkflow({
     if (purpose === 'review' && task?.training?.bootstrap && !task.training.exercise) return { needsExercise: true };
     const agentId = purpose === 'task' ? task.agentId : purpose === 'review' ? task.reviewerId : purpose === 'training-exercise' ? task.training.targetAgentId : undefined;
     const agent = studio.agents.find(({ id }) => id === agentId);
+    const trainingFor=()=>{
+      const context=training.context(studio,agent,task);
+      return studio.portable && context?{knowledge:context.knowledge,skills:context.skills?.filter(skill=>!skill.redistributable)}:context;
+    };
     let usedTraining;
     const runTracked = (request) => {
       const input = { ...request, onEvent: job.onEvent };
@@ -574,7 +579,7 @@ export function createWorkflow({
         prompt = runPrompt(studio, agent, task, decisions, {
           ...context, criteria: task.criteria, artifactPath: task.artifactTarget, previousArtifactPath: task.artifactPath,
           referenceArtifacts: referenceArtifacts(task),
-          training: (usedTraining=training.context(studio, agent, task)),
+          training: (usedTraining=trainingFor()),
           dependencies: task.dependencies.slice(0, 16).map((id) => {
             const { title, summary, artifactPath } = read('tasks', id, 'Задача');
             return { title, summary: summary?.slice(0, 1_000), artifactPath };
@@ -592,7 +597,7 @@ export function createWorkflow({
           ...task, artifact: task.artifact?.slice(0, artifactLimit),
           artifactWasTruncated: task.artifact?.length > artifactLimit,
           referenceArtifacts: referenceArtifacts(task),
-        }, agent, (usedTraining=training.context(studio, agent, task)));
+        }, agent, (usedTraining=trainingFor()));
         break;
       }
       case 'training-exercise':
@@ -609,6 +614,7 @@ export function createWorkflow({
       const exercise = async (exercisePrompt) => {
         const response = await runTracked({
           runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt: exercisePrompt, signal,
+          outputSchema:responseSchemas.exercise,
         }).catch(error => {
           if (error?.code === 'EMPTY_RESPONSE') return undefined;
           throw error;
@@ -624,7 +630,8 @@ export function createWorkflow({
       }
     }
     if (purpose === 'plan') {
-      const request = { runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal };
+      const request = { runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal,
+        outputSchema:responseSchemas.plan };
       const validate = response => {
         const plan = validatePlan(parseResponse(response), read('studios', studio.id, 'Студия').agents, job.kind === 'initial' ? allowed : []);
         if (plan.tasks.some(task => task.deliveryMode === 'git') && !studio.projectGit?.enabled) throw new Error('План запрашивает недоступную запись в Git.');
@@ -657,7 +664,8 @@ export function createWorkflow({
         const checkout = scoped.context ? `\n\nCandidate details (reference data):\n${JSON.stringify(scoped.context)}` : '';
         prompt = `Review the exact detached candidate version ${task.gitDelivery.revision.candidateOid}. Inspect files and check results.${checkout}\n\n${prompt}`;
       }
-      const request = { runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal, scope: scoped?.scope };
+      const outputSchema=purpose==='review'?responseSchemas.review:purpose==='task'?(lesson?responseSchemas.train:responseSchemas.task):undefined;
+      const request = { runtime, model: model || undefined, effort: effort || undefined, projectRoot: studio.root, purpose, prompt, signal, scope: scoped?.scope,outputSchema };
       result = await runTracked(request);
       try {
         data = parseResponse(result);
@@ -673,6 +681,26 @@ export function createWorkflow({
     if (purpose === 'task') {
       if (lesson) return training.selection(task, data, sources);
       const parsed = report(result);
+      if(parsed.question?.kind==='technical' && !task.recovery){
+        const director=studio.director;
+        const request={runtime:director.runtime,model:director.model||undefined,effort:director.effort||undefined,
+          projectRoot:studio.root,purpose:'resolve-blocker',signal,outputSchema:responseSchemas.blocker,prompt:[
+            'Resolve an operational blocker inside the studio. Return JSON with exactly one string field "nextStep".',
+            'Give the task one concrete, safe recovery attempt. Prefer existing project evidence, an available alternative, or a clearly marked partial draft. Do not change acceptance criteria, claim that missing evidence was verified, request permissions, run commands, or ask the owner to do studio work.',
+            JSON.stringify({language:studio.language,task:{title:task.title,criteria:task.criteria,summary:parsed.summary},
+              blocker:parsed.question.body.slice(0,2000),references:referenceArtifacts(task)?.map(({title,path})=>({title,path}))}),
+          ].join('\n\n')};
+        let nextStep='Use the available studio materials. Record which facts remain unverified and complete the supported portion.';
+        try {
+          const reply=await (trackedRun?trackedRun({studio,task,attemptId:job.runAttemptId,request}):run(request));
+          nextStep=field(parseResponse(reply).nextStep,'план восстановления',2400);
+        } catch(error){
+          signal.throwIfAborted();
+          if(unconfirmedProviderStop(error))throw error;
+        }
+        return {...parsed,recovery:{reason:parsed.question.body.slice(0,2000),nextStep},
+          ...(scoped?.worktreeId?{worktreeId:scoped.worktreeId}:{})};
+      }
       if (task.deliveryMode === 'git') {
         if (!parsed.question && !parsed.summary) throw new Error('Исполнитель не вернул отчёт о работе в Git.');
         return { ...parsed, worktreeId: scoped.worktreeId };
@@ -835,10 +863,13 @@ export function createWorkflow({
           ...(result.packageManifest ? {packageManifest:result.packageManifest} : {}),
           ...(task.deliveryMode === 'git' ? { gitDelivery: { worktreeId: result.worktreeId, status: 'work' } } : {}),
         };
+        if (result.recovery) return nextTask(studio,{...task,...patch,recovery:result.recovery});
         if (result.question) {
           update('tasks', { ...task, ...patch, status: 'waiting', stage: 'blocked', activeAgentId: undefined, updatedAt: now() });
           state(studio, studio.lifecycle === 'paused' ? 'paused' : 'active', 'Задача ждёт решения');
-          return addInbox(task, 'question', result.question);
+          return addInbox(task, 'question', result.question.kind==='technical'
+            ? {...result.question,title:'Нужно выбрать, как продолжить',choices:undefined}
+            : result.question);
         }
         if (task.deliveryMode === 'git') {
           update('tasks', { ...task, ...patch, status: 'queued', stage: 'qa', activeAgentId: undefined, updatedAt: now() });
@@ -1122,7 +1153,7 @@ export function createWorkflow({
       if (!isCurrent()) return;
       const result = await execute(studio, { ...job, runAttemptId: attemptId, onEvent }, task, controller.signal);
       if (!isCurrent()) return;
-      const ownerQuestion = job.purpose === 'task' && Boolean(result.question);
+      const ownerQuestion = job.purpose === 'task' && Boolean(result.question) && !result.recovery;
       const acceptance = job.purpose === 'review' && result.pass && task.kind !== 'train' && task.requiresAcceptance;
       const status = ownerQuestion || acceptance ? 'waiting' : 'completed';
       let item;

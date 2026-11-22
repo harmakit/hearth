@@ -11,7 +11,7 @@ const serviceCommands = new Set([
   "proposePhaseTransition", "decidePhaseTransition", "updateGrooming", "requestGrooming", "resolveGrooming",
   "openMeeting", "resumeMeeting", "resolveMeeting", "replaceParticipant", "addPrerequisite", "waivePrerequisite",
   "proposeRosterChange", "decideRosterChange", "retirementPlan", "changeKnowledge", "publishLibraryEntry",
-  "postStudioMessage", "postDirectorInboxReply", "applyConversationProposal", "studioUsage", "updateUsageTariff", "setEpicPriority", "diagnoseStudio", "updateNotifications", "resolveReconciliation",
+  "postStudioMessage", "postDirectorInboxReply", "saveInboxDraft", "applyConversationProposal", "studioUsage", "updateUsageTariff", "setEpicPriority", "diagnoseStudio", "updateNotifications", "resolveReconciliation",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 
@@ -105,10 +105,28 @@ function isRecord(value) {
 }
 
 export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, revealArtifact, copyArtifactPath, openProject,
-  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, copyTaskId, protectedRoots = [] }) {
+  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, copyTaskId,
+  portable, protectedRoots = [] }) {
+  async function create(input,prepared){
+    await portable?.assertEmptyRecipe(input.root);
+    const studio=service.createStudio(input,prepared);
+    if(!portable)return studio;
+    return portable.create(studio);
+  }
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
+    if (['inspectStudioFolder','openStudioFolder'].includes(command) && portable){
+      const root=await validateProjectRoot(payload.root,protectedRoots);
+      return command==='inspectStudioFolder'?portable.inspect({root}):portable.open({root,replaceRoot:payload.replaceRoot===true});
+    }
+    if (command==='migrateStudioFolder' && portable){
+      const studio=service.snapshot().studios.find(row=>row.id===payload.studioId);
+      if(!studio)throw new Error('Студия не найдена.');
+      const root=await validateProjectRoot(studio.root,protectedRoots);
+      return portable.migrate({studioId:studio.id,root});
+    }
+    if(command==='prepareStudioCopy' && portable)return portable.prepare(payload);
     if (command === "copyTaskId") {
       const {studioId,taskId}=payload;
       if(typeof studioId!=="string"||typeof taskId!=="string"||
@@ -205,7 +223,7 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
     if (command === "createStudio" && payload.newFolderName !== undefined) {
       const {newFolderName, ...input} = payload;
       const {root,targetRef} = await newProjectFolder(input.root, newFolderName, protectedRoots);
-      return service.createStudio({...input, root}, {targetRef});
+      return create({...input, root}, {targetRef});
     }
     if (command === "createStudio" || (command === "updateStudio" && Object.hasOwn(payload, "root"))) {
       payload = { ...payload, root: await validateProjectRoot(payload.root, protectedRoots) };
@@ -213,9 +231,9 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       const {offerGit, ...input} = payload;
       if (offerGit === true) {
         const gitOfferAvailable = await hasProjectGitDirectory(input.root).catch(() => false);
-        return {...service.createStudio(input), gitOfferAvailable};
+        return {...await create(input), gitOfferAvailable};
       }
-      return service.createStudio(input);
+      return create(input);
     }
     return service[command](payload);
   };

@@ -14,6 +14,7 @@ export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprint
   const archive=archived.length ? `<details class="panel padded" data-work-record="studio-archive"><summary>${ui('archived')} · ${archived.length}</summary>${archived.map(s=>`<div class="row">
     <button type="button" class="text-button" data-archive-details="${safe(s.id)}">${safe(s.name)}</button><button type="button" class="action secondary" data-restore-studio="${safe(s.id)}">${ui('restore')}</button></div>`).join('')}</details>` : '';
   const create = `<button type="button" class="action" data-open="studio">${hasDraft?copy('Продолжить создание'):ui('create')}</button>`+
+    `<button type="button" class="action secondary" data-open="studio-folder">${copy('Открыть папку студии')}</button>`+
     `<button type="button" class="action secondary" data-open="import-bundle">${copy('Импортировать файл Hearth')}</button>`;
   const taskButton=t=>`<button type="button" class="text-button" data-portfolio-task="${safe(t.id)}" data-studio="${safe(t.studioId)}">${safe(t.title || t.id)}</button>`;
   const requestButton=i=>`<button type="button" class="text-button" data-workspace-inbox="${safe(i.studioId)}" data-decision="${safe(i.id)}">${safe(inboxLabelIn(i,appLocale) || i.id)}</button>`;

@@ -35,6 +35,7 @@
 .director-composer { border-top: 1px solid var(--line); padding-top: 12px; }
 .director-replies:empty { display: none; }
 .director-replies { border-inline-start: 2px solid var(--accent); padding-inline-start: 10px; }
+.director-replies > div + div { margin-block-start: 8px; padding-block-start: 8px; border-top: 1px solid var(--line); }
 .director-editor { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: end; }
 .director-editor textarea { min-height: 80px; }
 @media (max-width: 540px) {

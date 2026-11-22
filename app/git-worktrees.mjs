@@ -7,6 +7,7 @@ const oidPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const idPattern = /^[0-9a-f]{64}$/;
 const taskBranchPrefix = 'refs/heads/hearth/';
 export const minimumGitVersion = '2.43.0';
+const minimumPortableGit = '2.48.0';
 const gitConfig = [
   ...(process.platform === 'win32' ? ['core.longpaths=true'] : []),
   'core.hooksPath=/dev/null',
@@ -159,7 +160,8 @@ async function localBranch(repository, targetRef) {
   return ref;
 }
 
-export function createGitWorktrees({ storageDir, validateRepository } = {}) {
+export function createGitWorktrees({ storageDir, projectRoot, validateRepository } = {}) {
+  if(projectRoot)storageDir=join(projectRoot,'.hearth');
   if (typeof storageDir !== 'string' || !isAbsolute(storageDir) || typeof validateRepository !== 'function') {
     throw new Error('Worktrees require an absolute storage directory and repository validator');
   }
@@ -170,9 +172,10 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     storage ??= (async () => {
       await mkdir(storageDir, { recursive: true, mode: 0o700 });
       const root = await realpath(storageDir);
+      if(projectRoot && root!==storageDir)throw new Error('Каталог рабочих копий Hearth находится за пределами проекта.');
       return {
         root,
-        registry: join(root, 'worktree-registry'),
+        registry: projectRoot?join(root,'state','worktree-registry'):join(root,'worktree-registry'),
         worktrees: join(root, 'worktrees'),
       };
     })().catch(error => {
@@ -201,8 +204,13 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     const marker = await pathStat(metadata);
     if (!marker) throw new Error('В выбранной папке нет Git-репозитория.');
     if (!marker.isDirectory()) throw new Error('Выберите основную папку Git-репозитория.');
-    await requireProjectGit(canonical);
+    const version=await requireProjectGit(canonical);
+    if(projectRoot && version.localeCompare(minimumPortableGit,'en',{numeric:true})<0)
+      throw new Error(`Для переносимых рабочих копий нужен Git ${minimumPortableGit} или новее.`);
     const gitCommonDir = await verifiedDirectory(metadata);
+    if(projectRoot && await pathStat(join(gitCommonDir,'objects','info','alternates'))) {
+      throw new Error('Git-объекты находятся за пределами проекта. Сначала подготовьте самостоятельный репозиторий.');
+    }
     const topLevel = gitLine(await git(canonical, ['rev-parse', '--show-toplevel']));
     const discoveredCommon = gitLine(await git(canonical, [
       'rev-parse', '--path-format=absolute', '--git-common-dir',
@@ -237,7 +245,13 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     const stat = await pathStat(file);
     if (!stat) return null;
     if (!stat.isFile() || stat.nlink !== 1) throw new Error('Invalid worktree registration file');
-    const record = JSON.parse(await readFile(file, 'utf8'));
+    const saved = JSON.parse(await readFile(file, 'utf8'));
+    const record = projectRoot && saved.layout==='project' && saved.path===`worktrees/${id}` && saved.repository==='.' && saved.gitCommonDir==='.git'
+      ? {...saved,path:join(paths.worktrees,id),repository:projectRoot,gitCommonDir:join(projectRoot,'.git')}
+      : saved;
+    if(projectRoot && (saved.layout!=='project' || saved.path!==`worktrees/${id}` || saved.repository!=='.' || saved.gitCommonDir!=='.git')){
+      throw new Error('Рабочая копия не зарегистрирована внутри проекта.');
+    }
     if (record.id !== id || taskIdentity(record.studioId, record.taskId) !== id ||
         record.path !== join(paths.worktrees, id) || record.branchRef !== `${taskBranchPrefix}${id}` ||
         typeof record.repository !== 'string' || !isAbsolute(record.repository) ||
@@ -253,7 +267,8 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
   async function writeRecord(record, paths, replace) {
     const file = join(paths.registry, `${record.id}.json`);
     const temporary = join(paths.registry, `${record.id}.${randomUUID()}.tmp`);
-    await writeFile(temporary, JSON.stringify(record), { flag: 'wx', mode: 0o600, flush: true });
+    const saved=projectRoot?{...record,layout:'project',path:'worktrees/'+record.id,repository:'.',gitCommonDir:'.git'}:record;
+    await writeFile(temporary, JSON.stringify(saved), { flag: 'wx', mode: 0o600, flush: true });
     try {
       if (replace) await rename(temporary, file);
       else await link(temporary, file);
@@ -327,7 +342,7 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
       }
       const baseOid = await oid(identity.repository, targetRef);
       record = {
-        id, path, branchRef,
+        id, path, branchRef,...(projectRoot?{layout:'project'}:{}),
         targetRef, baseOid, studioId: request.studioId, taskId: request.taskId,
         ...identity, status: 'pending',
       };
@@ -364,7 +379,8 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
       const adminDir = join(record.gitCommonDir, 'worktrees');
       if (await pathStat(adminDir)) await verifiedDirectory(adminDir);
       await git(record.repository, [
-        'worktree', 'add', '--no-guess-remote', '--', record.path, record.branchRef.slice('refs/heads/'.length),
+        'worktree', 'add', '--no-guess-remote', ...(projectRoot?['--relative-paths']:[]),
+        '--', record.path, record.branchRef.slice('refs/heads/'.length),
       ]);
     }
     await verifyWorktree(record);
@@ -408,5 +424,65 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     });
   }
 
-  return { ensureWorktree, getWorktree, listWorktrees, prepareTarget, markCleaned };
+  async function moveFrom(record){
+    if(!projectRoot || record.repository!==projectRoot)throw new Error('Рабочая копия относится к другому проекту.');
+    return serialize(record.id,async()=>{
+      const paths=await storagePaths();
+      const destination=join(paths.worktrees,record.id);
+      const previous=await readRecord(record.id,paths);
+      if(previous)return previous.status==='ready'?verifyWorktree(previous):previous;
+      const next={...record,path:destination,layout:'project'};
+      if(record.status==='pending')throw new Error('Сначала восстановите незавершённое создание рабочей копии.');
+      if(record.status==='ready'){
+        if(await pathStat(record.path)){
+          if(await pathStat(destination))throw new Error('Папка для рабочей копии уже занята.');
+          await verifyWorktree(record);
+          await git(record.repository,['worktree','move','--',record.path,destination]);
+        }
+        await verifyWorktree(next);
+        await git(projectRoot,['worktree','repair','--relative-paths','--',destination]);
+        await verifyWorktree(next);
+      }
+      await writeRecord(next,paths,false);
+      return next;
+    });
+  }
+
+  return { ensureWorktree, getWorktree, listWorktrees, prepareTarget, markCleaned,moveFrom };
+}
+
+export function createProjectWorktrees({legacy,validateRepository,studios}) {
+  const projects=new Map();
+  const forProject=root=>{
+    if(!projects.has(root))projects.set(root,createGitWorktrees({projectRoot:root,validateRepository}));
+    return projects.get(root);
+  };
+  async function locate(id,verify,studioId){
+    const studio=studios().find(row=>row.id===studioId);
+    if(!studio || studio.projectDetached)throw new Error('Рабочая копия не относится к открытой студии.');
+    const trees=studio.portable?forProject(studio.root):legacy;
+    const found=await trees.getWorktree(id,verify);
+    const entry=found?.studioId===studioId && found.repository===studio.root?found:undefined;
+    return {trees,entry};
+  }
+  return {
+    ensureWorktree(request){
+      const studio=studios().find(row=>row.id===request.studioId && row.root===request.repository);
+      return (studio?.portable?forProject(studio.root):legacy).ensureWorktree(request);
+    },
+    listWorktrees({studioId}){
+      const studio=studios().find(row=>row.id===studioId);
+      return (studio?.portable && studio.projectGit?.enabled?forProject(studio.root):legacy).listWorktrees({studioId});
+    },
+    async getWorktree(id,verify=true,studioId){return (await locate(id,verify,studioId)).entry;},
+    async markCleaned(id,studioId){
+      const {trees,entry}=await locate(id,false,studioId);
+      if(!entry)throw new Error('Рабочая копия отсутствует в выбранной папке студии.');
+      return trees.markCleaned(id);
+    },
+    prepareTarget:legacy.prepareTarget,
+    async migrate(studio){
+      for(const record of await legacy.listWorktrees({studioId:studio.id}))await forProject(studio.root).moveFrom(record);
+    },
+  };
 }

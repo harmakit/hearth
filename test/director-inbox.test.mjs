@@ -97,3 +97,35 @@ test('the director cannot accept a saved result whose file changed after review'
   assert.match(reply.text,/Файл изменился после ревью/);
   assert.equal(service.snapshot().inbox.find(i=>i.id===item.id).status,'open');
 });
+
+test('the director can name sources from the blocked task and keeps a clarification open', async t => {
+  let prompt;
+  const service=createStudioService({dbPath:':memory:',run:async request=>{
+    if(request.purpose==='director-inbox'){
+      prompt=request.prompt;
+      return {text:'{"action":"explain","text":"The researcher supplied the links."}'};
+    }
+    return {text:JSON.stringify({summary:'The studio could not resolve the source host.',
+      artifact:'See [Chronology](https://reference.example/chronology).',
+      question:'Do you have a copy?'})};
+  }});
+  t.after(()=>service.close());
+  const studio=service.createStudio({root:'/project',name:'Sources'});
+  const task=service.createTask({studioId:studio.id,title:'Verify the dates',prompt:'Confirm the historical setting.'});
+  service.startTask({taskId:task.id});
+  const item=await waiting(()=>service.snapshot().inbox.find(i=>i.taskId===task.id&&i.kind==='question'),'open question');
+  const request=service.postDirectorInboxReply({studioId:studio.id,inboxId:item.id,version:item.version??1,
+    operationId:'sources',text:'Какие именно источники?'});
+  await waiting(()=>service.snapshot().conversationMessages.find(m=>m.replyTo===request.id),'director reply');
+  assert.match(prompt,/https:\/\/reference\.example\/chronology/);
+  assert.match(prompt,/The studio could not resolve the source host/);
+  assert.equal(service.snapshot().inbox.find(i=>i.id===item.id).status,'open');
+  const options=service.snapshot().inbox.find(i=>i.id===item.id).directorSuggestions;
+  assert.ok(options.some(option=>option.id==='continue'));
+  const alternative=options.find(option=>option.id==='alternative');
+  assert.ok(alternative);
+  const next=service.postDirectorInboxReply({studioId:studio.id,inboxId:item.id,version:item.version??1,
+    operationId:'another-way',text:alternative.text});
+  await waiting(()=>service.snapshot().conversationMessages.find(m=>m.replyTo===next.id),'director passes the chosen route');
+  assert.equal(service.snapshot().inbox.find(i=>i.id===item.id).status,'resolved');
+});
