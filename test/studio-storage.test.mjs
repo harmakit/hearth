@@ -10,11 +10,17 @@ test('moving an opted-in studio into its folder preserves original IDs and resto
   const base=fileURLToPath(new URL('../.tmp/',import.meta.url));
   await mkdir(base,{recursive:true});
   const root=await mkdtemp(join(base,'portable-state-'));
-  t.after(()=>rm(root,{recursive:true,force:true}));
+  let first;
+  let second;
+  t.after(async()=>{
+    await first?.close();
+    await second?.close();
+    await rm(root,{recursive:true,force:true});
+  });
   const source=join(root,'original');
   const copy=join(root,'a new location');
   await mkdir(source);
-  const first=createStudioService({dbPath:join(root,'profile.sqlite')});
+  first=createStudioService({dbPath:join(root,'profile.sqlite')});
   const studio=first.createStudio({root:source,name:'Port me'});
   const task=first.createTask({studioId:studio.id,title:'Keep' ,prompt:'Keep all records'});
   await first.migrateStudioStorage({studioId:studio.id,root:source});
@@ -24,8 +30,7 @@ test('moving an opted-in studio into its folder preserves original IDs and resto
   assert.equal(db.prepare('SELECT id FROM tasks WHERE id=?').get(task.id).id,task.id);
   db.close();
   await cp(source,copy,{recursive:true});
-  const second=createStudioService({dbPath:join(root,'new-profile.sqlite')});
-  t.after(()=>second.close());
+  second=createStudioService({dbPath:join(root,'new-profile.sqlite')});
   await second.openStudioStorage({root:copy,studioId:studio.id});
   assert.equal(second.snapshot().tasks.find(entry=>entry.id===task.id).studioId,studio.id);
   assert.equal(second.snapshot().studios[0].root,copy);
@@ -39,7 +44,13 @@ test('an unsent draft and a queued reply survive moving a paused studio',async t
   const base=fileURLToPath(new URL('../.tmp/',import.meta.url));
   await mkdir(base,{recursive:true});
   const root=await mkdtemp(join(base,'portable-inbox-'));
-  t.after(()=>rm(root,{recursive:true,force:true}));
+  let first;
+  let second;
+  t.after(async()=>{
+    await first?.close();
+    await second?.close();
+    await rm(root,{recursive:true,force:true});
+  });
   const source=join(root,'original');
   const copy=join(root,'copy');
   await mkdir(source);
@@ -54,7 +65,7 @@ test('an unsent draft and a queued reply survive moving a paused studio',async t
     }
     assert.fail('Expected inbox state not reached.');
   };
-  const first=createStudioService({dbPath:join(root,'profile.sqlite'),run});
+  first=createStudioService({dbPath:join(root,'profile.sqlite'),run});
   const studio=first.createStudio({root:source,name:'Portable inbox'});
   await first.migrateStudioStorage({studioId:studio.id,root:source});
   const task=first.createTask({studioId:studio.id,title:'Review',prompt:'Find evidence'});
@@ -65,8 +76,7 @@ test('an unsent draft and a queued reply survive moving a paused studio',async t
   const message=first.postDirectorInboxReply({studioId:studio.id,inboxId:item.id,version:1,operationId:'pending',text:'Which evidence?'});
   await first.close();
   await cp(source,copy,{recursive:true});
-  const second=createStudioService({dbPath:join(root,'another.sqlite'),run});
-  t.after(()=>second.close());
+  second=createStudioService({dbPath:join(root,'another.sqlite'),run});
   await second.openStudioStorage({studioId:studio.id,root:copy});
   assert.equal(second.snapshot().inboxDrafts.find(row=>row.inboxId===item.id).draft.text,'Unsent draft');
   assert.equal(second.snapshot().conversationMessages.find(row=>row.id===message.id).status,'queued');

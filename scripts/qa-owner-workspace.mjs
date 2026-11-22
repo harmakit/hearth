@@ -603,7 +603,8 @@ try {
   await choose('[name=name]','Edition');await choose('[name=brief]','Prepare a book for release.');
   await desktop.click('[data-wizard-next]');await choose('[name=root]',parent);await choose('[name=newFolderName]','Edition');
   await desktop.click('[data-wizard-next]'); await desktop.click('#dialog-actions button[type=submit]');
-  let s=await until(x=>x.studios.find(s=>s.name==='Edition'),'Create new project');
+  let s=await until(x=>x.studios.find(s=>s.name==='Edition' && (process.env.HEARTH_QA_PORTABLE!=='1' || s.portable)),
+    'Create new project and finish setting up project storage');
   assert.ok(s.projectGit.enabled);
   await desktop.click('[data-initialize]');
   const plan=await until(x=>x.plans.find(p=>p.studioId===s.id&&p.status==='pending'),'Director plan');
