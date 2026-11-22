@@ -410,6 +410,7 @@ test('planning repairs one invalid director response and accepts criteria lists'
 
 test('the next sprint sees completed artifacts and repairs reuse of an occupied path', async t => {
   let planning = 0;
+  const followup = [];
   const plan = { ...draft, tasks: [draft.tasks[0]] };
   const service = createStudioService({ dbPath: ':memory:', writeArtifact: async ({path}) => ({path}), run: async ({purpose,prompt}) => {
     if (purpose === 'plan') {
@@ -417,6 +418,10 @@ test('the next sprint sees completed artifacts and repairs reuse of an occupied 
       if (planning > 1) assert.match(prompt, /"recentCompleted"/);
       if (planning === 3) assert.match(prompt, /outline\.md/);
       return { text: JSON.stringify(planning === 3 ? {...plan, tasks:[{...plan.tasks[0],artifactPath:'outline-edited.md'}]} : plan) };
+    }
+    if (planning === 3 && ['task','review'].includes(purpose)) {
+      const context = JSON.parse(prompt.split('\n\n').at(-1));
+      followup.push([purpose, context.referenceArtifacts]);
     }
     return {text:JSON.stringify({task:{summary:'First outline saved',artifact:'# Outline'},review:{pass:true,summary:'OK'},director:{action:'finish'}}[purpose])};
   } });
@@ -430,6 +435,10 @@ test('the next sprint sees completed artifacts and repairs reuse of an occupied 
   const next = await until(service.snapshot,s=>s.plans.some(p=>p.kind==='sprint'&&p.status==='pending')||s.studios[0].lifecycle==='error');
   assert.equal(next.plans.find(p=>p.kind==='sprint')?.tasks[0].artifactPath,'outline-edited.md');
   assert.equal(planning,3);
+  service.decidePlan({planId:next.plans.find(p=>p.kind==='sprint').id,decision:'approve'});
+  await until(service.snapshot,s=>s.sprints.filter(sprint=>sprint.status==='completed').length===2);
+  const reference = [{title:'First',path:'outline.md',content:'# Outline',excerpt:false}];
+  assert.deepEqual(followup,[['task',reference],['review',reference]]);
 });
 
 test('a revised initialization survives restart and later plans can run without approval', async (t) => {

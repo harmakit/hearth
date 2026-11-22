@@ -572,6 +572,7 @@ export function createWorkflow({
         const context = taskContext(studio, task, job.runAttemptId, decisions);
         prompt = runPrompt(studio, agent, task, decisions, {
           ...context, criteria: task.criteria, artifactPath: task.artifactTarget, previousArtifactPath: task.artifactPath,
+          referenceArtifacts: referenceArtifacts(task),
           training: (usedTraining=training.context(studio, agent, task)),
           dependencies: task.dependencies.slice(0, 16).map((id) => {
             const { title, summary, artifactPath } = read('tasks', id, 'Задача');
@@ -589,6 +590,7 @@ export function createWorkflow({
         prompt = lesson ? training.reviewPrompt(studio, task) : reviewPrompt(studio, {
           ...task, artifact: task.artifact?.slice(0, artifactLimit),
           artifactWasTruncated: task.artifact?.length > artifactLimit,
+          referenceArtifacts: referenceArtifacts(task),
         }, agent, (usedTraining=training.context(studio, agent, task)));
         break;
       }
@@ -711,6 +713,23 @@ export function createWorkflow({
 
   function taskContext(studio, task, attemptId, decisions) {
     return buildTaskContext(checkpointInput(studio, task, attemptId, decisions));
+  }
+
+  function referenceArtifacts(task) {
+    const tasks = list('tasks').filter(item => item.studioId === task.studioId && item.id !== task.id &&
+      item.stage === 'done' && item.artifactPath && typeof item.artifact === 'string' && item.artifact);
+    const dependencies = (task.dependencies ?? []).flatMap(id => tasks.find(item => item.id === id) ?? []);
+    const completedSprints = new Set(list('sprints').filter(item => item.studioId === task.studioId && item.status === 'completed').map(item => item.id));
+    const previous = task.sprintId ? tasks.filter(item => item.sprintId !== task.sprintId && completedSprints.has(item.sprintId)).slice(-3).reverse() : [];
+    let remaining = 48_000;
+    const files = [];
+    for (const item of [...new Set([...dependencies, ...previous])]) {
+      if (!remaining) break;
+      const content = item.artifact.slice(0, Math.min(remaining, 24_000));
+      files.push({ title: item.title, path: item.artifactPath, content, excerpt: content.length < item.artifact.length });
+      remaining -= content.length;
+    }
+    return files.length ? files : undefined;
   }
 
   function toReview(studio, task, patch = {}, continuation = {}) {
