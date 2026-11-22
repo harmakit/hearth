@@ -17,7 +17,6 @@
       <aside class="rail" aria-label="Навигация студии">
         <div class="wordmark"><span class="brand-mark" aria-hidden="true"></span><span>Hearth <span>Studio</span></span></div>
         <nav id="workspace-navigation" aria-label="Приложение"></nav>
-        <label class="picker"><span id="locale-label">Interface language</span><select id="app-locale"></select></label>
         <div class="studio-controls">
           <label class="picker"><span>Студия</span><select id="studio-select" disabled><option>Загрузка…</option></select></label>
           <button class="rail-button" type="button" data-open="studio"><span aria-hidden="true">＋</span> Новая студия</button>
@@ -30,9 +29,9 @@
         </header>
         <div id="notice" class="notice" role="status" hidden></div>
         <div class="owner-layout"><main id="content" tabindex="-1"><p class="muted">Загружаем студии…</p></main>
+          <div id="owner-resize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="owner-inspector" aria-label="Ширина панели"></div>
           <aside id="owner-inspector" hidden aria-labelledby="owner-title">
             <div class="owner-tools"><button type="button" class="action secondary" data-owner-back></button>
-              <label><span id="owner-width-label"></span><input type="range" id="owner-width" min="32" max="66" value="48"></label>
               <button type="button" class="action secondary" data-owner-close></button></div>
             <h2 id="owner-title" tabindex="-1"></h2><div id="owner-body"></div>
             <form id="owner-comment" hidden><label class="field"><span></span><textarea name="comment" required maxlength="8000" rows="2"></textarea></label><button class="action secondary" type="submit"></button><p role="status" class="muted"></p></form>
@@ -42,11 +41,12 @@
     </div>
     <dialog id="dialog" aria-labelledby="dialog-title">
       <form id="dialog-form">
-        <header class="row dialog-heading"><h2 id="dialog-title" tabindex="-1"></h2><button type="button" class="icon-button" data-dialog-expand aria-label="Развернуть окно" aria-pressed="false" hidden>⛶</button><button type="button" class="icon-button" data-close aria-label="Закрыть">×</button></header>
+        <header class="row dialog-heading"><h2 id="dialog-title" tabindex="-1"></h2><button type="button" class="icon-button" data-close aria-label="Закрыть">×</button></header>
         <div id="dialog-body" class="form-body"></div>
         <p id="dialog-error" class="error" role="alert" hidden></p>
         <footer id="dialog-actions" class="actions"></footer>
       </form>
+      <button type="button" class="dialog-width" data-dialog-width aria-label="Ширина окна" hidden></button>
       <button type="button" class="dialog-resize" data-dialog-resize aria-label="Изменить размер окна стрелками" title="Потяните угол или используйте стрелки" hidden></button>
     </dialog>
   </body>

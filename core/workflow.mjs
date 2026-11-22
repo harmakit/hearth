@@ -500,6 +500,7 @@ export function createWorkflow({
     }
     if (purpose === 'artifact') return publishArtifact(studio, job.path, task.artifact, job.operationId);
     const lesson = task?.kind === 'train';
+    if (purpose === 'review' && task?.training?.bootstrap && !task.training.exercise) return { needsExercise: true };
     const agentId = purpose === 'task' ? task.agentId : purpose === 'review' ? task.reviewerId : purpose === 'training-exercise' ? task.training.targetAgentId : undefined;
     const agent = studio.agents.find(({ id }) => id === agentId);
     let usedTraining;
@@ -734,7 +735,6 @@ export function createWorkflow({
       }
       case 'task': {
         if (task.kind === 'train') {
-          if (task.training.bootstrap) return toReview(studio, task, result, job);
           update('tasks', { ...task, ...result, status: 'queued', activeAgentId: undefined, updatedAt: now() });
           return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
         }
@@ -789,6 +789,7 @@ export function createWorkflow({
       case 'training-exercise':
         return toReview(studio, task, { training: { ...task.training, exercise: result } }, job);
       case 'review': {
+        if (result.needsExercise) return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
         if (!result.pass) {
           const failedReviews = (task.failedReviews ?? 0) + 1;
           const updated = update('tasks', { ...task, failedReviews, revision: (task.revision ?? 0) + 1, review: result.summary });
@@ -949,16 +950,23 @@ export function createWorkflow({
       notices.push(recordHold(studioId, claim));
     });
     for (const { attempt } of held) controllers.get(attempt.id)?.controller.abort();
-    if (!restart && !stop) dispatcher.markSilent(studioId, ({ job, attempt }) => {
-      const task = currentTask(job);
-      const title = task ? `Нет активности · ${task.title}` : 'Нет активности подключения';
-      const body = 'Подключение давно не сообщало о ходе работы.';
-      const item = task ? addInbox(task, 'error', { title, body }) : addStudioInbox(studioId, 'error', { title, body, attemptId: attempt.id });
-      notices.push(item);
-    });
-    if (notices.length) changed();
+    if ((restart && archiveSilenceNotices(studioId)) || notices.length) changed();
     for (const item of notices) notifyInbox(item);
     return held;
+  }
+
+  function archiveSilenceNotices(studioId) {
+    let closed = false;
+    const isWarning = item => item.studioId === studioId && item.status === 'open' && item.kind === 'error'
+      && item.body === 'Подключение давно не сообщало о ходе работы.'
+      && (item.title === 'Нет активности подключения' || item.title.startsWith('Нет активности · '));
+    for (const table of ['inbox', 'studio_inbox']) {
+      for (const item of list(table).filter(isWarning)) {
+        update(table, { ...item, status: 'resolved', answer: 'Сведения о последнем сигнале доступны в диагностике студии.' });
+        closed = true;
+      }
+    }
+    return closed;
   }
 
   function resolveReconciliation({ attemptId, decision, reason }) {
@@ -1080,7 +1088,7 @@ export function createWorkflow({
     } finally {
       clearInterval(heartbeat);
       controllers.delete(attemptId);
-      if (!isClosed()) dispatcher.releaseProcess({ attemptId });
+      if (!isClosed() && dispatcher.releaseProcess({ attemptId })) changed();
       finished.resolve();
       if (!isClosed()) onAvailable(studioId);
     }

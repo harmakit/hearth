@@ -94,6 +94,7 @@ export function renderDiagnostic(report = {}) {
   const rows = [
     [copy('Подключение'), [report.connection?.runtime, label(report.connection?.status)].filter(Boolean).join(' · ')],
     [copy('Процесс'), label(report.process?.status ?? report.lifecycle)],
+    [copy('Последний сигнал от запуска'), date(report.process?.observedAt)],
     [copy('Расписание'), report.schedule?.waiting ? copy('Ждёт рабочего окна') : copy('Нет ожидания')],
     [copy('Следующее окно'), date(report.schedule?.nextAt ?? report.nextWindow ?? report.nextRunAt)],
     [copy('В очереди'), report.queue?.pending ?? report.queue?.queued ?? report.queued],

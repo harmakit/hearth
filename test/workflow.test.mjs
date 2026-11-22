@@ -532,6 +532,92 @@ test('snapshot import commits related records atomically without starting them',
   assert.equal(snapshot.sprints[0].taskIds[0], snapshot.tasks[0].id);
 });
 
+test('quiet planning stays in progress without an inbox error and exposes its last signal', async t => {
+  const started = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  let progress;
+  let time = new Date('2026-11-22T09:00:00Z');
+  const service = createStudioService({ dbPath: ':memory:', now: () => time,
+    run: async ({onEvent}) => {
+      progress = onEvent;
+      started.resolve();
+      await finish.promise;
+      return {text:JSON.stringify(draft)};
+    } });
+  t.after(()=>{finish.resolve();return service.close();});
+  const {id:studioId}=service.createStudio({name:'Quiet project',root:'/project'});
+  service.initializeStudio({studioId});
+  await started.promise;
+  time = new Date(time.getTime() + 65_000);
+  service.refreshSchedules();
+  assert.deepEqual(service.snapshot().inbox, []);
+  assert.equal(service.snapshot().attempts.at(-1).status,'running');
+  const before = service.diagnoseStudio({studioId}).process.observedAt;
+  time = new Date(time.getTime()+1000);
+  progress({type:'output'});
+  service.refreshSchedules();
+  assert.ok(service.diagnoseStudio({studioId}).process.observedAt > before);
+  time = new Date(time.getTime()+65_000);
+  service.refreshSchedules();
+  assert.deepEqual(service.snapshot().inbox, []);
+  finish.resolve();
+  await until(service.snapshot,s=>s.plans.some(row=>row.status==='pending'));
+});
+
+test('opening an existing profile clears old silence notices while keeping actual failures open', async t => {
+  const dbPath = database(t);
+  const run = async () => ({text:JSON.stringify(draft)});
+  const original = createStudioService({dbPath,run});
+  const {id:studioId} = original.createStudio({name:'Existing studio',root:'/project'});
+  await original.close();
+  const db = new DatabaseSync(dbPath);
+  const insert = db.prepare('INSERT INTO studio_inbox VALUES (?, ?)');
+  for (const [id,title,body] of [
+    ['silence','Нет активности подключения','Подключение давно не сообщало о ходе работы.'],
+    ['failure','Ошибка · планирование','Подключение завершилось с ошибкой.'],
+  ]) insert.run(id,JSON.stringify({id,studioId,kind:'error',title,body,status:'open'}));
+  db.close();
+  const reopened = createStudioService({dbPath,run});
+  t.after(()=>reopened.close());
+  const inbox = reopened.snapshot().inbox;
+  assert.equal(inbox.find(({id})=>id==='silence').status,'resolved');
+  assert.equal(inbox.find(({id})=>id==='failure').status,'open');
+});
+
+test('stopping the first plan publishes both the hold and release so an open dialog can recover', async t => {
+  const snapshots = [];
+  const started = Promise.withResolvers();
+  const aborted = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let calls = 0;
+  const service = createStudioService({dbPath:':memory:',onChange:snapshot=>snapshots.push(snapshot),run:async ({purpose,signal})=>{
+    assert.equal(purpose,'plan');
+    if (++calls > 1) return {text:JSON.stringify(draft)};
+    started.resolve();
+    signal.addEventListener('abort',aborted.resolve,{once:true});
+    await release.promise;
+    throw signal.reason;
+  }});
+  t.after(()=>{release.resolve();return service.close();});
+  const {id:studioId}=service.createStudio({name:'Docs',root:'/project'});
+  service.initializeStudio({studioId});
+  await started.promise;
+  service.setStudioRunning({studioId,action:'stop'});
+  await aborted.promise;
+  const item=service.snapshot().inbox.find(row=>row.kind==='reconcile');
+  assert.ok(item);
+  const decision={attemptId:item.attemptId,decision:'retry',reason:'Retry first plan'};
+  assert.throws(()=>service.resolveReconciliation(decision),/ещё выполняется/);
+  release.resolve();
+  await until(()=>snapshots.at(-1),snapshot=>snapshot.attempts.some(row=>row.id===item.attemptId&&row.processActive===false));
+  service.resolveReconciliation(decision);
+  assert.equal(service.snapshot().studios[0].lifecycle,'paused');
+  assert.equal(calls,1);
+  service.setStudioRunning({studioId,action:'resume'});
+  await until(service.snapshot,snapshot=>snapshot.plans.some(row=>row.status==='pending'));
+  assert.equal(calls,2);
+});
+
 test('studio controls pause the manual queue and stop both running and queued manual work', async (t) => {
   const actions = new Map();
   const service = createStudioService({

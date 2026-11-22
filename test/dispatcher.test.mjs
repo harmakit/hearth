@@ -155,22 +155,13 @@ test('a known rate-limit restart time is honored while uncertain writes require 
   assert.equal(claim(), undefined);
 });
 
-test('activity extends the lease and silence creates one notice per attempt', (t) => {
-  const { dispatcher, advance } = setup(t, { leaseMs: 5_000, silenceMs: 1_000 });
+test('activity extends the lease while a quiet attempt stays running until expiry', (t) => {
+  const { dispatcher, advance } = setup(t, { leaseMs: 5_000 });
   task(dispatcher, 'task-1');
   const { attempt } = dispatcher.claimAttempt({ studioId: 'studio' });
-  let notifications = 0;
-  const check = () => dispatcher.markSilent('studio', () => { notifications += 1; });
-  advance(999);
-  check();
-  assert.equal(notifications, 0);
-  advance(1);
-  check();
-  assert.equal(notifications, 1);
+  advance(1_000);
   assert.equal(dispatcher.renewAttempt({ attemptId: attempt.id }).expiresAt, '2026-11-18T11:00:06.000Z');
   advance(4_500);
-  check();
-  assert.equal(notifications, 1);
   assert.equal(dispatcher.reconcileStudio({ studioId: 'studio' }).length, 0);
 });
 

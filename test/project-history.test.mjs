@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { git, nativeGitPath, verifyGitVersion } from '../app/git-worktrees.mjs';
+import { createGitWorktrees, git, nativeGitPath, verifyGitVersion } from '../app/git-worktrees.mjs';
 import { createCommandRouter } from '../app/bridge.mjs';
 import { createStudioService } from '../core/service.mjs';
 
@@ -17,6 +17,27 @@ test('Git version floor accepts platform builds and rejects the older Ubuntu wor
 test('Git for Windows porcelain paths use the native separator when checking registrations', () => {
   assert.equal(nativeGitPath('C:/QA space/Книга/worktree', 'win32'), 'C:\\QA space\\Книга\\worktree');
   assert.equal(nativeGitPath('/work/file\\name', 'linux'), '/work/file\\name');
+});
+
+test('the existing folder wizard offers Git only for a repository root', async t => {
+  const parent = await realpath(await mkdtemp(join(tmpdir(),'hearth-project-history-')));
+  t.after(()=>rm(parent,{recursive:true,force:true}));
+  const { prepareTarget } = createGitWorktrees({storageDir:join(parent,'storage'),validateRepository:async () => true});
+  const service = createStudioService({dbPath:':memory:',run:async()=>({text:'ok'}),prepareTarget,projectPipeline:{}});
+  t.after(()=>service.close());
+  const request = createCommandRouter({service});
+  const plainFolder = join(parent,'guys inc');
+  await mkdir(plainFolder);
+  const plain = await request('createStudio',{name:'Guys',root:plainFolder,offerGit:true});
+  assert.equal(plain.gitOfferAvailable,false);
+  assert.equal(plain.lifecycle,'draft');
+  assert.deepEqual(await readdir(plainFolder),[]);
+  await assert.rejects(request('configureProject',{studioId:plain.id,enabled:true}),/папке нет Git-репозитория/);
+  const initialized = await request('createStudio',{name:'New repo',root:parent,newFolderName:'Book'});
+  const existing = await request('createStudio',{name:'Existing repo',root:initialized.root,offerGit:true});
+  assert.equal(existing.gitOfferAvailable,true);
+  assert.equal(service.snapshot().studios.find(row=>row.id===existing.id).gitOfferAvailable,undefined);
+  assert.equal(existing.projectGit,undefined);
 });
 
 test('studio setup creates local history only for an explicitly new project folder', async t => {

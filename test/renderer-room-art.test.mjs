@@ -77,7 +77,7 @@ test('actor appearance survives rerenders and differs between both agents and st
   assert.deepEqual(reloaded.pixels(), map.pixels());
 });
 
-test('work and breaks play distinct frames while the furniture and face stay anchored', () => {
+test('working agents bob slightly while the furniture and resting faces stay anchored', () => {
   const runtime = fixture();
   const { desk, document, motion, timers } = runtime;
   const active = ['terminal', 'paper', 'books', 'easel', 'plan', 'notebook'].map(kind => desk(kind, `studio:${kind}`));
@@ -100,16 +100,20 @@ test('work and breaks play distinct frames while the furniture and face stay anc
   runtime.intersection(enter([...visible, ...still]));
   assert.equal(timers.size, 1);
   const frames = visible.map(() => []);
+  const headFrames = visible.map(() => new Set());
   for (let tick = 0; tick < 170; tick++) {
     for (const callback of timers.values()) callback();
     visible.forEach((canvas, i) => {
       const pixels = canvas.pixels();
       assert.deepEqual(pixels.slice(29 * 40), before[i].slice(29 * 40));
-      assert.deepEqual(pixels.slice(7 * 40 + 20, 7 * 40 + 30), before[i].slice(7 * 40 + 20, 7 * 40 + 30));
+      const face = Array.from({length:5}, (_,row)=>pixels.slice((7+row)*40+20,(7+row)*40+30));
+      headFrames[i].add(JSON.stringify(face));
       frames[i].push(JSON.stringify(pixels));
     });
   }
   frames.forEach((sequence, index) => assert.ok(new Set(sequence).size >= 3, JSON.stringify(visible[index].dataset)));
+  assert.ok(headFrames[visible.indexOf(active[0])].size > 1, 'working head moves vertically');
+  assert.equal(headFrames[visible.indexOf(idle)].size, 1);
   assert.notDeepEqual(frames[0].map(frame => frame === frames[0][0]), frames.at(-1).map(frame => frame === frames.at(-1)[0]));
   assert.notDeepEqual(planning.pixels().slice(0, 13 * 40), review.pixels().slice(0, 13 * 40));
   assert.equal(offscreen.pixels(), offscreenBefore);

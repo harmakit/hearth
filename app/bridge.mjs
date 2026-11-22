@@ -1,5 +1,5 @@
 import { access, mkdir, realpath, stat } from "node:fs/promises";
-import { git, requireProjectGit } from "./git-worktrees.mjs";
+import { git, hasProjectGitDirectory, requireProjectGit } from "./git-worktrees.mjs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const serviceCommands = new Set([
@@ -203,6 +203,12 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
     if (command === "createStudio" || (command === "updateStudio" && Object.hasOwn(payload, "root"))) {
       payload = { ...payload, root: await validateProjectRoot(payload.root, protectedRoots) };
       if(command==='updateStudio') return service.updateStudio(payload,await directoryIdentity(payload.root));
+      const {offerGit, ...input} = payload;
+      if (offerGit === true) {
+        const gitOfferAvailable = await hasProjectGitDirectory(input.root).catch(() => false);
+        return {...service.createStudio(input), gitOfferAvailable};
+      }
+      return service.createStudio(input);
     }
     return service[command](payload);
   };

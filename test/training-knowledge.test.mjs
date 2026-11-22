@@ -123,11 +123,11 @@ test('unknown material IDs and invalid or duplicate custom skill keys are reject
   assert.throws(() => training.selection(task, { ...response, customSkills: [{ ...response.customSkills[0], key: '../outline' }] }, sources), /ключ/);
 });
 
-test('coach bootstrap rejects knowledge and skill proposals that cannot enter a trainee exercise', async () => {
+test('coach bootstrap keeps its guide and exercise separate from library publication', async () => {
   const { rows, training, studio, task } = setup();
   const bootstrap = { ...task, training: { ...task.training, bootstrap: true } };
   const sources = await training.source(studio, bootstrap, new AbortController().signal);
-  assert.throws(() => training.selection(bootstrap, { ...response, selectedMaterialIds: [] }, sources), /начальной подготовке/);
+  assert.throws(() => training.selection(bootstrap, { ...response, selectedMaterialIds: [] }, sources), /Начальная подготовка коуча/);
   assert.equal(rows.customSkills.length, 0);
   assert.equal(rows.knowledge.length, 0);
 });
@@ -183,6 +183,7 @@ test('training review retries exercise the new draft before releasing work with 
         return json({ ...response, knowledge });
       }
       if (purpose === 'training-exercise') {
+        if (context.bootstrap) return json({ summary: 'Excluded the sample skill without verifiable licensing.' });
         exercised += 1;
         assert.equal(context.knowledge, exercised === 1 ? 'Rejected notes' : 'Verified notes');
         assert.deepEqual(context.materials, [material]);

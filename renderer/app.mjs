@@ -7,6 +7,7 @@ import {createInspectorHistory, membersOfEpic} from './inspector.mjs';
 import { taskFacts } from './owner-facts.mjs';
 import { publishedPaths, renderWork, registerRows } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
+import { installInspectorResize } from './inspector-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey } from './model-policy.mjs';
 import { createModelCatalogEditor } from './model-catalog-editor.mjs';
 import { renderWorkspaceHome } from './workspace-view.mjs';
@@ -93,6 +94,7 @@ let opener;
 let taskDialog;
 let dialogMeeting;
 let dialogConversation;
+let dialogReconciliation;
 let notificationTarget;
 let openingNotification = false;
 let workBusy = false;
@@ -101,7 +103,6 @@ let registryQuery = '';
 let registryStage = '';
 let registryOwner = '';
 let registrySprint = '';
-let overviewBoundary;
 const expandedEpics = new Set();
 let advancedOpen = false;
 let catalogEditor;
@@ -172,7 +173,6 @@ function selectStudio(id) {
   registryStage = '';
   registryOwner = '';
   registrySprint = '';
-  overviewBoundary = undefined;
   expandedEpics.clear();
   advancedOpen = false;
   skillSearch = { topics: '', preview: {} };
@@ -208,6 +208,10 @@ async function refresh() {
         meetingDetail(latest);
         $('#dialog-body').scrollTop = scroll;
       }
+    } else if (dialog.open && !dialogBusy && dialogReconciliation) {
+      const item = entries().find(row => row.id === dialogReconciliation.id);
+      if (item && (item.status !== dialogReconciliation.status ||
+          reconciliationPending(item) !== dialogReconciliation.pending)) openInbox(item);
     } else if (dialog.open && dialogConversation) {
       const thread = studioRows('conversations').find(row => (row.agentId ?? null) === dialogConversation.agentId &&
         (row.taskId ?? null) === dialogConversation.taskId);
@@ -237,14 +241,13 @@ function render() {
   document.documentElement.lang = state.appLocale ?? 'en';
   for(const [selector,attribute,source] of [
     ['.rail','aria-label','Навигация студии'],['#workspace-navigation','aria-label','Приложение'],
-    ['#navigation','aria-label','Разделы'],['[data-dialog-expand]','aria-label','Развернуть окно'],
+    ['#navigation','aria-label','Разделы'],['#owner-resize','aria-label','Ширина панели'],
+    ['[data-dialog-width]','aria-label','Ширина окна'],
     ['.dialog-heading [data-close]','aria-label','Закрыть'],['[data-dialog-resize]','aria-label','Изменить размер окна стрелками'],
     ['[data-dialog-resize]','title','Потяните угол или используйте стрелки']]) {
     const node=$(selector);
-    if(node && !(node.dataset.dialogExpand!==undefined && node.getAttribute('aria-pressed')==='true'))node.setAttribute(attribute,copy(source));
+    if(node)node.setAttribute(attribute,copy(source));
   }
-  $('#locale-label').textContent = ui('language');
-  $('#app-locale').innerHTML = Object.entries(localeNames).map(([key,label])=>option(key,label,state.appLocale ?? 'en')).join('');
   $('.studio-controls .picker span').textContent = ui('studio');
   $('.studio-controls [data-open="studio"]').textContent = '＋ '+ui('newStudio');
   const focused = document.activeElement;
@@ -262,7 +265,7 @@ function render() {
   picker.innerHTML = state.studios.filter(s=>!s.archivedAt).map(item => option(String(item.id), item.name, studioId)).join('') || copy('<option>Нет студий</option>');
   $('.studio-controls').hidden = !inStudio || !current;
   const openCount = entries().filter(item => item.status === 'open').length;
-  const navigation = group => Object.keys(group).map(key => `<button type="button" data-view="${key}"${view === key ? ' aria-current="page"' : ''}>${glyph(key)}<span>${ui(key)}</span>${key === 'inbox' && openCount ? `<span class="nav-count">${openCount}</span>` : ''}</button>`).join('');
+  const navigation = group => Object.keys(group).filter(key => key !== 'skills').map(key => `<button type="button" data-view="${key}"${view === key ? ' aria-current="page"' : ''}>${glyph(key)}<span>${ui(key)}</span>${key === 'inbox' && openCount ? `<span class="nav-count">${openCount}</span>` : ''}</button>`).join('');
   $('#workspace-navigation').innerHTML = navigation(workspaceViews);
   $('#navigation').hidden = !inStudio || !current;
   if (inStudio && current) $('#navigation').innerHTML = navigation(studioViews);
@@ -359,7 +362,6 @@ async function searchSkills() {
 function route(next) {
   if (!Object.hasOwn(views, next)) return;
   if (next !== view) dismissInspector(false);
-  if (next!==view) overviewBoundary=undefined;
   view = next;
   notice();
   content.focus();
@@ -392,9 +394,8 @@ function overview() {
   const open = entries().filter(item => item.status === 'open');
   const blocking = item=>Boolean(item.blockedTaskIds?.length || item.taskId || item.kind==='plan');
   const decision = open.toSorted((a,b)=>Number(blocking(b))-Number(blocking(a)) || String(a.createdAt??'9999').localeCompare(String(b.createdAt??'9999')))[0];
-  if (overviewBoundary===undefined) overviewBoundary=stored('seen-'+current.id) || '';
-  const updates=all.filter(t=>!overviewBoundary || (t.updatedAt??t.createdAt??'')>overviewBoundary).slice(0,6);
-  if (document.visibilityState==='visible' && all[0]?.updatedAt) stored('seen-'+current.id,all[0].updatedAt);
+  const currentWork = all.filter(task => task.status !== 'cancelled' &&
+    (task.status !== 'completed' || (task.workflowManaged && task.stage !== 'done')));
   const last = all.find(task => task.status === 'completed' && (!task.stage || task.stage === 'done'));
   const rooms = buildRooms({ ...current, agents: activeRoster(current) });
   const workCount = all.filter(task => ['running', 'queued'].includes(task.status)).length;
@@ -405,10 +406,14 @@ function overview() {
   const canInitialize = current.lifecycle === 'draft';
   const running = !canInitialize && !current.projectDetached && (['active', 'planning'].includes(current.lifecycle) || (current.lifecycle === 'idle' && initial) || workCount > 0 || current.scheduleWaiting);
   const manuallyPaused = current.manualPaused || current.lifecycle === 'paused';
+  const stop = (activeAttempts > 0 || workCount > 0) && current.activity !== 'Студия остановлена' ? button(copy('Прервать работу'),
+    `data-run-action="stop" title="${safe(copy('Прервать текущие шаги и приостановить очередь.'))}"`, true) : '';
   const runButtons = manuallyPaused || current.lifecycle === 'error'
-    ? actionFor(current.lifecycle === 'error' ? copy('Повторить шаг') : copy('Возобновить'), 'run-action', 'resume', false) + actionFor(copy('Остановить'), 'run-action', 'stop')
-    : running ? actionFor(copy('Пауза'), 'run-action', 'pause') + actionFor(copy('Остановить'), 'run-action', 'stop') : '';
-  const intro = canInitialize ? copy('<p class="muted">Директор предложит команду, первый спринт и критерии результата.</p>') : '';
+    ? actionFor(current.lifecycle === 'error' ? copy('Повторить шаг') : copy('Возобновить'), 'run-action', 'resume', false) + stop
+    : running ? button(copy('Поставить на паузу'),
+      `data-run-action="pause" title="${safe(copy('Дать текущим шагам закончиться. Новые пока не запускать.'))}"`, true) + stop : '';
+  const intro = canInitialize ? copy('<p class="muted">Нажмите кнопку ниже. Директор подготовит команду и план по вашей первой задаче. Работа по плану начнётся после вашего согласования.</p>')
+    : current.lifecycle === 'planning' ? copy('<p class="muted">Когда план будет готов, он появится здесь и во входящих.</p>') : '';
   const activity = current.scheduleWaiting ? copy('Новые задачи запустятся в рабочее время студии.') :
     copySystem(current.activity) || (current.lifecycle === 'planning' ? copy('Директор готовит предложение по проекту.') : '');
   return heading(copy('Обзор студии'), current.name, button(copy('Связь с командой'), 'data-open="messages"', true) + (canInitialize ? '' : button(copy('Новая задача'), 'data-open="task"')) + runButtons) +
@@ -424,10 +429,9 @@ function overview() {
       </section>` : ''}
       ${decision ? copy`<article class="panel padded decision">
         <div class="row">${badge(decision.kind === 'acceptance' ? copy('На приёмке') : decision.kind === 'question' ? copy('Нужно решение') : copy('Требуется внимание'), 'attention')}<small>${open.length} открыто</small></div>
-        <h2>${safe(inboxLabel(decision))}</h2><p class="clamp">${safe(decision.body)}</p>
-        <div>${actionFor(copy('Открыть во входящих'), 'inbox', decision.id, false)}</div>
+        <h2>${safe(inboxHeading(decision))}</h2><p class="clamp">${safe(inboxDetail(decision))}</p>
+        <div>${actionFor(decision.kind === 'reconcile' ? copy('Посмотреть прерванный шаг') : copy('Открыть во входящих'), 'inbox', decision.id, false)}</div>
       </article>` : ''}
-      <section class="stack compact"><h2>${overviewBoundary?copy('Изменения с последнего просмотра'):copy('Последние изменения')}</h2>${updates.length ? updates.map(t=>`<div class="row">${actionFor(t.title,'task',t.id)}<small>${safe(studioDate(t.updatedAt))}</small></div>`).join('') : copy('<p class="muted">Новых изменений нет.</p>')}</section>
       <section class="stack compact"><div class="row"><h2>Последний отчёт</h2>${button(copy('Все артефакты'), 'data-work-pane="artifacts"', true)}</div>
         ${last ? `<article class="panel report">
           <div class="excerpt">${safe(last.summary || copy('Результат сохранён в задаче.'))}</div>
@@ -438,9 +442,9 @@ function overview() {
       <section class="panel padded stack compact"><div class="row"><h2>Мастерская</h2>${glyph('workshop')}</div>
         <p class="muted">Комнат: ${rooms.length} · В работе и очереди: ${workCount}</p>
         <div>${button(copy('Открыть карту'), 'data-view="workshop"', true)}</div></section>
-      <section class="stack compact"><h2>Задачи</h2>
-        ${all.length ? `<div class="panel work-list">${all.map(taskRow).join('')}</div>` :
-          empty(copy('Задач пока нет'), canInitialize ? copy('Первые задачи появятся после согласования плана.') : copy('Поставьте задачу директору или участнику студии.'))}</section>
+      <section class="stack compact"><div class="row"><h2>Текущие задачи</h2>${button(copy('Все задачи'), 'data-work-pane="registry"', true)}</div>
+        ${currentWork.length ? `<div class="panel work-list">${currentWork.slice(0,8).map(taskRow).join('')}</div>` :
+          empty(copy('Нет текущих задач'), canInitialize ? copy('Первые задачи появятся после согласования плана.') : copy('Поставьте задачу директору или участнику студии.'))}</section>
     </aside></div>`;
 }
 
@@ -473,19 +477,23 @@ function inboxCard(item) {
   const task = tasks().find(entry => entry.id === item.taskId);
   const isQuestion = item.kind === 'question';
   const isAcceptance = item.kind === 'acceptance';
+  const isReconciliation = item.kind === 'reconcile';
+  const blockedCoach = coachBlocked(item, task);
   if (item.kind === 'meeting') return `<article class="panel padded stack compact">
     <div>${badge(item.status === 'open' ? copy('Решение встречи') : copy('Решение сохранено'), item.status === 'open' ? 'warn' : 'good')}</div>
     <h2>${safe(item.title)}</h2>${plain(item.body)}<div>${actionFor(copy('Открыть встречу'), 'meeting-detail', item.meetingId, false)}</div></article>`;
   return `<article class="panel padded stack compact">
-    <div class="row">${badge(isQuestion ? copy('Вопрос') : isAcceptance ? copy('Приёмка результата') : copy('Ошибка'), isQuestion || isAcceptance ? 'warn' : 'attention')}
+    <div class="row">${badge(isQuestion ? copy('Вопрос') : isAcceptance ? copy('Приёмка результата') : isReconciliation ? copy('Работа прервана') : blockedCoach ? copy('Нужна доработка') : copy('Ошибка'), isQuestion || isAcceptance ? 'warn' : 'attention')}
       <small class="muted">${safe(task?.title)}</small></div>
-    <h2>${safe(inboxLabel(item))}</h2><div class="long-text">${safe(item.body)}</div>${isQuestion && item.version ? copy`<p class="muted">Версия ${safe(item.version)}</p>` : ''}
+    <h2>${safe(inboxHeading(item))}</h2><div class="long-text">${safe(inboxDetail(item))}</div>${isQuestion && item.version ? copy`<p class="muted">Версия ${safe(item.version)}</p>` : ''}
     ${item.answer ? copy`<div class="inline-result"><strong>Ответ</strong>${plain(item.answer)}</div>` : ''}
     <div class="actions">
       ${isQuestion ? actionFor(item.status === 'open' ? copy('Ответить') : copy('История вопроса'), 'inbox', item.id, item.status !== 'open') : ''}
       ${task ? actionFor(copy('Открыть задачу'), 'task', task.id) : ''}
       ${isAcceptance ? actionFor(copy('Открыть приёмку'), 'inbox', item.id, false) : ''}
-      ${item.status === 'open' && !isQuestion && !isAcceptance ? actionFor(copy('Просмотреть ошибку'), 'inbox', item.id) : ''}
+      ${isReconciliation ? actionFor(copy('Посмотреть прерванный шаг'), 'inbox', item.id) : ''}
+      ${item.status === 'open' && !isQuestion && !isAcceptance && !isReconciliation ? actionFor(blockedCoach ? copy('Посмотреть замечания директора') : copy('Просмотреть ошибку'), 'inbox', item.id) : ''}
+      ${blockedCoach ? coachRetryActions(task) : ''}
     </div>
   </article>`;
 }
@@ -627,13 +635,14 @@ function settings() {
           ${button(copy('Настроить список'), 'data-open="studio-model-policy"', true)}</div>
           ${policySummary(studioAllowed(current))}</div>
       </div></section>
-      <section class="stack compact"><h2>Библиотека</h2><div class="panel padded row">
-        <div><h3>Порог поиска на GitHub</h3><p class="muted">Минимум звёзд · ${skillStarLabel(current)}</p></div>
-        ${button(copy('Настроить порог'), 'data-open="skill-settings"', true)}</div></section>
       <section class="stack compact"><h2>Состояние и уведомления</h2><div class="panel padded stack compact">
         <div class="actions">${button(copy('Расход моделей'), 'data-open="usage"', true)}${button(copy('Диагностика'), 'data-open="diagnosis"', true)}${button(copy('Уведомления'), 'data-open="notifications"', true)}</div>
       </div></section>
       <details class="panel padded advanced" id="advanced"${advancedOpen ? ' open' : ''}><summary>Расширенные настройки</summary><div class="stack">
+      <section class="stack compact"><h2>Библиотека</h2><div class="panel padded stack compact">
+        ${rowAction(copy('Навыки и материалы'), copy('Материалы, которые агенты используют в работе.'), button(copy('Открыть библиотеку'), 'data-view="skills"', true))}
+        ${rowAction(copy('Порог поиска на GitHub'), copy`Минимум звёзд · ${skillStarLabel(current)}`, button(copy('Настроить порог'), 'data-open="skill-settings"', true))}
+      </div></section>
       ${renderDebtSettings(current, debtAssessments.get(current.id))}
       <section class="stack compact"><div class="row"><h2>Роли</h2><div class="actions">${button(copy('Предложить найм'), 'data-open="roster-hire"')}
         ${button(copy('Лимиты состава'), 'data-open="staffing"', true)}${button(copy('Предложения и история'), 'data-open="roster-history"', true)}</div></div>
@@ -656,6 +665,7 @@ function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusS
   dialogAttachments = undefined;
   dialogMeeting = undefined;
   dialogConversation = undefined;
+  dialogReconciliation = undefined;
   opener = dialog.open ? opener : document.activeElement;
   taskDialog = undefined;
   submission = submit;
@@ -764,12 +774,12 @@ function projectGitEditor() {
   dialogTo(copy('Git и проверки проекта'),
     checkbox(copy('Разрешить Git-доставку для задач студии'), 'enabled', git.enabled) +
     input(copy('Целевая локальная ветка'), 'targetRef', git.targetRef, copy('placeholder="Автоматически создать управляемую ветку"')) +
-    input(copy('Идентификатор профиля проверок'), 'profileId', git.profile?.id ?? 'default', 'required maxlength="64"') +
-    copy`<p class="muted">Команды запускаются в рабочей копии задачи. Например, для <code>npm test</code> укажите команду <code>npm</code> и аргумент <code>test</code>.</p>
+    copy`<p>Проверки проекта — необязательные команды, например тесты или сборка. Hearth запускает их на изменениях задачи перед слиянием. Если обязательная проверка не проходит, Hearth ждёт исправления.</p>
+      <p class="muted">Команды запускаются в рабочей копии задачи. Например, для <code>npm test</code> укажите команду <code>npm</code> и аргумент <code>test</code>.</p>
       <div class="form-body" data-project-checks>${checks.map(projectCheckFields).join('')}</div>
       <div>${button(copy('Добавить проверку'), 'data-add-project-check', true)}</div>`,
-    copy('Сохранить профиль'), ({ enabled, targetRef, profileId, ...values }) => {
-      const profile = { id: profileId, checks: [] };
+    copy('Сохранить настройки Git'), ({ enabled, targetRef, ...values }) => {
+      const profile = { id: git.profile?.id ?? 'default', checks: [] };
       if (enabled) profile.checks = [...form.querySelectorAll('[data-project-check]')].map(({ dataset: { projectCheck: key } }) => {
         const id = values[`${key}-id`];
         const command = values[`${key}-command`];
@@ -1430,7 +1440,7 @@ function studioEditor(current) {
   }
   dialogTo(copy('Параметры студии'),
     input(copy('Название'), 'name', current.name, 'required maxlength="120"') +
-    pathField(current.projectDetached ? '' : current.root) + textarea(copy('Что должно получиться?'), 'brief', current.brief) +
+    pathField(current.projectDetached ? '' : current.root) + textarea(copy('Чем будет заниматься студия?'), 'brief', current.brief) +
     reportLanguageField(current) +
     languageField(copy('Язык материалов проекта'), 'projectLanguage', current.projectLanguage || '', true),
     copy('Сохранить студию'), async values => {
@@ -1457,14 +1467,14 @@ function newStudio() {
     copy('<ol class="wizard-progress" aria-label="Шаги настройки">') +
     wizardNames.map((name, index) => `<li${index === 0 ? ' aria-current="step"' : ''}>${name}</li>`).join('') + '</ol>' +
     step(0, input(copy('Название студии'), 'name', '', 'required maxlength="120"') +
-      textarea(copy('Что должно получиться?'), 'brief', '', copy('required placeholder="Опишите работу своими словами"')) +
-      input(copy('Какой первый результат хотите увидеть?'), 'firstResult', '', copy('placeholder="Например, черновик, прототип или первая подборка"'))) +
+      textarea(copy('Чем будет заниматься студия?'), 'brief', '', copy('required placeholder="Опишите работу своими словами"')) +
+      textarea(copy('Какую первую задачу ставим студии?'), 'firstResult', '', copy('placeholder="Например, придумать пять персонажей и написать их биографии"'))) +
     step(1, select(copy('Где хранить проект?'), 'folderMode', option('new',copy('Создать новую папку с историей Git')) + option('existing',copy('Использовать существующую папку'))) +
       pathField('', {label:copy('Родительская папка')}) +
       copy`<div data-new-folder>${input(copy('Имя новой папки'), 'newFolderName', '', copy('maxlength="120" placeholder="Например, Рассказы"'))}
       <p class="muted">Hearth создаст пустой проект с локальной историей и отдельной веткой доставки. Аккаунт GitHub не требуется.</p></div>
       <div data-existing-folder hidden>${checkbox(copy('После создания студии предложить подключить Git'), 'offerGit', true)}
-      <p class="muted">Подключение подтверждается отдельно. Существующие файлы и коммиты сохраняются.</p></div>` +
+      <p class="muted">Подключение предложим, если в папке уже есть репозиторий. Существующие файлы и коммиты сохранятся.</p></div>` +
       reportLanguageField() +
       languageField(copy('Язык материалов проекта'), 'projectLanguage', '', true)) +
     step(2, select(copy('Подключение директора'), 'runtime',
@@ -1473,15 +1483,17 @@ function newStudio() {
       copy('<p class="muted">Для запуска нужно рабочее подключение. Черновик можно сохранить в любом случае.</p>')),
     copy('Создать студию'), async ({ brief, firstResult, runtime, folderMode, newFolderName, offerGit, ...values }) => {
       if (!values.root) throw new Error(copy('Выберите рабочую папку.'));
-      const completeBrief = [brief, firstResult && copy`Первый результат — ${firstResult}`].filter(Boolean).join('\n\n');
-      const created = await bridge.request('createStudio', { ...values, sprintReview:'summary', ...(folderMode === 'new' ? {newFolderName} : {}), brief: completeBrief, director: { runtime } });
+      const completeBrief = [brief, firstResult && copy`Первая задача — ${firstResult}`].filter(Boolean).join('\n\n');
+      const created = await bridge.request('createStudio', { ...values, sprintReview:'summary',
+        ...(folderMode === 'new' ? {newFolderName} : {offerGit: Boolean(offerGit)}), brief: completeBrief, director: { runtime } });
       selectStudio(created.id);
       view = 'overview';
-      if (folderMode === 'existing' && offerGit) {
+      if (created.gitOfferAvailable) {
         await refresh();
         projectGitEditor();
         return false;
       }
+      notice(copy('Студия создана. Подготовьте план первого спринта в обзоре.'));
     });
   $('#dialog-actions').insertAdjacentHTML('afterbegin', button(copy('Назад'), 'data-wizard-back hidden', true));
   $('#dialog-actions').insertAdjacentHTML('beforeend', button(copy('Далее'), 'data-wizard-next'));
@@ -1655,7 +1667,6 @@ function paintInspector(focus) {
     ownerPanel.querySelector('[data-owner-back]').hidden = ownerTrail.depth < 2;
     ownerPanel.querySelector('[data-owner-back]').textContent = ui('back');
     ownerPanel.querySelector('[data-owner-close]').textContent = ui('close');
-    $('#owner-width-label').textContent = ui('width');
     $('#owner-title').textContent = title;
     const commentBox=$('#owner-comment');
     commentBox.hidden=record.kind!=='task';
@@ -1854,18 +1865,20 @@ function openInbox(item) {
     return;
   }
   if (item.kind === 'reconcile' && item.attemptId) {
-    const attempt = studioRows('attempts').find(row => row.id === item.attemptId);
-    dialogTo(item.title, plain(item.body) + (item.status === 'open'
-      ? select(copy('Результат сверки'), 'decision', option('retry', copy('Повторить шаг')) + option('complete', copy('Подтвердить выполненный шаг')) + option('discard', copy('Отказаться от шага'))) +
-        textarea(copy('Что подтверждает решение'), 'reason', '', 'required')
-      : item.answer ? plain(item.answer) : ''), item.status === 'open' && !attempt?.processActive ? copy('Сохранить сверку') : undefined,
-      item.status === 'open' && !attempt?.processActive ? values => bridge.request('resolveReconciliation', { attemptId: item.attemptId, ...values }) : undefined,
-      { adjustable: true });
+    openReconciliation(item);
     return;
   }
   if (item.kind === 'plan') {
     const plan = planById(String(item.planId));
     if (plan) openPlan(plan);
+    return;
+  }
+  const task = tasks().find(row => row.id === item.taskId);
+  if (coachBlocked(item, task)) {
+    dialogTo(inboxHeading(item), plain(inboxDetail(item)) +
+      copy`<details class="advanced"><summary>Замечания директора</summary>${plain(item.body)}</details>` +
+      `<div class="actions">${coachRetryActions(task)}${actionFor(copy('Открыть задачу'), 'task', task.id)}</div>`,
+      undefined, undefined, { adjustable: true, focusSummary: true });
     return;
   }
   const question = item.kind === 'question';
@@ -1897,6 +1910,43 @@ function openInbox(item) {
       if(question && item.taskId) return showDecisionOutcome(item.taskId);
     } : undefined, { adjustable: question || (item.body?.length ?? 0) > 240 });
   if (open && question) dialogAttachments = selectedAttachments;
+}
+
+const reconciliationAttempt = item => studioRows('attempts').find(row => row.id === item.attemptId);
+const reconciliationPending = item => Boolean(reconciliationAttempt(item)?.processActive);
+const isPlanReconciliation = item => item.kind === 'reconcile' && reconciliationAttempt(item)?.purpose === 'plan';
+const coachBlocked = (item, task = tasks().find(row => row.id === item.taskId)) =>
+  item.status === 'open' && item.kind === 'error' && task?.training?.bootstrap && task.status === 'failed' && task.failedReviews >= 3;
+const coachRetryActions = task => studio().manualPaused
+  ? actionFor(copy('Возобновить'), 'run-action', 'resume', false)
+  : actionFor(copy('Повторить подготовку коуча'), 'retry-from-inbox', task.id, false);
+const inboxHeading = item => isPlanReconciliation(item) ? copy('Подготовка плана прервана')
+  : coachBlocked(item) ? copy('Подготовка коуча не прошла проверку') : inboxLabel(item);
+const inboxDetail = item => isPlanReconciliation(item)
+  ? copy('Директор не успел подготовить план. Вы можете запустить подготовку заново.')
+  : coachBlocked(item) ? copy('Директор трижды вернул подготовку на доработку. Остальные агенты ждут готового коуча. Повторите подготовку, чтобы Hearth заново провёл упражнение и проверку.')
+  : item.kind === 'reconcile' ? copy('Рабочий шаг прервался. Перед повтором проверьте файлы, если шаг мог их изменить.') : item.body;
+
+function openReconciliation(item) {
+  const attempt = reconciliationAttempt(item);
+  const pending = reconciliationPending(item);
+  const plan = isPlanReconciliation(item);
+  const open = item.status === 'open';
+  const canResolve = open && !pending && Boolean(attempt);
+  const canComplete = ['artifact', 'publish'].includes(attempt?.purpose);
+  const fields = !canResolve || plan ? '' :
+    select(copy('Что сделать с прерванным шагом?'), 'decision', option('retry', copy('Повторить шаг')) +
+      (canComplete ? option('complete', copy('Подтвердить выполненный шаг')) : '') + option('discard', copy('Отказаться от шага'))) +
+    textarea(copy('Что вы проверили?'), 'reason', '', 'required');
+  const detail = pending ? copy('<p role="status">Hearth завершает прежний запуск. Действия появятся здесь, когда он остановится.</p>') :
+    !attempt && open ? plain(copy('Запись прерванного запуска недоступна. Подробности можно проверить в диагностике студии.')) :
+      canResolve && studio().manualPaused ? plain(copy('Повтор добавит шаг в очередь. Чтобы запустить его, нажмите «Возобновить» в обзоре.')) : '';
+  dialogTo(inboxHeading(item), plain(inboxDetail(item)) + detail + fields + (item.answer ? plain(item.answer) : ''),
+    plan ? copy('Повторить подготовку плана') : copy('Сохранить решение'),
+    canResolve ? values => bridge.request('resolveReconciliation', { attemptId: item.attemptId,
+      ...(plan ? { decision: 'retry', reason: copy('Подготовка плана поставлена в очередь повторно.') } : values),
+    }) : undefined, { focusSummary: true });
+  dialogReconciliation = { id: item.id, status: item.status, pending };
 }
 
 function openAcceptance(item, revise = false) {
@@ -2615,7 +2665,8 @@ document.addEventListener('click', event => {
     if (dialog.open) dialog.close();
     inspectObject(key.slice(5).toLowerCase(),data[key]);
   } else if (data.retryFromInbox!==undefined) {
-    void bridge.request('startTask',{taskId:data.retryFromInbox}).then(()=>showDecisionOutcome(data.retryFromInbox)).catch(e=>dialogError(e.message));
+    void bridge.request('startTask',{taskId:data.retryFromInbox}).then(()=>showDecisionOutcome(data.retryFromInbox))
+      .catch(e=>dialog.open ? dialogError(e.message) : notice(e.message,true));
   } else if (data.errorSettings!==undefined) {
     dialog.close();route('app-settings');
   } else if (data.close !== undefined) dialog.close();
@@ -2817,7 +2868,6 @@ document.addEventListener('keydown', event=>{
     if (search) { event.preventDefault(); search.focus(); search.select(); }
   }
 });
-const widthControl = $('#owner-width');
 $('#owner-comment').addEventListener('input',({currentTarget:box})=>{
   commentDrafts.set(box.dataset.key,{text:box.elements.comment.value,operation:operationId()});
 });
@@ -2839,14 +2889,10 @@ $('#owner-comment').addEventListener('submit',async event=>{
   } catch(error) { if(box.dataset.key===key)box.querySelector('[role=status]').textContent=error.message; }
   finally {submit.disabled=false;}
 });
-widthControl.value = stored('owner-width') || '48';
-function applyInspectorWidth() {
-  $('.owner-layout').style.setProperty('--owner-width', widthControl.value+'%');
-}
-widthControl.addEventListener('input', ()=>{applyInspectorWidth(); stored('owner-width',widthControl.value);});
-applyInspectorWidth();
+installInspectorResize($('.owner-layout'), $('#owner-resize'), () => stored('owner-width'), value => stored('owner-width',value));
 dialog.addEventListener('close', () => {
   taskDialog = undefined;
+  dialogReconciliation = undefined;
   catalogEditor = undefined;
   if (opener?.isConnected) opener.focus();
   else content.focus();
@@ -2864,7 +2910,6 @@ async function changeAppLocale(target) {
   } finally { target.disabled = false; }
 }
 
-$('#app-locale').addEventListener('change', ({target})=>void changeAppLocale(target));
 content.addEventListener('change', ({target})=>{
   if (target.matches('[data-settings-locale]')) void changeAppLocale(target);
 });

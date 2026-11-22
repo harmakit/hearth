@@ -879,7 +879,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     }
     if (task.workflowManaged) {
       const studio = read('studios', task.studioId, 'Студия');
-      if (studio.wipLimit > 1 && task.status === 'failed') return workflow.retryTask(studio, task);
+      if (task.status === 'failed' && (studio.wipLimit > 1 || task.training?.bootstrap)) return workflow.retryTask(studio, task);
       if (task.kind === 'train' && task.status === 'queued' && !task.sprintId && !studio.workflowJob
         && !studio.manualPaused && !active.has(studio.id) && ['draft', 'idle', 'active'].includes(studio.lifecycle)) {
         return workflow.startStandaloneTraining(studio, task);
@@ -1065,10 +1065,12 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     const studio = read('studios', studioId, 'Студия');
     const attempts = list('attempts').filter(row => row.studioId === studioId);
     const recent = attempts.at(-1);
+    const running = attempts.findLast(row => row.status === 'running') ?? recent;
     const live = activeCount(studioId);
     return diagnoseStudioState({
       studio, connection: { runtime: studio.director.runtime, status: recent?.status === 'completed' ? 'available' : 'unknown' },
-      process: { status: live ? 'running' : recent?.status === 'interrupted' ? 'interrupted' : 'idle', attemptId: recent?.id, startedAt: recent?.startedAt },
+      process: { status: live ? 'running' : recent?.status === 'interrupted' ? 'interrupted' : 'idle',
+        attemptId: running?.id, startedAt: running?.startedAt, observedAt: running?.observedAt },
       schedule: { waiting: waitingForSchedule(studio, clock()), nextAt: nextScheduleWindow(studio.schedule, clock()) },
       queue: { pending: (pending.get(studioId)?.size ?? 0) + dispatcher.jobs(studioId).filter(row => row.status === 'queued').length,
         active: live },

@@ -84,7 +84,7 @@ async function launch() {
       if (exceptionDetails) throw new Error(exceptionDetails.exception?.description || exceptionDetails.text);
       return result.value;
     };
-    await eventually(() => evaluate(() => Boolean(window.hearth && document.querySelector('main .page-heading') && document.querySelector('#app-locale option[value=ru]'))), 'Renderer did not load');
+    await eventually(() => evaluate(() => Boolean(window.hearth && document.querySelector('main .page-heading') && document.querySelector('[data-view="app-settings"]'))), 'Renderer did not load');
     const click = async selector => {
       await eventually(() => evaluate(s => { const e = document.querySelector(s); return e && !e.disabled && e.getClientRects().length; }, selector), 'Missing button ' + selector);
       await evaluate(s => document.querySelector(s).click(), selector);
@@ -122,11 +122,77 @@ const snap=()=>desktop.request('snapshot');
 const shot=name=>desktop.screenshot(name);
 const choose=async(sel,value)=>{await desktop.set(sel,value);};
 const until=async (fn,label,ms=60000)=>eventually(async()=>fn(await snap()),label,ms);
+async function dragHorizontal(handle, pane, distance) {
+  const geometry=await desktop.evaluate((h,p)=>{
+    const divider=document.querySelector(h).getBoundingClientRect();
+    return {x:divider.x+divider.width/2,y:divider.y+divider.height/2,width:document.querySelector(p).getBoundingClientRect().width};
+  }, handle,pane);
+  const {x,y,width}=geometry;
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',buttons:1,clickCount:1});
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseMoved',x:x+distance/2,y,button:'left',buttons:1});
+  await delay(125);
+  const middle=await desktop.evaluate(p=>document.querySelector(p).getBoundingClientRect().width,pane);
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseMoved',x:x+distance,y,button:'left',buttons:1});
+  await delay(125);
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseReleased',x:x+distance,y,button:'left',clickCount:1});
+  const final=await desktop.evaluate(p=>document.querySelector(p).getBoundingClientRect().width,pane);
+  assert.ok(width < middle && middle < final,`${handle} moved through intermediate widths ${width}, ${middle}, ${final}`);
+  return final;
+}
+const appLocale=async locale=>{
+  await desktop.click('[data-view="app-settings"]');
+  await choose('[data-settings-locale]',locale);
+  await eventually(()=>desktop.evaluate(l=>document.documentElement.lang===l,locale),'Interface language '+locale);
+};
 try {
   if(process.env.HEARTH_QA_LOCALE){
-    const locale=process.env.HEARTH_QA_LOCALE;
-    await choose('#app-locale',locale);
-    await eventually(()=>desktop.evaluate(l=>document.documentElement.lang===l,locale),'Initial language '+locale);
+    await appLocale(process.env.HEARTH_QA_LOCALE);
+    await desktop.click('[data-view="workspace"]');
+  }
+  if(process.env.HEARTH_QA_ONBOARDING_FIX==='1'){
+    await appLocale('ru');
+    assert.equal(await desktop.evaluate(()=>document.querySelectorAll('[data-settings-locale], #app-locale').length),1);
+    await desktop.click('[data-view="workspace"]');
+    const plain=join(parent,'guys inc');
+    await mkdir(plain);
+    await desktop.click('main [data-open=studio]');
+    assert.ok(await desktop.evaluate(()=>document.querySelector('[name=firstResult]').tagName==='TEXTAREA'));
+    await choose('[name=name]','Onboarding QA');
+    await choose('[name=brief]','Книжная студия QA-STOP-PLAN');
+    await choose('[name=firstResult]','Придумать пять персонажей');
+    await desktop.click('[data-wizard-next]');
+    await choose('[name=folderMode]','existing');
+    await choose('[name=root]',plain);
+    await desktop.click('[data-wizard-next]');
+    await desktop.click('#dialog-actions button[type=submit]');
+    const created=await until(s=>s.studios.find(row=>row.name==='Onboarding QA'),'Create a studio without Git');
+    assert.equal(created.projectGit,undefined);
+    assert.match(created.brief,/Первая задача — Придумать пять персонажей/);
+    await eventually(()=>desktop.evaluate(()=>!document.querySelector('#dialog').open),'Optional Git does not interrupt creation');
+    await desktop.click('[data-view="settings"]');
+    await desktop.click('[data-open="project-git"]');
+    assert.equal(await desktop.evaluate(()=>Boolean(document.querySelector('[name=profileId]'))),false);
+    await choose('[name=enabled]',true);
+    await desktop.click('#dialog-actions button[type=submit]');
+    await eventually(()=>desktop.evaluate(()=>document.querySelector('#dialog-error').textContent.includes('нет Git-репозитория')),'Explain that the selected folder has no repository');
+    await desktop.click('#dialog-actions [data-close]');
+    assert.equal(await desktop.evaluate(()=>document.querySelector('#navigation [data-view=skills]')?.textContent ?? null),null);
+    await desktop.click('#advanced summary');
+    assert.ok(await desktop.evaluate(()=>document.querySelector('#advanced [data-open=skill-settings]').getClientRects().length));
+    await desktop.click('#advanced [data-view=skills]');
+    await desktop.click('[data-view="overview"]');
+    await desktop.click('[data-initialize]');
+    await desktop.click('[data-run-action="stop"]');
+    const hold=await until(s=>s.inbox.find(i=>i.studioId===created.id && i.kind==='reconcile'),'Planning hold');
+    await desktop.click('[data-inbox="'+hold.id+'"]');
+    await eventually(()=>desktop.evaluate(()=>document.querySelector('#dialog-title').textContent==='Подготовка плана прервана'),'Interrupted plan is identified');
+    await desktop.click('#dialog-actions button[type=submit]');
+    await until(s=>s.inbox.find(i=>i.id===hold.id && i.status==='resolved'),'Retry placed in queue');
+    await desktop.click('[data-run-action="resume"]');
+    await until(s=>s.plans.find(p=>p.studioId===created.id && p.status==='pending'),'Retried plan ready for approval');
+    await desktop.request('deleteStudio',{studioId:created.id,confirmation:created.name});
+    await desktop.click('[data-view="workspace"]');
+    console.log('PASS existing non-Git folder, settings, interrupted first plan and resume');
   }
   await desktop.click('main [data-open=studio]');
   await choose('[name=name]','Edition');await choose('[name=brief]','Prepare a book for release.');
@@ -149,6 +215,7 @@ try {
   const ref=()=>execFileSync('git',['-C',s.root,'rev-parse',target],{encoding:'utf8'}).trim();
   assert.equal(ref(),base);
   await desktop.click('[data-view=inbox]');await desktop.click('[data-inbox="'+item.id+'"]');
+  if(process.env.HEARTH_QA_RESIZE==='1') await dragHorizontal('[data-dialog-width]','#dialog',50);
   await shot('01-package-acceptance');
   await desktop.click('#dialog-actions button[type=submit]');
   await until(x=>x.sprints.some(sp=>sp.studioId===s.id&&sp.status==='completed'),'Sprint completion');
@@ -185,6 +252,13 @@ try {
   await desktop.click('[data-view=work]');
   const original=await until(x=>x.tasks.find(t=>t.studioId===s.id&&t.gitDelivery?.status==='merged'&&!t.packageMembers),'Find work');
   await desktop.click('[data-registry-rows] [data-task="'+original.id+'"]');
+  if(process.env.HEARTH_QA_RESIZE==='1'){
+    const width=await dragHorizontal('#owner-resize','#owner-inspector',-75);
+    await desktop.click('[data-owner-close]');
+    await desktop.click('[data-registry-rows] [data-task="'+original.id+'"]');
+    await eventually(()=>desktop.evaluate(expected=>Math.abs(document.querySelector('#owner-inspector').getBoundingClientRect().width-expected)<1,width),'Saved inspector width');
+    console.log('PASS native drag of dialog edge and inspector divider, intermediate widths and restore');
+  }
   await desktop.click('#owner-body [data-epic-link]');await desktop.click('[data-owner-back]');
   assert.equal(await desktop.evaluate(()=>document.querySelector('#owner-title').textContent),original.title);
   await choose('#owner-comment textarea','Owner QA note');await desktop.click('#owner-comment button');
@@ -198,11 +272,18 @@ try {
   await desktop.rpc('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   await desktop.rpc('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   await eventually(()=>desktop.evaluate(id=>document.activeElement.dataset.task===id,original.id),'Focus back to selected row');
+  const returnToWork=async()=>{
+    await desktop.click('[data-view="workspace"]');
+    await desktop.click('[data-enter-studio="'+s.id+'"]');
+    await desktop.click('[data-view="work"]');
+  };
   for(const [lang,title] of [['ru','Реестр задач'],['es','Registro de tareas'],['fr','Registre des tâches'],['zh-Hans','任务列表'],['en','Task register']]){
-    await choose('#app-locale',lang);
+    await appLocale(lang);
+    await returnToWork();
     await eventually(()=>desktop.evaluate(s=>document.querySelector('[data-work-tab=registry]')?.textContent===s,title),'Registry language '+lang);
   }
-  await choose('#app-locale','ru');
+  await appLocale('ru');
+  await returnToWork();
   await desktop.rpc('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'},{name:'prefers-color-scheme',value:'light'}]});
   await shot('04-light-register');
   if(process.env.HEARTH_QA_ZOOM==='1'){

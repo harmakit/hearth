@@ -135,6 +135,7 @@ export function diagnoseStudioState({ studio, connection, process, schedule, que
       pid: count(process?.pid),
       attemptId: identifier(process?.attemptId),
       startedAt: timestamp(process?.startedAt),
+      observedAt: timestamp(process?.observedAt),
     },
     schedule: {
       waiting: schedule?.waiting === true,

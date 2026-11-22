@@ -5,11 +5,6 @@
   overflow: hidden;
 }
 
-#dialog[data-adjustable][data-expanded] {
-  width: calc(100vw - 28px);
-  height: calc(100dvh - 28px);
-}
-
 #dialog[data-adjustable] form {
   display: flex;
   flex-direction: column;
@@ -66,6 +61,17 @@
 .dialog-resize::after { width: 6px; height: 6px; }
 .dialog-resize:hover { color: var(--accent); }
 .dialog-resize:focus-visible { outline-offset: 0; }
+.dialog-width {
+  position: absolute;
+  inset: 0 0 25px auto;
+  width: 12px;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+.dialog-width:is(:hover,:active,:focus-visible) { box-shadow: inset -2px 0 var(--accent); }
+.dialog-width:focus-visible { outline-offset: -2px; }
 .schedule-days { display: flex; flex-wrap: wrap; gap: 7px 14px; }
 .schedule-times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 [data-open="delete-studio"] { color: var(--accent); }

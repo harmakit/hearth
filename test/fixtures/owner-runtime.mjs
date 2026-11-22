@@ -11,7 +11,9 @@ function response(prompt) {
     title:'План QA', goal:'Проверить Git-доставку',
     epic:{ title:'Git-доставка',description:'Только фикстура.' }, story:{title:'Результат QA',acceptance:'Файл проверен.'},
     agents:[{key:'maker',role:'engineer',description:'Правит файлы'},{key:'reader',role:'other',description:'Проверяет изменения'}],
-    tasks:[{key:'git-file',title:'Git доставка QA',prompt:'QA-GIT-EDIT',criteria:'Файл проверен',agentKey:'maker',reviewerKey:'reader',deliveryMode:'git',requiresAcceptance:true}],
+    tasks:[prompt.includes('QA-STOP-PLAN')
+      ? {key:'first-text',title:'Первая глава',prompt:'Подготовить текст',criteria:'Черновик готов',agentKey:'maker',reviewerKey:'reader'}
+      : {key:'git-file',title:'Git доставка QA',prompt:'QA-GIT-EDIT',criteria:'Файл проверен',agentKey:'maker',reviewerKey:'reader',deliveryMode:'git',requiresAcceptance:true}],
     files:[],
   };
   if (prompt.startsWith('Prepare a studio agent')) return { summary:'Учебный план.', selectedSkillIds:[], guide:'Проверьте документ.' };
@@ -44,6 +46,7 @@ else if (args[0] === 'sandbox') {
   else process.exitCode = spawnSync('/usr/bin/sandbox-exec', [...fixtureSandbox(dir), '/usr/bin/true']).status ?? 1;
 }
 else if (args[0] === 'app-server') {
+  let pendingPlan;
   createInterface({ input:process.stdin, crlfDelay:Infinity }).on('line',line => {
     const {id,method,params={}} = JSON.parse(line);
     const reply = result => send({ id,result });
@@ -56,10 +59,21 @@ else if (args[0] === 'app-server') {
     });
     if (method === 'turn/start') {
       const turnId = 'fixture-turn';
-      const text = JSON.stringify(response(params.input[0].text));
+      const prompt = params.input[0].text;
       reply({ turn:{ id:turnId } });
-      send({ method:'item/completed',params:{ threadId,turnId,item:{ type:'agentMessage',phase:'final_answer',text } } });
-      send({ method:'turn/completed',params:{ turn:{ id:turnId,status:'completed' },threadId } });
+      const finish = () => {
+        const text = JSON.stringify(response(prompt));
+        send({ method:'item/completed',params:{ threadId,turnId,item:{ type:'agentMessage',phase:'final_answer',text } } });
+        send({ method:'turn/completed',params:{ threadId,turn:{ id:turnId,status:'completed' } } });
+      };
+      if (prompt.includes('QA-STOP-PLAN')) pendingPlan = setTimeout(finish,2500);
+      else finish();
+    }
+    if (method === 'turn/interrupt') {
+      clearTimeout(pendingPlan);
+      reply({});
+      setTimeout(() => send({ method:'turn/completed',params:{ threadId,
+        turn:{ id:params.turnId,status:'interrupted' } } }),700);
     }
   });
 } else {

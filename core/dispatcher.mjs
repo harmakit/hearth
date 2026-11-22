@@ -43,7 +43,7 @@ function jobKey({ studioId, taskId, purpose, planId, fileIndex, kind, operationI
   return JSON.stringify([studioId, taskId, purpose, planId, fileIndex, kind, operationId, targetId]);
 }
 
-export function createDispatcher({ list, insert, update, transaction, now = () => new Date(), leaseMs = 5 * 60_000, silenceMs = 60_000, maxFailures = 3, backoffMs = 1_000 }) {
+export function createDispatcher({ list, insert, update, transaction, now = () => new Date(), leaseMs = 5 * 60_000, maxFailures = 3, backoffMs = 1_000 }) {
   const jobTable = 'dispatch_jobs';
   const attemptTable = 'attempts';
   const jobs = (studioId) => list(jobTable).filter((job) => studioId === undefined || job.studioId === studioId);
@@ -225,22 +225,6 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
     });
   }
 
-  function markSilent(studioId, onSilent) {
-    return transaction(() => {
-      const timestamp = now();
-      const results = [];
-      for (const attempt of attempts(studioId)) {
-        if (attempt.status !== 'running' || attempt.silenceNotifiedAt || date(attempt.expiresAt) <= timestamp
-          || timestamp.getTime() - date(attempt.observedAt).getTime() < silenceMs) continue;
-        const noted = update(attemptTable, { ...attempt, silenceNotifiedAt: timestamp.toISOString() });
-        const result = { attempt: noted, job: findJob(attempt.jobId) };
-        onSilent?.(result);
-        results.push(result);
-      }
-      return results;
-    });
-  }
-
   function delayUntil(studioId) {
     const timestamp = now();
     return jobs(studioId).filter((job) => job.status === 'queued' && job.availableAt && date(job.availableAt) > timestamp)
@@ -249,6 +233,6 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
 
   return {
     enqueue, jobs, findJob, releaseWaiting, activeAttempts, claimAttempt, renewAttempt, finishAttempt, failAttempt,
-    reconcileStudio, releaseProcess, resolveReconciliation, markSilent, delayUntil,
+    reconcileStudio, releaseProcess, resolveReconciliation, delayUntil,
   };
 }

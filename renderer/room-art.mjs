@@ -227,7 +227,7 @@ const handPositions = {
   writing: [[18, 25], [14, 24], [16, 25], [17, 26]],
 };
 
-function paintDesk(canvas, actor, action, frame = 0) {
+function paintDesk(canvas, actor, action, frame, lift) {
   const kind = canvas.dataset.desk;
   const accent = deskPalette[kind] ?? deskPalette.notebook;
   const [coat, trim] = actor.clothing;
@@ -236,7 +236,7 @@ function paintDesk(canvas, actor, action, frame = 0) {
   paint(canvas, rect => {
     rect(7, 31, 3, 6, '#4e352a');
     rect(29, 31, 3, 6, '#4e352a');
-    portrait(rect, actor);
+    portrait((x, y, w, h, color) => rect(x, y - lift, w, h, color), actor);
     rect(4, 24, 31, 8, '#302522');
     rect(4, 24, 30, 5, '#a3714d');
     rect(4, 29, 30, 2, '#c58d5f');
@@ -360,7 +360,8 @@ function animateDesks(root, desks) {
         for (const desk of desks) {
           const { canvas, actor, action } = desk;
           if (inViewport.has(canvas) && visible(canvas)) {
-            drawFrame(desk, actorFrame(actor, canvas.dataset.desk, action, elapsed));
+            const lift = action !== 'break' && (elapsed + actor.seed % 1600) % 1600 < 700 ? 1 : 0;
+            drawFrame(desk, actorFrame(actor, canvas.dataset.desk, action, elapsed), lift);
           }
         }
       }, 100);
@@ -385,10 +386,11 @@ function animateDesks(root, desks) {
   for (const { canvas } of desks) intersection.observe(canvas);
 }
 
-function drawFrame(desk, frame) {
-  if (desk.frame === frame || !desk.canvas.isConnected) return;
-  paintDesk(desk.canvas, desk.actor, desk.action, frame);
+function drawFrame(desk, frame, lift = 0) {
+  if ((desk.frame === frame && desk.lift === lift) || !desk.canvas.isConnected) return;
+  paintDesk(desk.canvas, desk.actor, desk.action, frame, lift);
   desk.frame = frame;
+  desk.lift = lift;
 }
 
 export function paintRooms(root) {

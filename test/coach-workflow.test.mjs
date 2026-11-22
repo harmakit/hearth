@@ -30,6 +30,27 @@ async function until(read, predicate) {
   assert.fail(`Не дождались ожидаемого состояния: ${JSON.stringify(read())}`);
 }
 
+test('a blocked coach can retry from its existing task even when only one launch is allowed', async t => {
+  let reviews = 0;
+  const service = createStudioService({dbPath:':memory:',run:async ({purpose,prompt})=>{
+    if(purpose==='task') return json({summary:'Prepared',selectedSkillIds:[],guide:'Check the source.'});
+    if(purpose==='training-exercise') return json({summary:'Missing license means the sample needs more evidence.'});
+    assert.match(prompt,/Missing license means the sample needs more evidence/);
+    return json({pass:++reviews>3,summary:'Sample assessment'});
+  }});
+  t.after(()=>service.close());
+  const studio=service.createStudio({root:'/project',name:'Retry bootstrap',wipLimit:1});
+  const taskId=studio.agents[0].trainingTaskId;
+  service.startTask({taskId});
+  const failed=await until(service.snapshot,s=>s.tasks.some(row=>row.id===taskId&&row.status==='failed'));
+  assert.equal(failed.inbox.find(row=>row.taskId===taskId).status,'open');
+  service.startTask({taskId});
+  const recovered=await until(service.snapshot,s=>s.tasks.some(row=>row.id===taskId&&row.stage==='done'));
+  assert.equal(recovered.studios[0].agents[0].trainingStatus,'ready');
+  assert.equal(recovered.inbox.find(row=>row.taskId===taskId).status,'resolved');
+  assert.equal(reviews,4);
+});
+
 test('a manual hire is gated by coach bootstrap, trainee exercise, and Director review', async (t) => {
   const calls = [];
   let review;
@@ -73,6 +94,10 @@ test('a manual hire is gated by coach bootstrap, trainee exercise, and Director 
   review.resolve();
   const snapshot = await until(() => service.snapshot(), ({ tasks }) => tasks.find(({ id }) => id === work.id).stage === 'done');
   assert.equal(snapshot.training.every(({ stage }) => stage === 'done'), true);
+  const bootstrap = snapshot.training.find(({ training }) => training.bootstrap);
+  assert.equal(bootstrap.training.exercise, 'Practiced with one heading and two sections.');
+  const bootstrapReview = calls.find(({ prompt }) => prompt.startsWith('Review the studio agent'));
+  assert.match(bootstrapReview.prompt, /Practiced with one heading and two sections/);
   assert.equal(snapshot.skills[0].commit, candidate.commit);
   assert.equal(snapshot.studios[0].agents.find(({ id }) => id === hire.id).trainingStatus, 'ready');
   assert.match(calls.find(({ prompt }) => prompt.startsWith('Work on')).prompt, /Pinned instructions for outlining/);

@@ -119,6 +119,10 @@ async function pathStat(path) {
   }
 }
 
+export async function hasProjectGitDirectory(root) {
+  return Boolean((await pathStat(join(root, '.git')))?.isDirectory());
+}
+
 async function verifiedDirectory(path) {
   if (!(await pathStat(path))?.isDirectory() || await realpath(path) !== path) {
     throw new Error(`Invalid worktree directory: ${path}`);
@@ -193,8 +197,12 @@ export function createGitWorktrees({ storageDir, validateRepository } = {}) {
     if (approved === false || (typeof approved === 'string' && await realpath(approved) !== canonical)) {
       throw new Error('Repository is outside the approved project directory');
     }
+    const metadata = join(canonical, '.git');
+    const marker = await pathStat(metadata);
+    if (!marker) throw new Error('В выбранной папке нет Git-репозитория.');
+    if (!marker.isDirectory()) throw new Error('Выберите основную папку Git-репозитория.');
     await requireProjectGit(canonical);
-    const gitCommonDir = await verifiedDirectory(join(canonical, '.git'));
+    const gitCommonDir = await verifiedDirectory(metadata);
     const topLevel = gitLine(await git(canonical, ['rev-parse', '--show-toplevel']));
     const discoveredCommon = gitLine(await git(canonical, [
       'rev-parse', '--path-format=absolute', '--git-common-dir',
