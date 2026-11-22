@@ -119,9 +119,9 @@ export function renderToday(snapshot, {projectAvailability,studioFilter='',outco
       <div class="today-meta">${stageMark(row.blocking?'blocked':'qa',copy(decisionType[row.kind]))}${stats?`<small>${stats}</small>`:''}${time?`<time class="muted">${safe(time)}</time>`:''}<span class="today-action">${safe(action)}</span></div></li>`;
   };
   return copy`<header class="page-heading"><h1>Сегодня</h1><div class="actions"><button type="button" class="action" data-open="studio">${copy(hasDraft?'Продолжить создание':'Новая студия')}</button></div></header>
-    ${outcome?`<section class="today-outcome" aria-live="polite"><strong>${safe(outcome.label)}</strong><p>${safe(outcome.detail)}</p><div class="actions">
+    ${outcome?`<section class="today-outcome"><div role="status"><strong>${safe(outcome.label)}</strong><p>${safe(outcome.detail)}</p></div><div class="actions">
       ${outcome.taskId?`<button type="button" class="action secondary" data-portfolio-task="${safe(outcome.taskId)}" data-studio="${safe(outcome.studioId)}">${copy('Открыть задачу')}</button>`:''}
       <button type="button" class="action secondary" data-today-next>${rows.length?copy('Следующее решение'):copy('Все студии')}</button></div></section>`:''}
-    <div class="row today-heading"><h2>Нужно решение · ${rows.length}</h2>${select}</div>
-    ${rows.length?`<ul class="today-list">${rows.map(record).join('')}</ul>`:copy('<p class="muted">Открытых решений нет.</p>')}`;
+    <div><div class="row today-heading"><h2>Нужно решение · ${rows.length}</h2>${select}</div>
+    ${rows.length?`<ul class="today-list">${rows.map(record).join('')}</ul>`:copy('<p class="muted">Открытых решений нет.</p>')}</div>`;
 }

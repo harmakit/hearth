@@ -12,6 +12,7 @@ import { catalogEfforts, fixedModelChoices, modelKey } from './model-policy.mjs'
 import { createModelCatalogEditor } from './model-catalog-editor.mjs';
 import { renderWorkspaceHome } from './workspace-view.mjs';
 import { initialWorkspaceView,renderToday,todayItems } from './today-view.mjs';
+import { pulseFeedback } from './motion.mjs';
 import { progressMark,stageMark } from './presentation.mjs';
 import { taskRecovery } from './task-recovery.mjs';
 import { readStudioDraft,writeStudioDraft,clearStudioDraft } from './studio-draft.mjs';
@@ -106,6 +107,7 @@ let openingNotification = false;
 let todayFilter = '';
 let todayContext;
 let todayOutcome;
+let todayFeedback;
 let workBusy = false;
 let workTab;
 let registryQuery = '';
@@ -174,9 +176,11 @@ const plain = (value, cls = 'long-text') => `<div class="${cls}">${safe(value)}<
 
 function notice(message = '', error = false) {
   const node = $('#notice');
+  const changed = node.hidden || node.textContent !== message || node.classList.contains('is-error') !== error;
   node.hidden = !message;
   node.textContent = message;
   node.classList.toggle('is-error', error);
+  if (message && changed) pulseFeedback(node, error);
 }
 
 function selectStudio(id) {
@@ -299,8 +303,8 @@ function render() {
   $('#navigation').hidden = !inStudio || !current;
   if (inStudio && current) $('#navigation').innerHTML = navigation(studioViews);
   $('#breadcrumb').innerHTML = `<span>${safe(inStudio && current ? current.name : 'Hearth Studio')}</span><span aria-hidden="true">›</span><strong>${ui(view==='workshop'?'team':view)}</strong>`;
-  content.innerHTML = view === 'today' ? renderToday(state,{studioFilter:todayFilter,projectAvailability:Object.fromEntries(folderProbes),outcome:todayOutcomeDetails(),hasDraft}) :
-    view === 'workspace' ? renderWorkspaceHome({...state,projectAvailability:Object.fromEntries(folderProbes),hasDraft}) : view === 'app-settings' ? appSettings() : current
+  if (view === 'today') paintToday(hasDraft);
+  else content.innerHTML = view === 'workspace' ? renderWorkspaceHome({...state,projectAvailability:Object.fromEntries(folderProbes),hasDraft}) : view === 'app-settings' ? appSettings() : current
     ? ({ overview, work, inbox, workshop, skills, settings })[view]()
     : heading(views[view]) + empty(copy('Создайте студию'), copy('Опишите проект, выберите рабочую папку и подключение директора.'), button(copy('Создать студию'), 'data-open="studio"'));
   if(['workspace','today'].includes(view) && bridge)refreshFolderAvailability();
@@ -435,17 +439,59 @@ function todayOutcomeDetails() {
   const active=state.attempts?.findLast(a=>a.taskId===taskId&&a.studioId===owner&&a.status==='running');
   const item=state.inbox.find(i=>i.studioId===owner&&i.id===row.inboxId);
   let label=copy('Решение сохранено'), detail=studio?.name??'';
-  if(task?.gitDelivery?.status==='merged')label=copy('Изменения слиты');
+  let status='saved', source=detail;
+  if(task?.gitDelivery?.status==='merged'){
+    label=copy('Изменения слиты'); status='merged';
+  }
   else if((action==='retry'||action==='resume')&&task?.status==='failed'){
     label=copy('Требуется внимание');
     detail=task.error||state.inbox.findLast(i=>i.studioId===owner&&i.taskId===taskId&&i.kind==='error'&&i.status==='open')?.body||detail;
+    status='attention'; source=detail;
   }
-  else if(active)detail=copy`В работе · ${active.id}`;
-  else if(studio?.scheduleWaiting)detail=copy`Ближайшее рабочее окно · ${studioDate(studio.nextScheduleAt)}`;
-  else if(action==='retry'&&task?.status==='queued')detail=copy('В очереди');
-  else if(task?.stage==='done')detail=copy('Готово');
-  else if(item?.status==='open')label=copy('Требуется внимание');
-  return {taskId,studioId:owner,label,detail};
+  else if(active){
+    detail=copy`В работе · ${active.id}`; status='running'; source=active.id;
+  }
+  else if(studio?.scheduleWaiting){
+    detail=copy`Ближайшее рабочее окно · ${studioDate(studio.nextScheduleAt)}`; status='scheduled'; source=studio.nextScheduleAt;
+  }
+  else if(action==='retry'&&task?.status==='queued'){
+    detail=copy('В очереди'); status='queued';
+  }
+  else if(task?.stage==='done'){
+    detail=copy('Готово'); status='done';
+  }
+  else if(item?.status==='open'){
+    label=copy('Требуется внимание'); status='attention';
+  }
+  return {taskId,studioId:owner,label,detail,failed:status==='attention',feedbackKey:JSON.stringify([status,source])};
+}
+
+function paintToday(hasDraft) {
+  const outcome=todayOutcomeDetails();
+  const markup=renderToday(state,{studioFilter:todayFilter,projectAvailability:Object.fromEntries(folderProbes),outcome,hasDraft});
+  let result=content.querySelector('.today-outcome');
+  if (result && outcome) {
+    const template=document.createElement('template');
+    template.innerHTML=markup;
+    const next=template.content.querySelector('.today-outcome');
+    result.previousElementSibling.replaceWith(next.previousElementSibling);
+    result.nextElementSibling.replaceWith(next.nextElementSibling);
+    const summary=result.firstElementChild, actions=result.lastElementChild;
+    if (summary.innerHTML!==next.firstElementChild.innerHTML) summary.innerHTML=next.firstElementChild.innerHTML;
+    if (actions.innerHTML!==next.lastElementChild.innerHTML) {
+      const focused=document.activeElement;
+      const restore=actions.contains(focused) && (focused.matches('[data-portfolio-task]') ? '[data-portfolio-task]' : '[data-today-next]');
+      actions.innerHTML=next.lastElementChild.innerHTML;
+      if (restore) (actions.querySelector(restore) ?? actions.querySelector('[data-today-next]')).focus({preventScroll:true});
+    }
+  } else {
+    content.innerHTML=markup;
+    result=content.querySelector('.today-outcome');
+  }
+  if (outcome && (todayFeedback?.decision!==todayOutcome || todayFeedback.key!==outcome.feedbackKey)) {
+    todayFeedback={decision:todayOutcome,key:outcome.feedbackKey};
+    pulseFeedback(result,outcome.failed);
+  }
 }
 
 function finishTodayDecision(taskId,action,context=todayContext) {
@@ -858,6 +904,7 @@ function dialogError(message = '') {
     reload.type='button';reload.className='text-button';reload.dataset.refreshPlan=dialog.dataset.reviewPlan;
     reload.textContent=ui('currentPlan');node.append(' ',reload);
   }
+  if (message) pulseFeedback(node, true);
 }
 
 function setDialogBusy(value) {

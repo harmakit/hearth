@@ -59,7 +59,7 @@ small { font-size: 12px; }
 .picker { display: grid; gap: 5px; font-size: 12px; color: var(--rail-muted); }
 .picker > span { padding-inline: 2px; }
 .picker select { width: 100%; min-width: 0; min-height: 32px; padding: 4px 7px; border: 1px solid var(--rail-line); border-radius: var(--radius); color: var(--rail-ink); background: var(--surface); text-overflow: ellipsis; font-size: 13px; }
-.rail-button, nav button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 33px; padding: 4px 7px; text-align: left; color: var(--rail-muted); background: transparent; border: 1px solid transparent; border-radius: var(--radius); font-size: 13px; transition: background-color .15s ease, color .15s ease; }
+.rail-button, nav button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 33px; padding: 4px 7px; text-align: left; color: var(--rail-muted); background: transparent; border: 1px solid transparent; border-radius: var(--radius); font-size: 13px; }
 .rail-button { min-height: 35px; }
 .rail-button:hover, nav button:hover { color: var(--rail-ink); background: var(--surface-raised); }
 nav { display: grid; gap: 3px; }
@@ -91,7 +91,7 @@ main { max-width: 1500px; padding: 16px clamp(12px, 2vw, 24px) 24px; margin: aut
 .settings { gap: 20px; }
 .settings .inline-result { margin-top: 4px; }
 
-.action { display: inline-flex; justify-content: center; align-items: center; min-height: 33px; max-width: 100%; padding: 4px 9px; border: 1px solid transparent; border-radius: var(--radius); background: var(--accent); color: var(--accent-text); font-size: 13px; font-weight: 600; text-align: center; transition: filter .15s ease, background-color .15s ease; }
+.action { display: inline-flex; justify-content: center; align-items: center; min-height: 33px; max-width: 100%; padding: 4px 9px; border: 1px solid transparent; border-radius: var(--radius); background: var(--accent); color: var(--accent-text); font-size: 13px; font-weight: 600; text-align: center; }
 .action:not(:disabled):hover { filter: brightness(1.11); }
 .action.secondary { color: var(--ink); background: var(--surface); border-color: var(--control-line); }
 .action.secondary:not(:disabled):hover { background: var(--surface-raised); filter: none; }
@@ -213,8 +213,4 @@ dialog form { display: grid; gap: 16px; padding: 19px; }
   nav button { width: auto; }
   .studio-meta { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .studio-meta dd + dt { margin-top: 5px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition: none !important; }
 }

@@ -159,11 +159,144 @@ const appLocale=async locale=>{
   await choose('[data-settings-locale]',locale);
   await eventually(()=>desktop.evaluate(l=>document.documentElement.lang===l,locale),'Interface language '+locale);
 };
+
+async function emulateMotion(value) {
+  await desktop.rpc('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value}]});
+}
+
+async function checkDialogMotion() {
+  await desktop.click('[data-view="workspace"]');
+  await emulateMotion('no-preference');
+  const pointer=await desktop.evaluate(() => {
+    const {x,y,width,height}=document.querySelector('main [data-open="studio"]').getBoundingClientRect();
+    return {x:x+width/2,y:y+height/2,width,height};
+  });
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseMoved',x:pointer.x,y:pointer.y,button:'none'});
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mousePressed',x:pointer.x,y:pointer.y,button:'left',buttons:1,clickCount:1});
+  const press=await desktop.evaluate(() => {
+    const button=document.querySelector('main [data-open="studio"]');
+    const adjust=button.getAnimations().find(animation=>animation.transitionProperty==='box-shadow');
+    adjust?.finish();
+    const {width,height}=button.getBoundingClientRect();
+    return {active:button.matches(':active'),outline:getComputedStyle(button).boxShadow,duration:adjust?.effect.getTiming().duration,width,height};
+  });
+  await desktop.rpc('Input.dispatchMouseEvent',{type:'mouseReleased',x:0,y:0,button:'left',clickCount:1});
+  assert.ok(press.active && press.outline!=='none' && press.duration===100,'Press responds within 100 ms');
+  assert.deepEqual([press.width,press.height],[pointer.width,pointer.height],'Press keeps control geometry');
+  const result=await desktop.evaluate(async () => {
+    const {clearStudioDraft}=await import('hearth://app/studio-draft.mjs');
+    const trigger=document.querySelector('main [data-open="studio"]');
+    const dialog=document.querySelector('#dialog');
+    const animations=()=>dialog.getAnimations().map(animation=>animation.transitionProperty);
+    const bounds=element=>element.getBoundingClientRect().toJSON();
+    const dismiss=()=>dialog.querySelector('.dialog-heading [data-close]').click();
+    trigger.focus();
+    const before=bounds(trigger);
+    trigger.click();
+    const immediate=dialog.open && dialog.contains(document.activeElement);
+    const opening=animations();
+    for(const animation of dialog.getAnimations()) animation.finish();
+    const dialogGeometry=bounds(dialog);
+    dialog.querySelector('[name="name"]').value='Motion QA';
+    dialog.querySelector('[name="brief"]').value='Motion QA';
+    dialog.querySelector('[name="firstResult"]').value='Motion QA';
+    dialog.querySelector('[data-wizard-next]').click();
+    const reused=dialog.open && Boolean(dialog.querySelector('[data-wizard-step="1"]:not([hidden])')) && animations().length===0;
+    dismiss();
+    const focusReturned=document.activeElement===trigger;
+    const closed=!dialog.open;
+    const closing=animations();
+    const unblocked=document.elementFromPoint(before.x+before.width/2,before.y+before.height/2)?.closest('button')===trigger;
+    const unchanged=bounds(trigger).width===before.width;
+    clearStudioDraft(localStorage);
+    return {immediate,opening,reused,focusReturned,closed,closing,unblocked,unchanged,dialogGeometry};
+  });
+  assert.ok(result.immediate,'Opening focuses the native modal dialog immediately');
+  assert.ok(result.opening.includes('opacity'),'Dialog opening transitions opacity');
+  assert.ok(result.reused,'Updating an open dialog does not replay its entrance');
+  assert.ok(result.closed && result.focusReturned,'Closing returns focus immediately');
+  assert.ok(result.closing.includes('opacity'),'Dialog closing transitions opacity');
+  assert.ok(result.unblocked && result.unchanged,'Closing unblocks the window immediately without moving controls');
+  assert.ok(result.dialogGeometry.width>0);
+
+  await emulateMotion('reduce');
+  await desktop.evaluate(() => document.querySelector('main [data-open="studio"]').focus());
+  for (const type of ['keyDown','keyUp']) await desktop.rpc('Input.dispatchKeyEvent',{
+    type,key:'Enter',code:'Enter',windowsVirtualKeyCode:13,...(type==='keyDown'?{text:'\r'}:{}),
+  });
+  const reduced=await desktop.evaluate(() => {
+    const dialog=document.querySelector('#dialog');
+    return {open:dialog.open,focused:dialog.contains(document.activeElement),
+      duration:getComputedStyle(dialog).transitionDuration,
+      reduced:matchMedia('(prefers-reduced-motion: reduce)').matches,
+      transitions:dialog.getAnimations().map(animation=>animation.transitionProperty)};
+  });
+  assert.deepEqual(reduced,{open:true,focused:true,duration:'0s',reduced:true,transitions:[]},'Reduced motion keeps immediate keyboard focus and omits dialog transitions');
+  for (const type of ['keyDown','keyUp']) await desktop.rpc('Input.dispatchKeyEvent',{
+    type,key:'Escape',code:'Escape',windowsVirtualKeyCode:27,
+  });
+  await eventually(()=>desktop.evaluate(() => !document.querySelector('#dialog').open && document.activeElement.matches('main [data-open="studio"]')),'Escape restores focus with reduced motion');
+  await emulateMotion('no-preference');
+  console.log('PASS native press and dialog transitions, immediate focus, hit testing and reduced motion');
+}
+
+async function checkOutcomeMotion() {
+  const appeared=await desktop.evaluate(() => globalThis.motionOutcomeAppeared?.label);
+  assert.ok(appeared,'New confirmed result receives local feedback');
+  await desktop.evaluate(() => {
+    const outcome=document.querySelector('.today-outcome');
+    outcome.querySelector('[data-today-next]').focus();
+    globalThis.motionOutcomeNode=outcome;
+    globalThis.motionNavigationNode=document.querySelector('#workspace-navigation button');
+  });
+  await desktop.request('setAppLocale',{locale:(await snap()).appLocale});
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('#workspace-navigation button')!==globalThis.motionNavigationNode),'Unchanged snapshot rendered');
+  const retained=await desktop.evaluate(() => {
+    const outcome=document.querySelector('.today-outcome');
+    return {sameNode:outcome===globalThis.motionOutcomeNode,focused:outcome.contains(document.activeElement),
+      samePulse:outcome.getAnimations().includes(globalThis.motionOutcomeAppeared.pulse),
+      label:outcome.querySelector('[role="status"] strong').textContent};
+  });
+  assert.deepEqual(retained,{sameNode:true,focused:true,samePulse:true,label:appeared},'Result node, focus, and active pulse survive a snapshot');
+  await emulateMotion('reduce');
+  await eventually(()=>desktop.evaluate(() => {
+    const outcome=document.querySelector('.today-outcome');
+    return outcome===globalThis.motionOutcomeNode && outcome.querySelector('[role="status"] strong').textContent && !outcome.getAnimations().length;
+  }),'Reducing motion cancels the active pulse and leaves the status');
+  await emulateMotion('no-preference');
+  await desktop.click('[data-view=workspace]');
+  await desktop.click('[data-view=today]');
+  assert.ok(await desktop.evaluate(() => {
+    const outcome=document.querySelector('.today-outcome');
+    return outcome && !outcome.getAnimations().length;
+  }),'Returning to Today does not replay the result');
+  console.log('PASS confirmed Today transition, persistent result and no replay on navigation');
+}
+
+async function checkInspectorMotion(taskId) {
+  const opened=await desktop.evaluate(id => {
+    const inspector=document.querySelector('#owner-inspector');
+    const trigger=[...document.querySelectorAll('[data-registry-rows] [data-task]')].find(button=>button.dataset.task===id);
+    trigger.focus();
+    trigger.click();
+    const [entrance]=inspector.getAnimations();
+    entrance?.finish();
+    globalThis.motionNavigationNode=document.querySelector('#workspace-navigation button');
+    return {focus:document.activeElement.id,transition:entrance?.transitionProperty};
+  },taskId);
+  assert.deepEqual(opened,{focus:'owner-title',transition:'opacity'});
+  await desktop.request('setAppLocale',{locale:(await snap()).appLocale});
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('#workspace-navigation button')!==globalThis.motionNavigationNode),'Snapshot rendered while inspector open');
+  assert.ok(await desktop.evaluate(() => document.activeElement.id==='owner-title' && !document.querySelector('#owner-inspector').getAnimations().length));
+  console.log('PASS inspector fades on first opening and retains focus through live snapshots');
+}
+
 try {
   if(process.env.HEARTH_QA_LOCALE){
     await appLocale(process.env.HEARTH_QA_LOCALE);
     await desktop.click('[data-view="workspace"]');
   }
+  if(['1','dialog'].includes(process.env.HEARTH_QA_MOTION))await checkDialogMotion();
   if (process.env.HEARTH_QA_QUEUE === '1') {
     await appLocale('ru');
     const project = join(run, 'queue-qa-project');
@@ -414,7 +547,16 @@ try {
   await desktop.click('[data-initialize]');
   const plan=await until(x=>x.plans.find(p=>p.studioId===s.id&&p.status==='pending'),'Director plan');
   await desktop.click('[data-plan="'+plan.id+'"]');
+  if(process.env.HEARTH_QA_MOTION==='1')await desktop.evaluate(() => {
+    const dialog=document.querySelector('#dialog');
+    for(const animation of dialog.getAnimations()) animation.finish();
+    globalThis.motionPlanBody=document.querySelector('#dialog-body').firstElementChild;
+  });
   await desktop.click('[data-edit-plan-tasks]');
+  if(process.env.HEARTH_QA_MOTION==='1')assert.ok(await desktop.evaluate(() => {
+    const dialog=document.querySelector('#dialog');
+    return dialog.open && document.querySelector('#dialog-body').firstElementChild!==globalThis.motionPlanBody && !dialog.getAnimations().length;
+  }),'Replacing the contents of a visible dialog does not animate a new entrance');
   await choose('[name=sprintReview]','hold');
   await choose('[name=accept0]',false);
   await desktop.click('#dialog-actions button[type=submit]');
@@ -432,6 +574,20 @@ try {
   }
   if(process.env.HEARTH_QA_RESIZE==='1') await dragHorizontal('[data-dialog-width]','#dialog',50);
   await shot('01-package-acceptance');
+  if(['1','feedback'].includes(process.env.HEARTH_QA_MOTION)) await desktop.evaluate(() => {
+    const observer=new MutationObserver(() => {
+      const outcome=document.querySelector('.today-outcome');
+      const label=outcome?.querySelector('[role="status"] strong')?.textContent;
+      const merged=document.documentElement.lang==='ru'?'Изменения слиты':'Changes merged';
+      if (label!==merged) return;
+      const pulse=outcome?.getAnimations()[0];
+      if(!pulse)return;
+      pulse.pause();
+      globalThis.motionOutcomeAppeared={pulse,label};
+      observer.disconnect();
+    });
+    observer.observe(document.querySelector('main'),{childList:true,subtree:true});
+  });
   await desktop.click('#dialog-actions button[type=submit]');
   await until(x=>x.sprints.some(sp=>sp.studioId===s.id&&sp.status==='completed'),'Sprint completion');
   if(process.env.HEARTH_QA_TODAY==='1'){
@@ -439,6 +595,7 @@ try {
       document.documentElement.lang==='ru'?'Изменения слиты':'Changes merged'))),'Today shows confirmed merge');
     await shot('today-real-merge');
     console.log('PASS Сегодня → решение → подтверждённое слияние');
+    if(['1','feedback'].includes(process.env.HEARTH_QA_MOTION))await checkOutcomeMotion();
     await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+s.id+'"]');
   }
   if(await desktop.evaluate(()=>!document.querySelector('#owner-inspector').hidden))await desktop.click('[data-owner-close]');
@@ -482,7 +639,8 @@ try {
   await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+s.id+'"]');
   await desktop.click('[data-view=work]');
   const original=await until(x=>x.tasks.find(t=>t.studioId===s.id&&t.gitDelivery?.status==='merged'&&!t.packageMembers),'Find work');
-  await desktop.click('[data-registry-rows] [data-task="'+original.id+'"]');
+  if(process.env.HEARTH_QA_MOTION==='1')await checkInspectorMotion(original.id);
+  else await desktop.click('[data-registry-rows] [data-task="'+original.id+'"]');
   if(process.env.HEARTH_QA_POLISH==='1'){
     const clipboardExpr="process.getBuiltinModule('module').createRequire(process.cwd()+'/qa.cjs')('electron').clipboard";
     assert.equal(await desktop.mainEval(`(()=>{const board=${clipboardExpr};const original=board.writeText;
@@ -541,6 +699,8 @@ try {
   await desktop.rpc('Emulation.setDeviceMetricsOverride',{width:590,height:760,deviceScaleFactor:1,mobile:false});
   await desktop.click('[data-registry-rows] [data-task="'+original.id+'"]');
   assert.ok(await desktop.evaluate(()=>document.querySelector('#content').getBoundingClientRect().width===0));
+  if(process.env.HEARTH_QA_MOTION==='1')assert.ok(await desktop.evaluate(() =>
+    document.activeElement.id==='owner-title' && !document.querySelector('#owner-inspector').getAnimations().length));
   await shot('05-narrow-inspector');
   const ax=await desktop.rpc('Accessibility.getFullAXTree');
   assert.ok(ax.nodes.some(n=>n.role?.value==='heading' && n.name?.value===original.title));
