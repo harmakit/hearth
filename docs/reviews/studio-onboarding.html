@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hearth Studio · первый запуск</title>
+<style>
+:root {
+  color-scheme: dark;
+  --paper:#181a1d; --rail:#1c1e22; --surface:#202327; --raised:#282c32;
+  --ink:#f0f1f0; --muted:#aeb4be; --line:#383d44; --control:#727983;
+  --accent:#cfed9e; --accent-ink:#192313; --soft:#2d3828; --warn:#f2cd94; --blue:#a7d0ff;
+  --motion-press:100ms; --motion-transition:140ms; --motion-ease:cubic-bezier(.2,.7,.2,1);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color:var(--ink); background:var(--paper);
+}
+*,*::before,*::after { box-sizing:border-box }
+body { margin:0 }
+body:has(dialog[open]) { overflow:hidden }
+[hidden] { display:none!important }
+h1,h2,h3,p,ol,ul { margin:0 }
+h1 { font-size:clamp(26px,3.4vw,39px); letter-spacing:-.045em; line-height:1.13; font-weight:660 }
+h2 { font-size:18px; letter-spacing:-.022em; line-height:1.3 }
+h3 { font-size:14px }
+small,.small { font-size:12px }
+p,span,code,h1,h2 { overflow-wrap:anywhere }
+button,input,textarea,select { font:inherit; color:inherit }
+button,select,summary { cursor:pointer }
+button { min-height:39px; padding:8px 14px; border:1px solid var(--control); background:var(--surface); border-radius:5px; font-weight:615 }
+button:hover { background:var(--raised) }
+button:disabled { opacity:.65; cursor:default }
+button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
+button.primary:hover { background:#e2f4c4 }
+button.quiet { border-color:transparent; background:transparent; color:var(--muted) }
+button.quiet:hover { background:var(--raised); color:var(--ink) }
+:focus-visible { outline:2px solid var(--blue); outline-offset:3px }
+[tabindex="-1"]:focus { outline:none }
+input:not([type=radio]):not([type=checkbox]),textarea,select { width:100%; min-height:40px; padding:8px 11px; background:var(--paper); border:1px solid var(--control); border-radius:5px }
+textarea { display:block; resize:vertical; min-height:74px }
+input[type=radio],input[type=checkbox] { accent-color:var(--accent) }
+input[aria-invalid=true],textarea[aria-invalid=true] { border-color:var(--warn) }
+.muted { color:var(--muted) }
+.actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+.prototype { position:relative; z-index:1; display:flex; flex-wrap:wrap; gap:8px 24px; justify-content:space-between; align-items:center; padding:7px 20px; background:#15171a; color:var(--muted); border-bottom:1px solid var(--line); font-size:12px }
+.prototype label { display:inline-flex; gap:6px; align-items:center }
+.prototype button { min-height:28px; font-weight:500; padding:2px 8px }
+.shell { min-height:calc(100dvh - 45px); display:grid; grid-template-columns:190px minmax(0,1fr) }
+.side { background:var(--rail); border-right:1px solid var(--line); padding:15px 12px }
+.brand { display:flex; gap:9px; align-items:center; margin:0 6px 25px; font-size:16px; font-weight:650; letter-spacing:-.03em }
+.brand-mark { position:relative; width:29px; height:29px; border:1px solid #58754c; border-radius:7px; background:#243425; flex:none }
+.brand-mark::after { content:""; position:absolute; inset:7px; background:var(--accent); clip-path:polygon(50% 0,100% 43%,89% 54%,82% 54%,82% 100%,58% 100%,58% 74%,42% 74%,42% 100%,18% 100%,18% 54%,11% 54%,0 43%) }
+.side nav { display:grid; gap:4px }
+.side button { text-align:start; padding-inline:9px; color:var(--muted) }
+.side button[aria-current=page] { background:var(--soft); color:var(--accent); border:1px solid var(--line) }
+.top { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px 26px; min-height:58px; border-bottom:1px solid var(--line) }
+.top strong { font-size:13px }
+main { max-width:1090px; margin:auto; padding:30px 28px 50px }
+.hero { margin-top:20px; display:grid; grid-template-columns:minmax(0,1.42fr) minmax(0,1fr); align-items:start; border:1px solid var(--line); border-radius:9px; background:var(--surface) }
+.hero-copy { display:grid; gap:13px; padding:clamp(18px,4vw,42px) }
+.hero-copy p { max-width:37ch }
+.hero-copy .actions { margin-top:4px }
+.guide { border-left:1px solid var(--line); background:var(--rail); padding:23px 21px; min-height:100%; border-radius:0 8px 8px 0 }
+.guide h2 { font-size:14px }
+.guide ol { list-style:none; display:grid; gap:15px; margin-top:17px; padding:0 }
+.guide li { position:relative; display:grid; grid-template-columns:10px minmax(0,1fr); gap:10px }
+.guide li:before { content:""; width:8px; height:8px; margin-top:6px; background:var(--soft); border:1px solid #8baf70; border-radius:50%; z-index:1 }
+.guide li:not(:last-child)::after { content:""; width:1px; height:calc(100% + 15px); position:absolute; top:10px; left:3.5px; background:var(--line) }
+.guide li strong,.guide li small { display:block }
+.guide li small { margin-top:2px }
+.studio-head { display:grid; gap:5px; margin-bottom:18px }
+.workspace { display:grid; gap:16px; grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); align-items:start }
+.card { padding:18px; border:1px solid var(--line); background:var(--surface); border-radius:7px; display:grid; gap:10px }
+.card .actions { margin-top:3px }
+.stack { display:grid; gap:14px }
+.status { width:fit-content; display:inline-flex; align-items:center; gap:6px; color:var(--accent); background:var(--soft); border:1px solid #4e6445; border-radius:4px; padding:2px 7px; font-size:12px }
+.status.warn { background:#342e25; border-color:#725b3e; color:var(--warn) }
+.status.wait { background:#26313d; border-color:#516a85; color:var(--blue) }
+.status::before { content:""; width:6px; height:6px; border:1px solid currentColor; border-radius:50%; flex:none }
+.list-row { display:flex; align-items:start; justify-content:space-between; flex-wrap:wrap; gap:6px; padding:10px 0; border-top:1px solid var(--line) }
+.path { padding:7px 9px; background:var(--paper); border:1px solid var(--line); border-radius:4px; color:var(--muted) }
+dialog { padding:0; width:min(790px,calc(100% - 30px)); max-height:calc(100dvh - 34px); overflow:hidden; border:1px solid var(--control); border-radius:10px; background:var(--surface); color:var(--ink); box-shadow:0 20px 65px #0a0c10a6 }
+dialog::backdrop { background:rgb(8 12 18 / .65) }
+dialog > form,dialog > .sheet { display:flex; flex-direction:column; max-height:inherit }
+.dialog-header { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid var(--line) }
+.dialog-header button { min-height:32px; min-width:32px; padding:1px 7px; font-size:19px }
+.progress { list-style:none; display:grid; gap:8px; grid-template-columns:repeat(3,minmax(0,1fr)); padding:12px 20px 0; font-size:12px; color:var(--muted) }
+.progress li { padding:6px 0; border-top:2px solid var(--line); overflow-wrap:anywhere }
+.progress li[aria-current=step] { color:var(--accent); font-weight:650; border-top-color:var(--accent) }
+.dialog-body { overflow:auto; display:grid; grid-template-columns:minmax(0,1.7fr) minmax(0,1fr); min-height:0 }
+.dialog-main { display:grid; gap:14px; padding:17px 20px 22px; align-content:start }
+.wizard-step { display:grid; gap:13px; align-content:start }
+.wizard-step .lead { margin-top:-8px }
+.field { display:grid; gap:4px; min-width:0 }
+.field .hint { font-weight:400 }
+.field > span:first-child { font-weight:615 }
+.dialog-aside { border-left:1px solid var(--line); padding:19px 16px }
+.dialog-aside ol { margin-top:12px }
+.dialog-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; padding:11px 20px; border-top:1px solid var(--line); background:var(--surface); position:relative }
+fieldset { display:grid; gap:7px; margin:0; padding:0; border:0; min-width:0 }
+.choice { display:grid; grid-template-columns:16px minmax(0,1fr); align-items:start; gap:9px; padding:8px 10px; border:1px solid var(--line); border-radius:5px }
+.choice:has(:checked) { background:var(--soft); border-color:#6d8860 }
+.choice input { margin:3px 0 0 }
+.choice small { display:block }
+details { padding-top:5px }
+details > div { display:grid; gap:9px; padding-top:9px }
+.check { display:flex; gap:8px; align-items:center }
+.error { color:var(--warn); font-size:13px }
+.dialog-wide { display:grid; gap:14px; padding:20px; min-height:0; overflow:auto }
+.dialog-footer .actions { margin-inline-start:auto }
+.report-preview { border-top:1px solid var(--line); padding-top:12px; display:grid; gap:7px }
+.app-status { font-size:12px; padding-top:8px; min-height:26px }
+@media (prefers-reduced-motion:no-preference) {
+  button { transition:background-color var(--motion-transition) var(--motion-ease),color var(--motion-transition) var(--motion-ease),filter var(--motion-press) var(--motion-ease) }
+  button:active { filter:brightness(.88) }
+  dialog[open],dialog[open]::backdrop,.wizard-step.enter { animation:appear var(--motion-transition) var(--motion-ease) }
+  .fresh { animation:result var(--motion-transition) var(--motion-ease) }
+  @keyframes appear { from { opacity:.55 } to { opacity:1 } }
+  @keyframes result { from { background:var(--soft) } to { background:var(--surface) } }
+}
+@media(max-width:760px) {
+  .shell { grid-template-columns:144px minmax(0,1fr) }
+  .hero,.workspace { grid-template-columns:minmax(0,1fr) }
+  .hero .guide { border-left:0; border-top:1px solid var(--line); border-radius:0 0 8px 8px }
+  main { padding:23px 18px 36px }
+}
+@media(max-width:640px) {
+  .shell { display:block }
+  .side { display:flex; gap:6px 15px; flex-wrap:wrap; align-items:center; border-right:0; border-bottom:1px solid var(--line); padding:8px 12px }
+  .brand { margin:0 6px 0 0 }
+  .side nav { display:flex; gap:4px; flex-wrap:wrap }
+  .dialog-body { grid-template-columns:minmax(0,1fr) }
+  .dialog-aside { border-left:0; border-top:1px solid var(--line); border-radius:0 }
+  .top { padding-inline:18px }
+}
+</style>
+
+<header class="prototype">
+  <span>Интерактивный макет · пример студии «Рассказы»</span>
+  <div class="actions">
+    <label><input id="offline" type="checkbox"> Провайдер недоступен</label>
+    <button type="button" class="quiet" id="reset">Начать заново</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="side" aria-label="Приложение">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Hearth Studio</div>
+    <nav aria-label="Разделы">
+      <button type="button" class="quiet" data-route="today" aria-current="page">Сегодня</button>
+      <button type="button" class="quiet" data-route="studios">Все студии</button>
+      <button type="button" class="quiet" data-route="overview" data-needs-studio hidden>Обзор</button>
+      <button type="button" class="quiet" data-route="work" data-needs-studio hidden>Работа</button>
+    </nav>
+  </aside>
+  <div>
+    <header class="top"><strong id="crumb">Сегодня</strong></header>
+    <main id="screen"></main>
+  </div>
+</div>
+
+<dialog id="wizard" aria-labelledby="wizard-title">
+  <form novalidate>
+    <header class="dialog-header"><strong id="wizard-title">Новая студия</strong><button class="quiet" type="button" data-close="wizard" aria-label="Закрыть">×</button></header>
+    <ol class="progress" aria-label="Шаги настройки"><li aria-current="step">1 · Проект</li><li>2 · Папка</li><li>3 · Директор</li></ol>
+    <div class="dialog-body">
+      <div class="dialog-main">
+        <section class="wizard-step" data-step="0">
+          <h2 tabindex="-1">Расскажите о проекте</h2>
+          <p class="lead muted">Директор использует это описание, чтобы предложить команду и план первого спринта.</p>
+          <label class="field"><span>Название студии</span><input name="name" maxlength="120" autocomplete="off" required placeholder="Рассказы"></label>
+          <label class="field"><span>Чем будет заниматься студия?</span><textarea name="brief" required placeholder="Например, писать сборник фантастических рассказов."></textarea></label>
+          <label class="field"><span>Какую первую задачу ставим студии?</span><textarea name="first" placeholder="Например, придумать пять персонажей и написать их биографии." aria-describedby="first-hint"></textarea><small id="first-hint" class="muted hint">Необязательно. Если оставить поле пустым, директор предложит первую задачу.</small></label>
+          <div><button type="button" class="quiet" id="fill-example">Заполнить примером</button></div>
+        </section>
+        <section class="wizard-step" data-step="1" hidden>
+          <h2 tabindex="-1">Выберите папку проекта</h2>
+          <fieldset aria-label="Способ выбора папки">
+            <label class="choice"><input type="radio" name="folder" value="new" checked><span><strong>Создать новую папку</strong><small class="muted">Hearth создаст локальную историю Git и ветку доставки.</small></span></label>
+            <label class="choice"><input type="radio" name="folder" value="existing"><span><strong>Использовать существующую</strong><small class="muted">Выберите папку с материалами проекта.</small></span></label>
+          </fieldset>
+          <label class="field"><span id="root-label">Родительская папка</span><input name="root" readonly placeholder="Папка не выбрана"></label>
+          <div><button type="button" id="choose-folder">Выбрать папку</button></div>
+          <label class="field" id="new-folder"><span>Имя новой папки</span><input name="folderName" placeholder="Рассказы" maxlength="120"></label>
+          <label class="check" id="existing-git" hidden><input type="checkbox" name="offerGit" checked> Предложить подключить существующий репозиторий</label>
+          <details><summary>Языки проекта</summary><div>
+            <label class="field"><span>Язык отчётов</span><select name="reports"><option value="">Как в интерфейсе · Русский</option><option>English</option><option>简体中文</option><option>Español</option><option>Français</option><option>Русский</option></select></label>
+            <label class="field"><span>Язык материалов проекта</span><select name="materials"><option value="">Как в отчётах</option><option>English</option><option>简体中文</option><option>Español</option><option>Français</option><option>Русский</option></select></label>
+          </div></details>
+        </section>
+        <section class="wizard-step" data-step="2" hidden>
+          <h2 tabindex="-1">Подключение директора</h2>
+          <p class="lead muted">Директор использует Codex или Claude Code, чтобы подготовить план и вести работу.</p>
+          <label class="field"><span>Подключение</span><select name="runtime"><option>Codex</option><option>Claude Code</option></select></label>
+          <div class="card"><p id="provider-status" role="status"></p><p class="muted" id="provider-help"></p><div><button type="button" id="check-provider">Проверить подключение</button></div></div>
+          <details><summary>Настроить модель</summary><div>
+            <label class="field"><span>Модель</span><input name="model" placeholder="По умолчанию у провайдера"></label>
+            <label class="field"><span>Усилие</span><input name="effort" placeholder="По умолчанию у провайдера"></label>
+          </div></details>
+          <p class="small muted" id="effective-model"></p>
+        </section>
+        <p id="form-error" class="error" role="alert" hidden></p>
+      </div>
+      <aside class="guide dialog-aside">
+        <h2>Что будет дальше</h2>
+        <ol>
+          <li><div><strong>Директор предложит план</strong><small class="muted">По вашему описанию и первой задаче.</small></div></li>
+          <li><div><strong>Вы согласуете план</strong><small class="muted">Проверьте задачи и состав команды.</small></div></li>
+          <li><div><strong>Студия выполнит работу</strong><small class="muted">Отчёт и файлы появятся в «Работе».</small></div></li>
+        </ol>
+      </aside>
+    </div>
+    <footer class="dialog-footer">
+      <button type="button" class="quiet" id="back" hidden>Назад</button>
+      <div class="actions">
+        <button type="button" class="quiet" id="save">Сохранить черновик</button>
+        <button type="submit" class="primary" id="forward">К папке проекта</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="detail" aria-labelledby="detail-title"><div class="sheet">
+  <header class="dialog-header"><strong id="detail-title"></strong><button type="button" class="quiet" data-close="detail" aria-label="Закрыть">×</button></header>
+  <div class="dialog-wide" id="detail-content"></div>
+  <footer class="dialog-footer"><div class="actions" id="detail-actions"></div></footer>
+</div></dialog>
+
+<script>
+'use strict';
+const $ = selector => document.querySelector(selector);
+const wizard = $('#wizard');
+const form = wizard.querySelector('form');
+const detail = $('#detail');
+const draftKey = 'hearth-onboarding-preview-draft';
+const sample = { name:'Рассказы', brief:'Пишем сборник фантастических рассказов о заброшенной космической станции.', first:'Придумать пять персонажей и написать их биографии.' };
+const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const button = (title, action, primary = false) => '<button type="button" data-action="' + action + '"' + (primary ? ' class="primary"' : '') + '>' + title + '</button>';
+const status = (title, tone = '') => '<span class="status ' + tone + '">' + title + '</span>';
+const guide = '<aside class="guide"><h2>Как работает студия</h2><ol>' +
+  '<li><div><strong>Проект и задача</strong><small class="muted">Директор получает контекст.</small></div></li>' +
+  '<li><div><strong>План и команда</strong><small class="muted">Вы решаете, когда начинать работу.</small></div></li>' +
+  '<li><div><strong>Результат</strong><small class="muted">Задачу, отчёт и файлы можно открыть в «Работе».</small></div></li></ol></aside>';
+const routes = { today:'Сегодня', studios:'Все студии', overview:'Обзор', work:'Работа · Артефакты' };
+let studio = null;
+let initial = readDraft();
+let step = initial?.step ?? 0;
+let page = 'today';
+let phase = 'created';
+let gitOffer = false;
+let lastTrigger;
+let timer = 0;
+let clockVersion = 0;
+let revision = 1;
+let feedback = '';
+let reportTask = '';
+
+function readDraft() {
+  try { return JSON.parse(localStorage.getItem(draftKey)); } catch { return null; }
+}
+function draftData() {
+  return { step, fields:Object.fromEntries(new FormData(form)), offerGit:form.elements.offerGit.checked };
+}
+function writeDraft() {
+  initial = draftData();
+  try { localStorage.setItem(draftKey, JSON.stringify(initial)); } catch {}
+}
+function restoreDraft() {
+  for (const [key,value] of Object.entries(initial?.fields ?? {})) {
+    if (form.elements[key]) form.elements[key].value = value;
+  }
+  if (initial) form.elements.offerGit.checked = initial.offerGit;
+}
+function clearDraft() {
+  initial = null;
+  try { localStorage.removeItem(draftKey); } catch {}
+}
+function mayContinue() {
+  return Boolean(initial?.fields?.name || initial?.fields?.brief || initial?.fields?.first || initial?.fields?.root || initial?.step);
+}
+function focusHeading() { $('#screen h1')?.focus(); }
+function navigate(next) {
+  page = next;
+  render();
+  focusHeading();
+}
+function taskTitle() { return escape(reportTask || studio?.first || 'Описать пять персонажей'); }
+function taskFile() { return reportTask ? 'reports/first-result.md' : 'stories/characters.md'; }
+
+function overviewCard(fresh) {
+  const name = escape(studio.name);
+  const cards = {
+    created: [status('Студия создана'), 'Подготовьте план первого спринта',
+      'Директор предложит команду и задачи по вашему описанию. Работа по плану начнётся после вашего согласования.',
+      button('Подготовить план первого спринта','plan',true)],
+    blocked: [status('Требуется подключение','warn'), 'Подключите директора',
+      'Студия и папка сохранены. Чтобы подготовить план, подключите Codex или Claude Code.',
+      button('Настройки приложения','settings',true) + button('Проверить снова','recheck')],
+    planning: [status('Планирование','wait'), 'Директор готовит план',
+      'Когда план будет готов, он появится здесь, во «Входящих» и на экране «Сегодня».', ''],
+    approval: [status('Нужно решение','warn'), 'План ждёт вашего решения',
+      'Проверьте задачи, состав команды и кто принимает результаты.' + (revision > 1 ? ' Готова новая версия.' : ''),
+      button('Посмотреть план','open-plan',true)],
+    training: [status('План подтверждён'), 'Готовится команда',
+      'Коуч готовится к работе. Задача «' + taskTitle() + '» ждёт подготовки автора и редактора.',
+      button('Открыть задачу','open-task',true) + button('Посмотреть подготовку','open-training')],
+    writing: [status('В работе','wait'), 'Автор готовит результат',
+      'Редактор проверит результат по критериям плана.',button('Открыть задачу','open-task',true)],
+    done: [status('Принято студией'), 'Первый результат готов',
+      (reportTask ? 'Отчёт по задаче принят студией.' : 'Пять биографий приняты студией.') + ' Откройте отчёт или файл в «Работе».',
+      button('Открыть результат','open-task',true) + button('К артефактам','open-work')]
+  };
+  const actual = phase === 'created' && $('#offline').checked ? cards.blocked : cards[phase];
+  return '<section class="card' + (fresh ? ' fresh' : '') + '">' + actual[0] + '<h2>' + actual[1] + '</h2><p class="muted">' + actual[2] + '</p>' +
+    (actual[3] ? '<div class="actions">' + actual[3] + '</div>' : '') + '</section>' +
+    (gitOffer ? '<section class="card"><h2>В папке есть репозиторий Git</h2><p class="muted">Можно выбрать ветку доставки сейчас или вернуться к настройкам позже.</p><div class="actions">' +
+      button('Подключить Git','git') + button('Позже','later') + '</div></section>' : '') +
+    (phase === 'done' ? '<section class="card"><h2>Файл проекта</h2><code class="path">' + taskFile() + '</code><div class="actions">' + button('Открыть файл','open-file') + '</div></section>' : '') +
+    '<p class="app-status muted" role="status" id="app-status">' + (fresh ? (phase === 'approval' ? 'Новая версия плана доступна в «Сегодня».' : phase === 'done' ? 'Результат доступен в «Работе».' : '') : '') + '</p>';
+}
+
+function render(fresh = false) {
+  const name = escape(studio?.name);
+  $('#crumb').textContent = routes[page];
+  document.querySelectorAll('[data-needs-studio]').forEach(control => { control.hidden = !studio; });
+  document.querySelectorAll('nav [data-route]').forEach(control => {
+    if (control.dataset.route === page) control.setAttribute('aria-current','page');
+    else control.removeAttribute('aria-current');
+  });
+  let contents;
+  if (!studio) {
+    const pending = mayContinue();
+    contents = '<h1 tabindex="-1">' + routes[page] + '</h1><div class="hero"><section class="hero-copy"><h2>' +
+      (pending ? 'Продолжите создание студии' : 'Создайте первую студию') + '</h2><p class="muted">' +
+      (pending ? 'Черновик сохранён в этом приложении.' : 'Опишите проект и первую задачу. Директор предложит команду и план. Вы решите, когда начинать работу.') +
+      '</p><div class="actions">' + button(pending ? 'Продолжить создание' : 'Создать студию','open-wizard',true) + button('Импортировать','import') +
+      '</div></section>' + guide + '</div>';
+  } else if (['today','studios'].includes(page)) {
+    contents = '<header class="studio-head"><h1 tabindex="-1">' + routes[page] + '</h1></header><section class="card"><h2>' +
+      (page === 'today' && phase === 'approval' ? 'План ждёт решения' : name) + '</h2><p class="muted">' +
+      (page === 'today' && phase !== 'approval' ? 'Сейчас открытых решений нет.' : name) + '</p><div class="actions">' +
+      (page === 'today' && phase === 'approval' ? button('Посмотреть план','open-plan',true) : button('Открыть студию','open-overview',true)) +
+      '</div></section>';
+  } else if (page === 'overview') {
+    contents = '<header class="studio-head"><p class="muted">' + name + '</p><h1 tabindex="-1">Обзор студии</h1></header>' +
+      '<div class="workspace"><div class="stack">' + overviewCard(fresh) + '</div><section class="card"><h2>Работа</h2>' +
+      (['training','writing','done'].includes(phase) ? '<p>' + taskTitle() + '</p><div class="actions">' + button('Открыть задачу','open-task') + '</div>' :
+        '<p class="muted">Первые задачи появятся после согласования плана.</p>') +
+      (phase !== 'done' ? '<div class="list-row"><p class="muted">Результатов проекта пока нет.</p></div>' : '') + '</section></div>';
+  } else {
+    contents = '<header class="studio-head"><p class="muted">' + name + ' · Работа</p><h1 tabindex="-1">Артефакты</h1></header><section class="card">' +
+      (phase === 'done' ? '<h2>' + taskTitle() + '</h2><code class="path">' + taskFile() + '</code><div class="actions">' +
+        button('Открыть файл','open-file',true) + button('Открыть задачу','open-task') + '</div>' :
+        '<h2>Результатов проекта пока нет</h2><p class="muted">Здесь появятся отчёты и файлы завершённых задач.</p>') + '</section>';
+  }
+  $('#screen').innerHTML = contents;
+}
+function displayDetail(title, content, actions = button('Готово','close-detail',true)) {
+  if (!detail.open) {
+    lastTrigger = document.activeElement;
+    detail.showModal();
+  }
+  $('#detail-title').textContent = title;
+  const body = $('#detail-content');
+  body.innerHTML = content;
+  $('#detail-actions').innerHTML = actions;
+  body.tabIndex = -1;
+  body.focus();
+}
+function setPhase(next) {
+  const focus = document.activeElement?.dataset?.action;
+  phase = next;
+  render(['approval','training','done'].includes(next));
+  if (!detail.open && !wizard.open && (focus || document.activeElement === document.body)) {
+    const target = focus && document.querySelector('[data-action="' + focus + '"]');
+    if (target) target.focus();
+    else focusHeading();
+  }
+}
+function advanceAfter(next, time) {
+  clearTimeout(timer);
+  const version = clockVersion;
+  timer = setTimeout(() => {
+    if (version !== clockVersion) return;
+    setPhase(next);
+    if (next === 'writing') advanceAfter('done',2200);
+  },time);
+}
+function makePlan() {
+  detail.close();
+  navigate('overview');
+  setPhase('planning');
+  advanceAfter('approval',950);
+}
+function provider() {
+  const label = escape(form.elements.runtime.value);
+  const offline = $('#offline').checked;
+  const providerStatus = status(offline ? 'Требуется подключение' : 'Подключение готово',offline ? 'warn' : '');
+  if ($('#provider-status').innerHTML !== providerStatus) $('#provider-status').innerHTML = providerStatus;
+  $('#provider-help').textContent = offline ?
+    form.elements.runtime.value + ' не найден. Когда подключение заработает, в обзоре можно будет подготовить план.' : 'Вход подтверждён.';
+  const values = [label, escape(form.elements.model.value), escape(form.elements.effort.value)].filter(Boolean);
+  if (values.length === 1) values.push('модель и усилие по умолчанию у провайдера');
+  else if (!form.elements.model.value) values.splice(1,0,'модель по умолчанию');
+  else if (!form.elements.effort.value) values.push('усилие по умолчанию');
+  $('#effective-model').innerHTML = values.join(' · ');
+  if (step === 2) $('#forward').textContent = offline ? 'Создать студию без подключения' : 'Создать студию';
+}
+function folder() {
+  const existing = form.elements.folder.value === 'existing';
+  $('#new-folder').hidden = existing;
+  $('#existing-git').hidden = !existing;
+  $('#root-label').textContent = existing ? 'Папка проекта' : 'Родительская папка';
+}
+function reportError(message, field) {
+  $('#form-error').hidden = !message;
+  $('#form-error').textContent = message;
+  form.querySelectorAll('[aria-invalid=true]').forEach(input => input.removeAttribute('aria-invalid'));
+  if (field) {
+    field.setAttribute('aria-invalid','true');
+    (field.readOnly ? $('#choose-folder') : field).focus();
+  }
+}
+function showStep(index) {
+  step = index;
+  wizard.querySelectorAll('[data-step]').forEach(item => {
+    item.hidden = Number(item.dataset.step) !== step;
+    item.classList.remove('enter');
+  });
+  wizard.querySelectorAll('.progress li').forEach((item,i) => {
+    if (i === step) item.setAttribute('aria-current','step');
+    else item.removeAttribute('aria-current');
+  });
+  $('#back').hidden = step === 0;
+  $('#forward').textContent = ['К папке проекта','К подключению','Создать студию'][step];
+  provider();
+  folder();
+  reportError('');
+  const current = wizard.querySelector('[data-step="' + step + '"]');
+  current.classList.add('enter');
+  current.querySelector('h2').focus();
+  wizard.querySelector('.dialog-body').scrollTop = 0;
+}
+
+form.addEventListener('input', () => { provider(); writeDraft(); });
+form.addEventListener('change', event => {
+  if (event.target.name === 'folder') { form.elements.root.value = ''; folder(); }
+  writeDraft();
+});
+form.addEventListener('submit', event => {
+  event.preventDefault();
+  const fields = form.elements;
+  if (step === 0) {
+    if (!fields.name.value.trim()) return reportError('Укажите название студии.',fields.name);
+    if (!fields.brief.value.trim()) return reportError('Опишите, чем будет заниматься студия.',fields.brief);
+  }
+  if (step === 1) {
+    if (!fields.root.value) return reportError('Выберите рабочую папку.',fields.root);
+    if (fields.folder.value === 'new' && !fields.folderName.value.trim()) return reportError('Укажите имя новой папки.',fields.folderName);
+  }
+  if (step < 2) { showStep(step + 1); writeDraft(); return; }
+  studio = { ...draftData().fields };
+  reportTask = studio.first && studio.first !== sample.first ? studio.first : '';
+  gitOffer = studio.folder === 'existing' && fields.offerGit.checked;
+  clearDraft();
+  wizard.close('created');
+  navigate('overview');
+});
+$('#back').addEventListener('click', () => { showStep(step - 1); writeDraft(); });
+$('#save').addEventListener('click', () => { writeDraft(); wizard.close(); });
+$('#fill-example').addEventListener('click', () => {
+  for (const [field,value] of Object.entries(sample)) form.elements[field].value = value;
+  if (!form.elements.folderName.value) form.elements.folderName.value = 'Рассказы';
+  reportError('');
+  writeDraft();
+  form.elements.name.focus();
+});
+$('#choose-folder').addEventListener('click', () => displayDetail('Выберите папку',
+  '<h2>Папка для примера</h2><p class="muted">В приложении здесь откроется системный диалог выбора папки.</p><code class="path">' +
+  (form.elements.folder.value === 'new' ? '/Проекты' : '/Проекты/Рассказы') + '</code>',
+  button('Отмена','close-detail') + button('Выбрать папку','pick-folder',true)));
+$('#check-provider').addEventListener('click', () => {
+  $('#provider-status').innerHTML = status('Проверяем подключение…','wait');
+  const version = clockVersion;
+  setTimeout(() => { if (version === clockVersion && wizard.open) provider(); },500);
+});
+wizard.addEventListener('cancel', () => writeDraft());
+wizard.addEventListener('close', () => {
+  if (wizard.returnValue === 'created') return;
+  navigate(page);
+  document.querySelector('[data-action="open-wizard"]')?.focus();
+});
+detail.addEventListener('close', () => {
+  if (lastTrigger?.isConnected && !detail.open) lastTrigger.focus();
+});
+$('#offline').addEventListener('change', () => {
+  provider();
+  render();
+});
+$('#reset').addEventListener('click', () => {
+  clockVersion++;
+  clearTimeout(timer);
+  detail.close();
+  wizard.close('created');
+  form.reset();
+  step = 0; studio = null; phase = 'created'; revision = 1; feedback = ''; reportTask = ''; gitOffer = false;
+  $('#offline').checked = false;
+  clearDraft();
+  navigate('today');
+});
+
+function deal(action) {
+  switch (action) {
+    case 'open-wizard':
+      restoreDraft();
+      wizard.returnValue = '';
+      wizard.showModal();
+      showStep(step);
+      break;
+    case 'import':
+      displayDetail('Импортировать','<h2>Выберите источник</h2><p class="muted">В приложении можно открыть файл Hearth или проверить папку прежней Hearth перед переносом.</p>');
+      break;
+    case 'close-detail':
+      detail.close();
+      break;
+    case 'pick-folder':
+      form.elements.root.value = form.elements.folder.value === 'new' ? '/Проекты' : '/Проекты/Рассказы';
+      reportError('');
+      writeDraft();
+      detail.close();
+      break;
+    case 'open-overview':
+      navigate('overview');
+      break;
+    case 'open-work':
+      navigate('work');
+      break;
+    case 'plan':
+      makePlan();
+      break;
+    case 'settings':
+      displayDetail('Настройки приложения','<h2>Подключения</h2><p class="muted">При установке или входе в Codex либо Claude Code приложение проверит подключение снова. Для примера можно восстановить подключение здесь.</p>',button('Восстановить в макете','reconnect',true));
+      break;
+    case 'recheck':
+      $('#app-status').textContent = $('#offline').checked ? 'Подключение по-прежнему недоступно.' : 'Подключение готово.';
+      break;
+    case 'reconnect':
+      $('#offline').checked = false;
+      detail.close();
+      navigate('overview');
+      break;
+    case 'open-plan':
+      displayDetail('План первого спринта',
+        status('Требуется согласование · версия '+ revision,'warn') +
+        '<h2>' + taskTitle() + '</h2><p class="muted">Автор готовит результат. Редактор проверяет его по критериям. Студия принимает рабочую задачу и отправляет вам сводку спринта.</p>' +
+        '<div class="list-row"><strong>Автор · исполнение</strong><small class="muted">Подготовка после согласования</small></div>' +
+        '<div class="list-row"><strong>Редактор · проверка</strong><small class="muted">Подготовка после согласования</small></div>' +
+        '<div class="list-row"><strong>Критерии задачи</strong><small class="muted">' + (reportTask ? 'Готов отчёт с проверенным результатом.' : 'Пять биографий с мотивом и ролью в сюжете.') + '</small></div>' +
+        (feedback ? '<p class="muted">Комментарий к предыдущей версии · '+escape(feedback)+'</p>' : ''),
+        button('Вернуть на доработку','revise') + button('Подтвердить и запустить','approve',true));
+      break;
+    case 'revise':
+      displayDetail('Вернуть на доработку','<label class="field"><span>Что изменить в плане?</span><textarea id="revision-feedback"></textarea></label><p id="revision-error" class="error" role="alert"></p>',
+        button('Назад к плану','open-plan') + button('Отправить на доработку','send-revision',true));
+      break;
+    case 'send-revision':
+      feedback = $('#revision-feedback').value.trim();
+      if (!feedback) { $('#revision-error').textContent = 'Напишите, что нужно изменить.'; $('#revision-feedback').focus(); break; }
+      revision++;
+      makePlan();
+      break;
+    case 'approve':
+      detail.close();
+      navigate('overview');
+      setPhase('training');
+      advanceAfter('writing',4800);
+      break;
+    case 'open-task':
+      displayDetail('Карточка задачи','<h2>' + taskTitle() + '</h2><p class="muted">' +
+        (phase === 'done' ? 'Ревью завершено. Студия приняла результат.' : phase === 'training' ? 'Задача ждёт подготовки автора и редактора.' : 'Автор готовит результат. Следующий шаг — ревью редактора.') +
+        '</p>' + (phase === 'done' ? '<code class="path">' + taskFile() + '</code>' : ''),
+        phase === 'done' ? button('Открыть файл','open-file',true) : undefined);
+      break;
+    case 'open-training':
+      displayDetail('Подготовка команды','<h2>Роль и упражнение</h2><p class="muted">Коуч подбирает материалы и готовит упражнение. Директор проверяет упражнение. После проверки связанные задачи смогут запуститься.</p>');
+      break;
+    case 'open-file':
+      displayDetail(taskFile(),'<h2>' + (reportTask ? 'Первый отчёт' : 'Биографии персонажей') + '</h2><p class="muted">Пример содержимого файла</p><div class="report-preview">' +
+        (reportTask ? '<strong>Результат задачи</strong><p>' + taskTitle() + '</p>' :
+          '<strong>Ира · инженер станции</strong><p>Хочет запустить передатчик и вернуть связь с экипажем. Опасается, что голос в эфире принадлежит ей самой.</p>') +
+        '</div>');
+      break;
+    case 'git':
+      displayDetail('Подключить Git','<p>Ветка доставки · <code>hearth-studio/delivery</code></p><p class="muted">В приложении здесь можно выбрать и подтвердить ветку.</p>',button('Позже','later') + button('Подтвердить','later',true));
+      break;
+    case 'later':
+      detail.close();
+      gitOffer = false;
+      navigate('overview');
+      break;
+  }
+}
+document.addEventListener('click', event => {
+  const route = event.target.closest('[data-route]');
+  if (route) { navigate(route.dataset.route); return; }
+  const close = event.target.closest('[data-close]');
+  if (close) {
+    if (close.dataset.close === 'wizard') writeDraft();
+    $('#' + close.dataset.close).close();
+    return;
+  }
+  const action = event.target.closest('[data-action]');
+  if (action) deal(action.dataset.action);
+});
+render();
+</script>
+</html>
