@@ -56,6 +56,17 @@ test("only exposes supported runtime availability probes", async () => {
   await assert.rejects(dispatch("inspect", []), /данны/i);
 });
 
+test("copies only the stored task ID from the selected studio through the native clipboard", async () => {
+  const copied = [];
+  const dispatch = router({
+    snapshot: () => ({studios: [{id:"a"}, {id:"b"}], tasks: [{id:"full-id-123", studioId:"a"}]}),
+  }, {copyTaskId:id=>copied.push(id)});
+  await assert.rejects(dispatch("copyTaskId",{studioId:"b",taskId:"full-id-123"}),/задач/i);
+  await assert.rejects(dispatch("copyTaskId",{studioId:"a",taskId:"missing"}),/задач/i);
+  assert.equal(await dispatch("copyTaskId",{studioId:"a",taskId:"full-id-123",text:"ignored"}),true);
+  assert.deepEqual(copied,["full-id-123"]);
+});
+
 test("routes approved workflow commands and only opens a studio's recorded artifact", async (t) => {
   await mkdir(temp, { recursive: true });
   const root = await mkdtemp(join(temp, "bridge-workflow-"));

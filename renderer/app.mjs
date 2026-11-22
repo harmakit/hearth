@@ -13,6 +13,7 @@ import { createModelCatalogEditor } from './model-catalog-editor.mjs';
 import { renderWorkspaceHome } from './workspace-view.mjs';
 import { initialWorkspaceView,renderToday,todayItems } from './today-view.mjs';
 import { progressMark,stageMark } from './presentation.mjs';
+import { taskRecovery } from './task-recovery.mjs';
 import { readStudioDraft,writeStudioDraft,clearStudioDraft } from './studio-draft.mjs';
 import { coachTitle, parseSkillTopics, pendingDependencies, renderSkillLibrary, renderSkillPreview, renderTrainingDetails, roleReadiness, skillMinStars, skillStarLabel } from './coach-view.mjs';
 import { debtPolicyFields, debtPolicyFor, debtPolicyHint, improvementsHelp, renderDebtSettings } from './debt-view.mjs';
@@ -484,6 +485,9 @@ function overview() {
   const decision = open.toSorted((a,b)=>Number(blocking(b))-Number(blocking(a)) || String(a.createdAt??'9999').localeCompare(String(b.createdAt??'9999')))[0];
   const currentWork = all.filter(task => task.status !== 'cancelled' &&
     (task.status !== 'completed' || (task.workflowManaged && task.stage !== 'done')));
+  const failedTask=(decision?.kind==='error'&&all.find(task=>task.id===decision.taskId&&task.status==='failed'))
+    ||(!decision&&all.find(task=>task.status==='failed'));
+  const failure=failedTask?taskRecoveryBlock(failedTask):'';
   const last = all.find(task => task.status === 'completed' && (!task.stage || task.stage === 'done'));
   const rooms = buildRooms({ ...current, agents: activeRoster(current) });
   const workCount = all.filter(task => ['running', 'queued'].includes(task.status)).length;
@@ -507,12 +511,14 @@ function overview() {
   const intro = canInitialize ? copy('<p class="muted">Нажмите кнопку ниже. Директор подготовит команду и план по вашей первой задаче. Работа по плану начнётся после вашего согласования.</p>')
     : current.lifecycle === 'planning' ? copy('<p class="muted">Когда план будет готов, он появится здесь и во входящих.</p>') : '';
   const activity = current.scheduleWaiting ? copy('Новые задачи запустятся в рабочее время студии.') :
+    current.lifecycle==='idle'&&failedTask ? copy('Продолжение ждёт решения по задаче.') :
     copySystem(current.activity) || (current.lifecycle === 'planning' ? copy('Директор готовит предложение по проекту.') : '');
   return heading(copy('Обзор студии'), current.name, button(copy('Связь с командой'), 'data-open="messages"', true) + (canInitialize ? '' : button(copy('Новая задача'), 'data-open="task"')) + runButtons) +
     copy`<div class="split"><div class="stack">
       ${current.lifecycle || activity || pendingPlan ? copy`<section class="panel padded stack compact">
         <div class="row"><h2>${canInitialize ? copy('Начало работы') : copy('Студия')}</h2>${current.scheduleWaiting ? badge(copy('Ждёт рабочего времени'), 'warn') :
           manuallyPaused ? badge(copy('На паузе'), 'warn') :
+          current.lifecycle==='idle'&&failedTask ? badge(copy('Требуется внимание'),'attention') :
           studioStatuses[current.lifecycle] ? badge(...studioStatuses[current.lifecycle]) : ''}</div>
         ${intro}${activity ? `<p class="activity" role="status">${safe(activity)}</p>` : ''}
         ${sprint ? progressMark(sprintTasks.filter(t=>t.stage==='done').length,sprintTasks.length) : ''}
@@ -522,11 +528,11 @@ function overview() {
           ${unavailable?button(copy('Настройки приложения'),'data-view="app-settings"',true):''}
           ${pendingPlan ? actionFor(copy('Посмотреть план'), 'plan', pendingPlan.id, false) : activePlan ? actionFor(copy('Открыть план'), 'plan', activePlan.id) : ''}</div>
       </section>` : ''}
-      ${decision ? copy`<article class="panel padded decision">
+      ${failure || (decision ? copy`<article class="panel padded decision stack compact">
         <div class="row">${badge(decision.kind === 'acceptance' ? copy('На приёмке') : decision.kind === 'question' ? copy('Нужно решение') : copy('Требуется внимание'), 'attention')}<small>${open.length} открыто</small></div>
         <h2>${safe(inboxHeading(decision))}</h2><p class="clamp">${safe(inboxDetail(decision))}</p>
         <div>${actionFor(decision.kind === 'reconcile' ? copy('Посмотреть прерванный шаг') : copy('Открыть во входящих'), 'inbox', decision.id, false)}</div>
-      </article>` : ''}
+      </article>` : '')}
       <section class="stack compact"><div class="row"><h2>Последний отчёт</h2>${button(copy('Все артефакты'), 'data-work-pane="artifacts"', true)}</div>
         ${last ? `<article class="panel report">
           <div class="excerpt">${safe(last.summary || copy('Результат сохранён в задаче.'))}</div>
@@ -546,6 +552,40 @@ function overview() {
 function taskRow(task) {
   const mark=task.status==='running'?stageMark('in_progress',copy('В работе')):status(task);
   return `<button type="button" class="list-row" data-task="${safe(task.id)}"><span><strong>${safe(task.title)}</strong><small>${safe(nameFor(taskAgent(task)))}${task.kind === 'debt' ? copy(' · Улучшение') : ''}</small></span>${mark}</button>`;
+}
+
+function taskRecoveryBlock(task) {
+  const current=studio();
+  const recovery=taskRecovery(task,current,studioRows('attempts'),entries());
+  if(!recovery)return '';
+  const {kind,reason,action}=recovery;
+  const next = {
+    resume: task.training?.bootstrap ? copy('Возобновите студию, затем повторите подготовку коуча из задачи.')
+      : copy('Возобновите студию, чтобы продолжить работу.'),
+    retry: kind==='training' ? copy('Повтор запустит упражнение и проверку. Зависимые задачи ждут успешной подготовки.')
+      : copy('Повтор запустит задачу снова. Результат появится в истории запусков.'),
+    checks: copy('Откройте результаты проверок. По ним видно, какую проверку нужно исправить.'),
+    connection: copy('Проверьте вход в используемый провайдер, затем повторите запуск.'),
+    project: copy('Подключите папку проекта в настройках студии.'),
+    worktree: copy('Перед повторным запуском проверьте ветку и изменения в рабочей копии.'),
+    message: copy('Передайте причину директору, чтобы он определил, как продолжить задачу.'),
+  };
+  const buttons={
+    resume:()=>actionFor(copy(current.lifecycle==='error'?'Повторить шаг':'Возобновить студию'),'run-action','resume',false),
+    retry:()=>actionFor(kind==='training'&&task.training?.bootstrap?copy('Повторить подготовку коуча'):copy('Повторить запуск'),'retry-from-inbox',task.id,false),
+    checks:()=>actionFor(copy('Открыть результаты проверок'),'task-check-results',task.id,false),
+    connection:()=>button(copy('Настройки приложения'),'data-error-settings',true),
+    project:()=>actionFor(copy('Настройки студии'),'project-settings',current.id,false),
+    worktree:()=>actionFor(copy('Сверить рабочее дерево'),'review-worktree',task.id,false),
+    message:()=>actionFor(copy('Написать директору'),'message-note','',false),
+  };
+  const summary=kind==='training'&&task.training?.bootstrap&&task.failedReviews>=3 ?
+    copy('Директор вернул подготовку коуча на доработку.') : reason;
+  return copy`<section class="task-recovery stack compact" aria-label="Следующий шаг">
+    <h3>Следующий шаг</h3>${summary?plain(summary):''}
+    ${reason&&summary!==reason?copy`<details class="advanced" data-section="failure-reason"><summary>Замечания директора</summary>${plain(reason)}</details>`:''}
+    ${action?`<p>${safe(next[action])}</p><div class="actions">${buttons[action]()}</div>`:''}
+  </section>`;
 }
 
 function archiveDetails(id) {
@@ -685,18 +725,21 @@ function appSettings() {
     const info = providerState[id];
     const checking = inspecting.has(id);
     const detail = info ? [info.version, info.detail].filter(Boolean).join(' · ') : '';
-    return copy`<article class="panel padded stack compact"><div class="row"><h3>${label}</h3>
+    return copy`<article class="panel provider-card"><div class="row"><h3>${label}</h3>
       ${providerBadge(id)}</div>
+      <div class="stack compact provider-card-body">
       ${detail ? `<p class="muted">${safe(detail)}</p>` : ''}
       ${info?.models?.length ? copy`<p class="muted">Моделей в каталоге: ${info.models.length}</p>` : ''}
       ${info?.authenticated && !info?.models?.length ? copy('<p class="muted">Подключение не передало каталог. Можно использовать модель по умолчанию или указать идентификатор.</p>') : ''}
+      </div><div class="stack compact provider-card-actions">
       <label class="checkbox-field"><input type="checkbox" data-provider-enabled="${id}"${info?.enabled !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Разрешить запуски через ${label}</span></label>
       <div>${button(checking ? copy('Проверяем…') : copy('Проверить подключение'), `data-inspect="${id}"${checking ? ' disabled' : ''}`, true)}</div>
+      </div>
     </article>`;
   }).join('');
   const theme = document.documentElement.dataset.theme ?? 'system';
   return heading(ui('app-settings'), ui('general')) +
-    `<label class="field"><span>${ui('language')}</span><select data-settings-locale>${Object.entries(localeNames).map(([id,label])=>option(id,label,state.appLocale ?? 'en')).join('')}</select></label>` +
+    `<label class="field app-settings-locale"><span>${ui('language')}</span><select data-settings-locale>${Object.entries(localeNames).map(([id,label])=>option(id,label,state.appLocale ?? 'en')).join('')}</select></label>` +
     copy`<div class="stack settings"><section class="stack compact"><h2>Подключения</h2><div class="columns">${providers}</div></section>
       <section class="stack compact"><h2>Модели приложения</h2><div class="panel padded stack compact">
         ${rowAction(copy('Политика по умолчанию'), state.modelPolicy?.configured
@@ -1949,6 +1992,7 @@ function openTask(task, present) {
   const more = count=>count>limit ? actionFor(ui('more')+' · '+(count-limit),'history-more',latest.id) : '';
   const eventNames = { created: copy('Создана задача'), 'attempt-start': copy('Начат запуск'), 'attempt-end': copy('Запуск завершён'), message: copy('Сообщение'), evidence: copy('Сохранено доказательство') };
   const git = latest.gitDelivery;
+  const recovery=taskRecoveryBlock(latest);
   const importedGitCheck = latest.importedGitCheck;
   const links = (latest.links ?? []).filter(row => row.type !== 'blocks');
   const related = (id, label) => {
@@ -1960,14 +2004,14 @@ function openTask(task, present) {
   (present ?? dialogTo)(latest.title, `<div class="row"><div class="actions">${needsWorktreeReview ? badge(copy('Ждёт сверки рабочего дерева'), 'warn') : status(latest)}
     ${latest.kind === 'debt' ? badge(copy('Улучшение')) : ''}</div><span class="muted">${safe(nameFor(taskAgent(latest)))}</span></div>` +
     (epic ? `<div class="actions">${actionFor(copy('К эпику'), 'epic-link', epic.id)}<span class="muted">${safe(epic.title)}</span></div>` : '') +
-    copy`<div class="owner-meta"><button type="button" class="text-button" title="${safe(latest.id)}" data-copy-id="${safe(latest.id)}">${safe(latest.legacyId || latest.id.slice(0,8))}</button> · ${safe(latest.priority ?? '—')} · ${safe(latest.points ?? '—')} б.</div><div class="actions owner-links">`+
+    copy`<div class="owner-meta"><button type="button" class="text-button" aria-label="Скопировать ID задачи" title="${safe(latest.id)}" data-copy-id="${safe(latest.id)}">${safe(latest.legacyId || latest.id.slice(0,8))}</button> · ${safe(latest.priority ?? '—')} · ${safe(latest.points ?? '—')} б.</div>`+recovery+'<div class="actions owner-links">'+
     ['story','sprint','meeting','agent'].flatMap(kind=>{
       const objects=kind==='agent' ? current.agents : studioRows({story:'stories',sprint:'sprints',meeting:'meetings'}[kind]);
       return objects.filter(o=>kind==='meeting' ? o.id===latest.fromMeetingId || o.taskIds?.includes(latest.id) :
         kind==='agent' ? [latest.agentId,latest.reviewerId].includes(o.id) : latest[kind+'Id']===o.id)
         .map(o=>actionFor(kind==='agent' ? nameFor(o) : o.title,'owner-'+kind,o.id));
     }).join('')+'</div>'+
-    block(copy('Постановка задачи'), latest.prompt) + block(copy('Критерии'), listText(latest.criteria)) + block(copy('Ошибка'), latest.error) +
+    block(copy('Постановка задачи'), latest.prompt) + block(copy('Критерии'), listText(latest.criteria)) + (recovery?'':block(copy('Ошибка'), latest.error)) +
     renderEvidence(studioRows('evidence').filter(row=>latest.attachmentIds?.includes(row.id)))+
     renderTrainingDetails(latest, studio(), allTasks) +
     prerequisiteBlock('task', latest.id) +
@@ -1995,13 +2039,13 @@ function openTask(task, present) {
       `<li><strong>${safe(row.author === 'owner' ? copy('Владелец') : nameFor(current.agents.find(a => a.id === row.agentId)))}</strong> · ${safe(studioDate(row.createdAt))}${plain(row.text)}</li>`).join('')}</ul>${more(facts.messages.length)}</details>` : '') +
     (facts.history.length ? copy`<details class="advanced" data-section="history"><summary>Журнал · ${facts.history.length}</summary><ul class="legacy-list">${facts.history.slice(0,limit).map(row =>
       `<li>${safe(studioDate(row.at))} · ${eventNames[row.type]}${row.detail ? ' · ' + safe(purposes[row.detail] || statuses[row.detail]?.[0] || row.detail) : ''}</li>`).join('')}</ul>${more(facts.history.length)}</details>` : '') +
-    renderDelivery({
+    '<div data-task-delivery tabindex="-1">'+renderDelivery({
       checks: git?.checks ?? [],
       worktree: studioRows('worktrees').find(row => row.id === git?.worktreeId) ?? (git?.worktreeId ? { branchRef: git.branchRef ?? git.worktreeId, revision: git.revision } : null),
       delivery: git,
       receipts: git?.receipt ? [git.receipt] : [],
       evidence: studioRows('evidence').filter(item => item.taskId === latest.id && item.kind !== 'attachment'),
-    }) +
+    })+'</div>' +
     (attempts.length ? copy`<details class="advanced" data-section="runs"><summary>Запуски · ${attempts.length} · ${facts.usage.total === null ? copy('нет данных о расходе') : copy`${tokenCount(getCopyLocale(),facts.usage.total)} · измерено ${facts.usage.measured} из ${attempts.length}`}</summary><ul class="plan-list">${attempts.slice(0,limit).map(attempt => copy`<li>
       <div class="row"><strong>${safe(purposes[attempt.purpose] || copy('Запуск'))}</strong>${status(attempt)}</div>
       ${attempt.startedAt ? `<small class="muted">${safe(new Date(attempt.startedAt).toLocaleString(getCopyLocale()))}</small>` : ''}
@@ -2017,7 +2061,7 @@ function openTask(task, present) {
       ${latest.artifactPath ? actionFor(copy('Открыть файл'), 'artifact', latest.id, false) +
         actionFor(copy('Показать в папке'), 'reveal-artifact', latest.id) + actionFor(copy('Копировать путь'), 'copy-artifact-path', latest.id) : ''}
       ${entry ? actionFor(entry.kind === 'acceptance' ? copy('Открыть приёмку') : copy('Ответить на вопрос'), 'inbox', entry.id, false) : ''}
-      ${canRun ? needsWorktreeReview ? actionFor(copy('Сверить рабочее дерево'), 'review-worktree', latest.id, false)
+      ${canRun&&!recovery ? needsWorktreeReview ? actionFor(copy('Сверить рабочее дерево'), 'review-worktree', latest.id, false)
         : actionFor(startLabel, 'start-task', latest.id, false) : ''}
       ${canCancel ? actionFor(copy('Отменить задачу'), 'cancel-task', latest.id) : ''}
     </div>`, undefined, undefined, { adjustable: true });
@@ -2849,7 +2893,14 @@ document.addEventListener('click', event => {
     const latest=original?.status==='pending' ? original : plans().findLast(p=>p.status==='pending');
     if(latest)openPlan(latest,draft!==undefined,draft);
   } else if(data.usedMaterial && ['skills','knowledge','customSkills'].includes(data.kind))inspectObject(data.kind,data.usedMaterial);
-  else if (data.copyId!==undefined) void navigator.clipboard.writeText(data.copyId).then(()=>notice(ui('saved'))).catch(e=>notice(e.message,true));
+  else if (data.copyId!==undefined) void bridge.request('copyTaskId',{studioId,taskId:data.copyId})
+    .then(()=>notice(copy('ID задачи скопирован.'))).catch(e=>notice(e.message,true));
+  else if(data.taskCheckResults!==undefined) {
+    if(!dialog.open&&ownerTrail.current?.id!==data.taskCheckResults)inspectObject('task',data.taskCheckResults);
+    const region=(dialog.open?$('#dialog-body'):$('#owner-body')).querySelector('[data-task-delivery]');
+    region?.focus({preventScroll:true});
+    region?.scrollIntoView({block:'start'});
+  }
   else if (data.detachFolder!==undefined) dialogTo(ui('detach'),plain(ui('detachHint')),ui('detach'),()=>bridge.request('detachProject',{studioId:data.detachFolder}));
   else if (data.restoreStudio!==undefined) void workCommand('setStudioArchived',{studioId:data.restoreStudio,archived:false});
   else if(data.archiveDetails!==undefined)archiveDetails(data.archiveDetails);

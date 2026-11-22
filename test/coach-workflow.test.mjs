@@ -51,6 +51,29 @@ test('a blocked coach can retry from its existing task even when only one launch
   assert.equal(reviews,4);
 });
 
+test('resuming the studio keeps the failed coach and its request until an explicit retry', async t=>{
+  let reviews=0;
+  const service=createStudioService({dbPath:':memory:',run:async ({purpose})=>{
+    if(purpose==='task')return json({summary:'Guide',selectedSkillIds:[],guide:'Check the source.'});
+    if(purpose==='training-exercise')return json({summary:'The source lacks a verifiable license.'});
+    return json({pass:++reviews>3,summary:'Director’s rationale'});
+  }});
+  t.after(()=>service.close());
+  const studio=service.createStudio({root:'/project',name:'Resume training',wipLimit:5});
+  const taskId=studio.agents[0].trainingTaskId;
+  service.startTask({taskId});
+  const failed=await until(service.snapshot,s=>s.tasks.some(row=>row.id===taskId&&row.status==='failed')&&s.studios[0].activeAttempts===0);
+  const inboxId=failed.inbox.find(row=>row.taskId===taskId).id;
+  service.setStudioRunning({studioId:studio.id,action:'pause'});
+  service.setStudioRunning({studioId:studio.id,action:'resume'});
+  const resumed=service.snapshot();
+  assert.equal(resumed.inbox.find(row=>row.id===inboxId).status,'open');
+  assert.equal(resumed.tasks.find(row=>row.id===taskId).status,'failed');
+  service.startTask({taskId});
+  await until(service.snapshot,s=>s.tasks.some(row=>row.id===taskId&&row.stage==='done'));
+  assert.equal(service.snapshot().inbox.find(row=>row.id===inboxId).status,'resolved');
+});
+
 test('a manual hire is gated by coach bootstrap, trainee exercise, and Director review', async (t) => {
   const calls = [];
   let review;

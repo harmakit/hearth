@@ -95,8 +95,7 @@ async function launch() {
     const screenshot = async name => {
       const {data} = await rpc('Page.captureScreenshot',{ format:'png' }); await writeFile(join(run, name+'.png'), Buffer.from(data,'base64'));
     };
-    async function setZoom(factor) {
-      assert.ok([1,2].includes(factor));
+    async function mainEval(expression) {
       assert.ok(mainInspector,'No main inspector in the isolated QA process');
       const control=new WebSocket(mainInspector);
       try {
@@ -105,12 +104,15 @@ async function launch() {
           const message=JSON.parse(e.data);
           if(message.id===1)message.error || message.result?.exceptionDetails ? rej(new Error(JSON.stringify(message))) : res(message.result.result.value);
         };});
-        control.send(JSON.stringify({id:1,method:'Runtime.evaluate',params:{expression:
-          `(()=>{const w=process.getBuiltinModule('module').createRequire(process.cwd()+'/qa.cjs')('electron').BrowserWindow.getAllWindows()[0].webContents; w.setZoomFactor(${factor});return w.getZoomFactor();})()`,returnByValue:true}}));
-        assert.equal(await reply,factor);
+        control.send(JSON.stringify({id:1,method:'Runtime.evaluate',params:{expression,returnByValue:true}}));
+        return await reply;
       } finally {control.close();}
     }
-    return { child, evaluate, set, request, click, errors, screenshot, close, rpc, setZoom };
+    async function setZoom(factor) {
+      assert.ok([1,2].includes(factor));
+      assert.equal(await mainEval(`(()=>{const w=process.getBuiltinModule('module').createRequire(process.cwd()+'/qa.cjs')('electron').BrowserWindow.getAllWindows()[0].webContents; w.setZoomFactor(${factor});return w.getZoomFactor();})()`),factor);
+    }
+    return { child, evaluate, set, request, click, errors, screenshot, close, rpc, setZoom,mainEval };
   } catch (error) { await close(); throw error; }
 }
 
@@ -161,6 +163,38 @@ try {
   if(process.env.HEARTH_QA_LOCALE){
     await appLocale(process.env.HEARTH_QA_LOCALE);
     await desktop.click('[data-view="workspace"]');
+  }
+  if(process.env.HEARTH_QA_POLISH==='1'){
+    await desktop.click('[data-view=app-settings]');
+    await choose('#theme-select','dark');
+    assert.ok(await desktop.evaluate(()=>{
+      const cards=[...document.querySelectorAll('.provider-card')];
+      const gap=card=>card.querySelector('h3').getBoundingClientRect().left-card.getBoundingClientRect().left;
+      return cards.length===2&&cards.every(card=>gap(card)>=12)&&Math.abs(cards[0].querySelector('.provider-card-actions').getBoundingClientRect().bottom-cards[1].querySelector('.provider-card-actions').getBoundingClientRect().bottom)<2;
+    }));
+    await shot('provider-spacing');
+    await desktop.click('[data-open=app-model-policy]');
+    assert.match(await desktop.evaluate(()=>getComputedStyle(document.querySelector('#dialog'),'::backdrop').backgroundColor),/rgba?\(8, 12, 18/);
+    await shot('neutral-models-dialog');
+    await desktop.click('#dialog-actions [data-close]');
+    await choose('#theme-select','system');
+    const scratch=await desktop.request('createStudio',{root:editorial,name:'Coach failure QA',brief:'QA-COACH-REJECT',wipLimit:5});
+    const coach=scratch.agents.find(agent=>agent.systemRole==='coach');
+    await desktop.request('startTask',{taskId:coach.trainingTaskId});
+    const blocked=await until(x=>x.tasks.find(t=>t.id===coach.trainingTaskId&&t.status==='failed'),'Coach needs recovery');
+    await until(x=>x.studios.find(s=>s.id===scratch.id)?.activeAttempts===0,'Coach finished');
+    await desktop.request('setStudioRunning',{studioId:scratch.id,action:'pause'});
+    await desktop.click('[data-view=workspace]');await desktop.click('[data-enter-studio="'+scratch.id+'"]');
+    await desktop.click('main [data-task="'+blocked.id+'"]');
+    await desktop.click('#owner-body .task-recovery [data-run-action=resume]');
+    await eventually(()=>desktop.evaluate(()=>Boolean(document.querySelector('#owner-body .task-recovery [data-retry-from-inbox]'))),'Resume retains the retry action');
+    assert.ok((await snap()).inbox.some(item=>item.taskId===blocked.id&&item.status==='open'));
+    await desktop.click('#owner-body .task-recovery summary');
+    await shot('coach-recovery');
+    await desktop.click('[data-owner-close]');
+    await desktop.request('deleteStudio',{studioId:scratch.id,confirmation:scratch.name});
+    await desktop.click('[data-view=workspace]');
+    console.log('PASS нейтральный каталог, отступы подключений, объяснение ошибки и повтор после возобновления');
   }
   if(process.env.HEARTH_QA_ONBOARDING_FIX==='1'){
     await appLocale('ru');
@@ -293,6 +327,18 @@ try {
   await desktop.click('[data-view=work]');
   const original=await until(x=>x.tasks.find(t=>t.studioId===s.id&&t.gitDelivery?.status==='merged'&&!t.packageMembers),'Find work');
   await desktop.click('[data-registry-rows] [data-task="'+original.id+'"]');
+  if(process.env.HEARTH_QA_POLISH==='1'){
+    const clipboardExpr="process.getBuiltinModule('module').createRequire(process.cwd()+'/qa.cjs')('electron').clipboard";
+    assert.equal(await desktop.mainEval(`(()=>{const board=${clipboardExpr};const original=board.writeText;
+      globalThis.restoreQaClipboard=()=>{board.writeText=original;delete globalThis.qaClipboardId;};
+      board.writeText=id=>{globalThis.qaClipboardId=id;};return board.writeText!==original;})()`),true);
+    try {
+      await desktop.click('#owner-body [data-copy-id]');
+      await eventually(()=>desktop.evaluate(()=>document.querySelector('#notice').textContent==='ID задачи скопирован.'),'Native copy feedback');
+      assert.equal(await desktop.mainEval('globalThis.qaClipboardId'),original.id);
+      console.log('PASS кнопка ID передаёт полный идентификатор нативному буферу');
+    } finally {await desktop.mainEval('globalThis.restoreQaClipboard()');}
+  }
   if(process.env.HEARTH_QA_RESIZE==='1'){
     const width=await dragHorizontal('#owner-resize','#owner-inspector',-75);
     await desktop.click('[data-owner-close]');

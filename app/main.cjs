@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, protocol, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, protocol, shell } = require("electron");
 const { existsSync, mkdirSync } = require("node:fs");
 const { access, writeFile } = require("node:fs/promises");
 const { X_OK } = require("node:fs").constants;
@@ -330,6 +330,7 @@ async function start() {
   powerMonitor.on("resume", refreshSchedules);
   const dispatch = createCommandRouter({
     service, selectFolder: pickFolder, inspect: service.inspectProvider, previewImport, findSkills, transfer, protectedRoots,readArtifact:artifacts.read,
+    copyTaskId: id => clipboard.writeText(id),
     restart() {
       launchRequests.relaunch();
       app.quit();

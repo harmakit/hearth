@@ -16,13 +16,14 @@ function response(prompt) {
       : {key:'git-file',title:'Git доставка QA',prompt:'QA-GIT-EDIT',criteria:'Файл проверен',agentKey:'maker',reviewerKey:'reader',deliveryMode:'git',requiresAcceptance:true}],
     files:[],
   };
-  if (prompt.startsWith('Prepare a studio agent')) return { summary:'Учебный план.', selectedSkillIds:[], guide:'Проверьте документ.' };
+  if (prompt.startsWith('Prepare a studio agent')) return { summary:prompt.includes('QA-COACH-REJECT')?'QA-COACH-REJECT':'Учебный план.', selectedSkillIds:[], guide:'Проверьте документ.' };
   if (prompt.startsWith('Practice the studio assignment')) return { summary:'Практика завершена.' };
   if (prompt.includes('QA-CODEX-QUESTION')) {
     return prompt.includes('Подтверждаю QA T-17') ? { summary:'Codex: QA T-17 подтверждён.', artifact:'# QA ответ\n' }
       : { summary:'Codex: черновик.', question:'Подтвердить QA T-17?' };
   }
-  if (prompt.startsWith('Review')) return { pass:true, summary:'Независимая проверка пройдена.' };
+  if (prompt.startsWith('Review')) return prompt.includes('QA-COACH-REJECT')
+    ? {pass:false,summary:'QA: приведите доказательство применимости навыка.'} : {pass:true, summary:'Независимая проверка пройдена.' };
   if (prompt.includes('QA-GIT-EDIT')) {
     if (!process.cwd().includes('/worktrees/')) throw Error('Fixture requires Hearth worktree: ' + process.cwd());
     const child = spawnSync('/usr/bin/sandbox-exec', [...fixtureSandbox(process.cwd()), '/bin/sh', '-c', 'printf "# QA deliverable\\n" > delivery.md']);

@@ -105,10 +105,17 @@ function isRecord(value) {
 }
 
 export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, revealArtifact, copyArtifactPath, openProject,
-  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, protectedRoots = [] }) {
+  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, copyTaskId, protectedRoots = [] }) {
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
+    if (command === "copyTaskId") {
+      const {studioId,taskId}=payload;
+      if(typeof studioId!=="string"||typeof taskId!=="string"||
+        !service.snapshot().tasks.some(task=>task.studioId===studioId&&task.id===taskId))throw new Error("Задача не найдена в студии.");
+      await copyTaskId(taskId);
+      return true;
+    }
     const evidenceActions = { openEvidence, revealEvidence, copyEvidencePath, saveEvidence };
     if (Object.hasOwn(evidenceActions, command)) {
       const record = service.findEvidence(payload);

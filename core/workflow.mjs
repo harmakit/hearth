@@ -434,15 +434,17 @@ export function createWorkflow({
       if (!['paused', 'error'].includes(studio.lifecycle)) return studio;
       studio = transaction(() => {
         const job = studio.workflowJob;
-        if (studio.lifecycle === 'error' && job) putJob(studio, job);
+        const retry = studio.lifecycle === 'error' && job && !hasTaskHold(studioId, job.taskId) ? putJob(studio, job) : null;
         const next = dispatcher.jobs(studioId).find(({ status }) => status === 'queued');
-        if (job?.taskId && !hasTaskHold(studioId, job.taskId)) {
-          for (const item of taskInbox(job.taskId)) {
+        if (retry?.status === 'queued' && retry.taskId) {
+          for (const item of taskInbox(retry.taskId)) {
             if (item.kind === 'error' && item.status === 'open') update('inbox', { ...item, status: 'resolved' });
           }
         }
-        for (const item of list('studio_inbox')) {
-          if (item.studioId === studioId && item.kind === 'error' && item.status === 'open') update('studio_inbox', { ...item, status: 'resolved' });
+        if (retry?.status === 'queued' && !retry.taskId) {
+          for (const item of list('studio_inbox')) {
+            if (item.studioId === studioId && item.kind === 'error' && item.status === 'open') update('studio_inbox', { ...item, status: 'resolved' });
+          }
         }
         const continuing = next || hasDispatchWork(studioId) || hasHeldWorkflow(studioId) || dispatcher.jobs(studioId).some(({ status }) => status === 'reconcile');
         return state(studio, next?.purpose === 'plan' ? 'planning' : continuing ? 'active' : 'idle',
