@@ -1,3 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 const API_ORIGIN = 'https://api.github.com';
 const WEB_ORIGIN = 'https://github.com';
 const DEFAULT_MIN_STARS = 10_000;
@@ -10,6 +12,10 @@ const MAX_BLOB_RESPONSE_BYTES = 256 * 1024;
 const MAX_TREE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_SEARCH_RESPONSE_BYTES = 512 * 1024;
 const REQUEST_TIMEOUT_MS = 8_000;
+const SEARCH_INTERVAL_MS = 6_500;
+const REQUEST_INTERVAL_MS = 250;
+const LOOKUP_BUDGET_MS = 120_000;
+const MAX_RATE_RETRIES = 2;
 const SHA = /^[a-f0-9]{40}$/;
 const REPO_NAME = /^[a-z\d][a-z\d-]{0,38}\/[a-z\d_.-]{1,100}$/i;
 const TOPIC = /^[\p{L}\p{N}][\p{L}\p{M}\p{N}-]*(?: [\p{L}\p{N}][\p{L}\p{M}\p{N}-]*)*$/u;
@@ -156,10 +162,85 @@ function skillTitle(content, path, repo) {
   return (name || heading || path.split('/').at(-2) || repo).slice(0, 120);
 }
 
-export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch } = {}) {
+function retryTime(headers, now, retry) {
+  const after = headers.get('retry-after');
+  const afterTime = /^\d+$/.test(after ?? '') ? now + Number(after) * 1_000 : Date.parse(after ?? '');
+  const reset = headers.get('x-ratelimit-reset');
+  const resetTime = headers.get('x-ratelimit-remaining') === '0' && /^\d+$/.test(reset ?? '')
+    ? Number(reset) * 1_000 + 250 : NaN;
+  const suggested = [afterTime, resetTime].filter(time => Number.isFinite(time) && time >= now && time < 8_640_000_000_000_000);
+  const minimumWait = suggested.length ? Math.max(...suggested) - now : 60_000;
+  return now + minimumWait * 2 ** retry;
+}
+
+function waitForRequest(promise, signal) {
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
+export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Date.now,
+  wait = (ms, signal) => delay(ms, undefined, { signal }),
+} = {}) {
+  let queued = Promise.resolve();
+  let nextRequest = 0;
+  let nextSearch = 0;
+  let cooldown = 0;
+
+  function request(url, limit, signal, deadline) {
+    const search = new URL(url).pathname === '/search/repositories';
+    const pending = queued.then(async () => {
+      for (let retry = 0; retry <= MAX_RATE_RETRIES; retry++) {
+        signal?.throwIfAborted();
+        const time = now();
+        const available = Math.max(nextRequest, search ? nextSearch : 0, cooldown);
+        if (Math.max(time, available) >= deadline) {
+          if (cooldown > time) throw new GitHubReadError('rate limit reached; waiting for GitHub to reset it', true);
+          throw new GitHubReadError('lookup time budget exceeded', true);
+        }
+        if (available > time) await wait(available - time, signal);
+        signal?.throwIfAborted();
+        const started = now();
+        if (started >= deadline) throw new GitHubReadError('lookup time budget exceeded', true);
+        nextRequest = started + REQUEST_INTERVAL_MS;
+        if (search) nextSearch = started + SEARCH_INTERVAL_MS;
+        const timeout = AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, deadline - started));
+        const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+        const response = await fetchImpl(url, {
+          headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+          credentials: 'omit',
+          redirect: 'error',
+          signal: requestSignal,
+        });
+        if (response.ok) return readJson(response, limit, requestSignal);
+        let limited = response.status === 429 || (response.status === 403 &&
+          (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')));
+        if (response.status === 403 && !limited) {
+          const data = await readJson(response, 8_192, requestSignal).catch(() => ({}));
+          limited = typeof data?.message === 'string' && /rate.limit/i.test(data.message);
+        }
+        void response.body?.cancel().catch(() => {});
+        if (limited) {
+          cooldown = Math.max(cooldown, retryTime(response.headers, now(), retry));
+          if (retry === MAX_RATE_RETRIES) throw new GitHubReadError('rate limit reached', true);
+          continue;
+        }
+        if (response.status === 403) throw new GitHubReadError('request blocked (HTTP 403)', true);
+        throw new GitHubReadError(`HTTP ${response.status}`);
+      }
+    });
+    queued = pending.catch(() => {});
+    return waitForRequest(pending, signal);
+  }
+
   return {
     async findSkills({ topics, minStars = DEFAULT_MIN_STARS, signal } = {}) {
       signal?.throwIfAborted();
+      const deadline = now() + LOOKUP_BUDGET_MS;
       const threshold = Number.isSafeInteger(minStars) && minStars >= 0 ? minStars : DEFAULT_MIN_STARS;
       const { safeTopics, ignoredTopics } = normalizeTopics(topics);
       const specificTopics = safeTopics.map(normalizedSearchText).filter(topic => !GENERAL_TOPICS.has(topic.trim()));
@@ -176,25 +257,7 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch } = {}) {
         return { candidates, warnings };
       }
 
-      async function request(url, limit) {
-        const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-        const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-        const response = await fetchImpl(url, {
-          headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
-          credentials: 'omit',
-          redirect: 'error',
-          signal: requestSignal,
-        });
-        if (!response.ok) {
-          void response.body?.cancel().catch(() => {});
-          if (response.status === 429 || response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')) {
-            throw new GitHubReadError('rate limit reached', true);
-          }
-          if (response.status === 403) throw new GitHubReadError('request blocked or rate limited (HTTP 403)', true);
-          throw new GitHubReadError(`HTTP ${response.status}`);
-        }
-        return readJson(response, limit, requestSignal);
-      }
+      const get = (url, limit) => request(url, limit, signal, deadline);
 
       function reportFailure(action, error) {
         signal?.throwIfAborted();
@@ -208,7 +271,7 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch } = {}) {
       queries.push('topic:agent-skills');
       for (const query of queries) {
         try {
-          const search = await request(buildSearchUrl(query, threshold), MAX_SEARCH_RESPONSE_BYTES);
+          const search = await get(buildSearchUrl(query, threshold), MAX_SEARCH_RESPONSE_BYTES);
           if (!Array.isArray(search?.items)) throw new GitHubReadError('invalid repository search results');
           if (search.incomplete_results) {
             const warning = 'GitHub returned incomplete repository search results.';
@@ -238,11 +301,11 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch } = {}) {
         let files;
         let singleSkill;
         try {
-          const head = await request(`${repoUrl}/commits/${encodeURIComponent(repo.default_branch)}`, MAX_SEARCH_RESPONSE_BYTES);
+          const head = await get(`${repoUrl}/commits/${encodeURIComponent(repo.default_branch)}`, MAX_SEARCH_RESPONSE_BYTES);
           const treeSha = head?.commit?.tree?.sha;
           commit = head?.sha;
           if (!SHA.test(commit ?? '') || !SHA.test(treeSha ?? '')) throw new GitHubReadError('invalid commit or tree ID');
-          const tree = await request(`${repoUrl}/git/trees/${treeSha}?recursive=1`, MAX_TREE_RESPONSE_BYTES);
+          const tree = await get(`${repoUrl}/git/trees/${treeSha}?recursive=1`, MAX_TREE_RESPONSE_BYTES);
           if (!Array.isArray(tree?.tree)) throw new GitHubReadError('invalid Git tree');
           if (tree.truncated) warnings.push(`GitHub returned an incomplete Git tree for ${repo.full_name}.`);
           const skillEntries = tree.tree.filter(validSkill);
@@ -259,7 +322,7 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch } = {}) {
         for (const { entry: { path, sha }, relevance: pathMatch } of files) {
           blobRequests++;
           try {
-            const blob = await request(`${repoUrl}/git/blobs/${sha}`, MAX_BLOB_RESPONSE_BYTES);
+            const blob = await get(`${repoUrl}/git/blobs/${sha}`, MAX_BLOB_RESPONSE_BYTES);
             const content = readSkill(blob, sha);
             const title = skillTitle(content, path, repo.full_name);
             if (specificTopics.length && !pathMatch && !(metadataMatch && (singleSkill || path === 'SKILL.md'))

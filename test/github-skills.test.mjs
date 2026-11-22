@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createGitHubSkillFinder } from '../app/github-skills.mjs';
+import { createGitHubSkillFinder as createFinder } from '../app/github-skills.mjs';
+
+function createGitHubSkillFinder(options) {
+  let clock = 0;
+  return createFinder({ now: () => clock, wait: async (ms, signal) => {
+    signal?.throwIfAborted();
+    clock += ms;
+  }, ...options });
+}
 
 const commit = 'a'.repeat(40);
 const tree = 'b'.repeat(40);
@@ -150,13 +158,70 @@ test('stops at the rate limit and surfaces a warning without the response text',
   let requests = 0;
   const finder = createGitHubSkillFinder({ fetchImpl: async () => {
     requests++;
-    return new Response('secret from GitHub', { status: 403, headers: { 'x-ratelimit-remaining': '0' } });
+    return new Response('secret from GitHub', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '3600' } });
   } });
   const result = await finder.findSkills({ topics: ['react', 'typescript'] });
   assert.equal(requests, 1);
   assert.deepEqual(result.candidates, []);
   assert.match(result.warnings.join(' '), /rate limit/i);
   assert.doesNotMatch(result.warnings.join(' '), /secret/);
+});
+
+test('honors a shared GitHub cooldown and retries the same search before sending competing requests', async () => {
+  let clock = 0;
+  const calls = [];
+  const finder = createGitHubSkillFinder({
+    now: () => clock,
+    wait: async ms => { clock += ms; },
+    fetchImpl: async target => {
+      calls.push({url: String(target), time: clock});
+      if (calls.length === 1) return new Response(null, {status: 429, headers: {'retry-after': '12'}});
+      return Response.json({items: []});
+    },
+  });
+  const results = await Promise.all([
+    finder.findSkills({topics: ['writing']}),
+    finder.findSkills({topics: ['editing']}),
+  ]);
+  assert.equal(calls[1].url, calls[0].url);
+  assert.ok(calls[1].time >= 12_000);
+  assert.ok(calls.slice(2).every((call, index) => call.time - calls[index + 1].time >= 6_000));
+  assert.ok(results.every(result => result.warnings.length === 0));
+});
+
+test('keeps the wait shared beyond a single search and does not call GitHub again before reset', async () => {
+  let clock = 0;
+  let requests = 0;
+  const finder = createGitHubSkillFinder({
+    now: () => clock,
+    wait: async ms => { clock += ms; },
+    fetchImpl: async () => {
+      requests++;
+      if (requests === 1) return new Response(null, {status: 403, headers: {'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '3600'}});
+      return Response.json({items: []});
+    },
+  });
+  assert.match((await finder.findSkills()).warnings[0], /rate limit/i);
+  assert.match((await finder.findSkills()).warnings[0], /rate limit/i);
+  assert.equal(requests, 1);
+  clock = 3_601_000;
+  assert.deepEqual(await finder.findSkills(), {candidates: [], warnings: []});
+  assert.equal(requests, 2);
+});
+
+test('waits a full minute for a bare 429 and stops when the next backoff exceeds the lookup budget', async () => {
+  let clock = 0;
+  const timestamps = [];
+  const finder = createGitHubSkillFinder({
+    now: () => clock,
+    wait: async ms => { clock += ms; },
+    fetchImpl: async () => {
+      timestamps.push(clock);
+      return new Response(null, {status: 429});
+    },
+  });
+  assert.match((await finder.findSkills()).warnings[0], /rate limit/i);
+  assert.deepEqual(timestamps,[0,60_000]);
 });
 
 test('distinguishes network failures from empty search results', async () => {
