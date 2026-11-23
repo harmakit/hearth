@@ -1,4 +1,4 @@
-import { access, mkdir, realpath, stat } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, realpath, rename, rm, stat } from "node:fs/promises";
 import { git, hasProjectGitDirectory, requireProjectGit } from "./git-worktrees.mjs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
@@ -77,24 +77,47 @@ async function newProjectFolder(parentPath, requestedName, protectedRoots) {
   }
   const parent = await directory(parentPath);
   const root = await validateLocation(join(parent, name), protectedRoots);
-  for (let dir = parent; ; dir = dirname(dir)) {
-    try {
-      await access(join(dir, '.git'));
-      throw new Error('Выберите место вне существующего Git-репозитория.');
-    } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    if (dirname(dir) === dir) break;
-  }
+  if (await repositoryState(parent) !== "missing") throw new Error('Выберите место вне существующего Git-репозитория.');
   await requireProjectGit(parent);
   await mkdir(root); // Exclusive creation protects pre-existing directories, even empty ones.
   try {
-    await git(root, ['init','--template=','--initial-branch=main','.']);
-    await git(root, ['-c','user.name=Hearth Studio','-c','user.email=studio@hearth.invalid',
-      'commit','--allow-empty','-m','Initialize Hearth project history']);
+    await initializeHistory(root);
     const targetRef = 'refs/heads/hearth-studio/delivery';
     await git(root, ['branch',targetRef.slice('refs/heads/'.length),'HEAD']);
     return {root,targetRef};
   } catch (error) {
     throw new Error('Папка создана, но подготовить Git не удалось. Откройте её как существующую: '+root+' — '+error.message);
+  }
+}
+
+async function repositoryState(root) {
+  for (let dir = root; ; dir = dirname(dir)) {
+    try {
+      await lstat(join(dir, ".git"));
+      return dir === root ? "existing" : "nested";
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (dirname(dir) === dir) return "missing";
+  }
+}
+
+async function initializeHistory(root) {
+  await git(root, ["init", "--template=", "--initial-branch=main", "."]);
+  await git(root, ["-c", "user.name=Hearth Studio", "-c", "user.email=studio@hearth.invalid",
+    "commit", "--allow-empty", "-m", "Initialize Hearth project history"]);
+}
+
+async function initializeExistingFolder(root) {
+  if (await repositoryState(root) !== "missing") throw new Error("В этой папке или выше уже есть Git-репозиторий.");
+  await requireProjectGit(root);
+  const staging = await mkdtemp(join(root, ".hearth-git-"));
+  try {
+    await initializeHistory(staging);
+    if (await repositoryState(root) !== "missing") throw new Error("В этой папке или выше уже есть Git-репозиторий.");
+    await rename(join(staging, ".git"), join(root, ".git"));
+  } finally {
+    await rm(staging, { recursive: true, force: true });
   }
 }
 
@@ -107,6 +130,7 @@ function isRecord(value) {
 export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, revealArtifact, copyArtifactPath, openProject,
   openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, copyTaskId,
   portable, protectedRoots = [] }) {
+  const initializing = new Set();
   async function create(input,prepared){
     await portable?.assertEmptyRecipe(input.root);
     const studio=service.createStudio(input,prepared);
@@ -116,6 +140,25 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
+    if (command === "inspectProjectRepository" || command === "initializeProjectRepository") {
+      const studio = service.snapshot().studios.find(row => row.id === payload.studioId);
+      if (!studio || studio.projectDetached || studio.archivedAt) throw new Error("Подключите доступную папку студии.");
+      const root = await validateProjectRoot(studio.root, protectedRoots);
+      if (command === "inspectProjectRepository") return { state: await repositoryState(root), root };
+      if (payload.root !== root) throw new Error("Папка студии изменилась. Откройте настройки повторно.");
+      if (initializing.has(root)) throw new Error("Git-репозиторий уже создаётся.");
+      initializing.add(root);
+      try {
+        return await service.configureProject({ studioId: studio.id, enabled: true }, async current => {
+          if (await validateProjectRoot(current.root, protectedRoots) !== root) {
+            throw new Error("Папка студии изменилась. Откройте настройки повторно.");
+          }
+          await initializeExistingFolder(root);
+        });
+      } finally {
+        initializing.delete(root);
+      }
+    }
     if (['inspectStudioFolder','openStudioFolder'].includes(command) && portable){
       const root=await validateProjectRoot(payload.root,protectedRoots);
       return command==='inspectStudioFolder'?portable.inspect({root}):portable.open({root,replaceRoot:payload.replaceRoot===true});

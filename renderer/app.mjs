@@ -1063,11 +1063,30 @@ function projectCheckFields(check = {}) {
   </fieldset>`;
 }
 
-function projectGitEditor() {
+async function projectGitEditor() {
   const current = studio();
+  const title = copy('Git и проверки проекта');
+  await loadDialog(title, async isCurrent => {
+    const repository = await bridge.request('inspectProjectRepository', { studioId: current.id });
+    if (!isCurrent()) return;
+    if (repository.state === 'missing') {
+      dialogTo(title, plain(repository.root) + plain(copy('Hearth создаст локальный репозиторий с пустым первым коммитом и подключит его к студии. Существующие файлы останутся на месте.')),
+        copy('Создать локальный репозиторий'), async () => {
+          await bridge.request('initializeProjectRepository', { studioId: current.id, root: repository.root });
+          notice(copy('Локальный репозиторий подключён к студии.'));
+        });
+    } else if (repository.state === 'nested') {
+      dialogTo(title, plain(copy('Эта папка находится внутри Git-репозитория. Чтобы подключить Git, откройте корневую папку репозитория.')));
+    } else {
+      projectGitSettings(current, title);
+    }
+  });
+}
+
+function projectGitSettings(current, title) {
   const git = current.projectGit ?? {};
   const checks = git.profile?.checks ?? [];
-  dialogTo(copy('Git и проверки проекта'),
+  dialogTo(title,
     checkbox(copy('Разрешить Git-доставку для задач студии'), 'enabled', git.enabled) +
     input(copy('Целевая локальная ветка'), 'targetRef', git.targetRef, copy('placeholder="Автоматически создать управляемую ветку"')) +
     copy`<p>Проверки проекта — необязательные команды, например тесты или сборка. Hearth запускает их на изменениях задачи перед слиянием. Если обязательная проверка не проходит, Hearth ждёт исправления.</p>

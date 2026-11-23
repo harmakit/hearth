@@ -640,7 +640,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     return result;
   }
 
-  async function configureProject({ studioId, enabled, targetRef = '', profile }) {
+  async function configureProject({ studioId, enabled, targetRef = '', profile }, initializeRepository) {
     const studio = read('studios', studioId, 'Студия');
     if (enabled && studio.projectDetached) throw new Error('Сначала подключите папку проекта.');
     if (typeof enabled !== 'boolean') throw new Error('Укажите, разрешены ли изменения в Git.');
@@ -650,6 +650,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     if (!prepareTarget || !projectPipeline) throw new Error('Режим Git недоступен.');
     const normalized = normalizeProjectProfile(profile);
     const explicit = typeof targetRef === 'string' && targetRef.trim();
+    await initializeRepository?.(studio);
     const target = await prepareTarget({
       repository: studio.root, targetRef: explicit || `refs/heads/hearth-studio/${studioId}`, create: !explicit,
     });

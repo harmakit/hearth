@@ -1,11 +1,41 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createCommandRouter } from "../app/bridge.mjs";
+import { createGitWorktrees, git } from "../app/git-worktrees.mjs";
+import { createStudioService } from "../core/service.mjs";
 
 const temp = fileURLToPath(new URL("../.tmp", import.meta.url));
+
+test("initializes Git in the stored studio folder without staging existing files", async t => {
+  // This fixture represents a standalone project. The checkout's .tmp is itself inside Git.
+  const fixture=await mkdtemp(join(await realpath(tmpdir()),"bridge-local-git-"));
+  const project=join(fixture,"existing studio");
+  await mkdir(project);
+  const trees=createGitWorktrees({storageDir:join(fixture,"trees"),validateRepository:root=>root===project});
+  const service=createStudioService({dbPath:":memory:",prepareTarget:trees.prepareTarget,projectPipeline:{}});
+  t.after(async()=>{await service.close();await rm(fixture,{recursive:true,force:true});});
+  const studio=service.createStudio({name:"Local project",root:project});
+  await writeFile(join(project,"draft.md"),"Owner draft\n");
+  const dispatch=router(service);
+  assert.deepEqual(await dispatch("inspectProjectRepository",{studioId:studio.id}),{state:"missing",root:project});
+  await assert.rejects(dispatch("initializeProjectRepository",{studioId:studio.id,root:fixture}),/папка/i);
+  const connected=await dispatch("initializeProjectRepository",{studioId:studio.id,root:project});
+  assert.equal(connected.projectGit.enabled,true);
+  assert.equal(await git(project,["ls-files"]), "");
+  assert.equal(await readFile(join(project,"draft.md"),"utf8"),"Owner draft\n");
+  const latest=await git(project,["rev-parse","HEAD"]);
+  assert.equal(await git(project,["rev-parse",connected.projectGit.targetRef]),latest);
+  await assert.rejects(dispatch("initializeProjectRepository",{studioId:studio.id,root:project}),/репозиторий/i);
+  const nested=join(project,"notes");
+  await mkdir(nested);
+  const another=service.createStudio({name:"Nested project",root:nested});
+  assert.equal((await dispatch("inspectProjectRepository",{studioId:another.id})).state,"nested");
+  await assert.rejects(dispatch("initializeProjectRepository",{studioId:another.id,root:nested}),/репозиторий/i);
+});
 
 function router(service, options = {}) {
   return createCommandRouter({ service, ...options });

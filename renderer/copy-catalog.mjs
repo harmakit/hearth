@@ -1,5 +1,9 @@
 // Authored interface strings. Order: English, Spanish, French, Simplified Chinese.
 export const catalogue = {
+  "Создать локальный репозиторий": ["Create local repository","Crear repositorio local","Créer un dépôt local","创建本地仓库"],
+  "Hearth создаст локальный репозиторий с пустым первым коммитом и подключит его к студии. Существующие файлы останутся на месте.": ["Hearth will create a local repository with an empty first commit and connect it to the studio. Existing files stay in place.","Hearth creará un repositorio local con un primer commit vacío y lo conectará al estudio. Los archivos existentes se conservarán.","Hearth créera un dépôt local avec un premier commit vide et le reliera au studio. Les fichiers existants resteront en place.","Hearth 将创建一个包含空初始提交的本地仓库，并将其连接到工作室。现有文件将保留在原处。"],
+  "Эта папка находится внутри Git-репозитория. Чтобы подключить Git, откройте корневую папку репозитория.": ["This folder is inside a Git repository. Open the repository root to connect Git.","Esta carpeta está dentro de un repositorio Git. Abre la carpeta raíz del repositorio para conectar Git.","Ce dossier se trouve dans un dépôt Git. Ouvrez le dossier racine du dépôt pour connecter Git.","此文件夹位于 Git 仓库中。请打开仓库根目录以连接 Git。"],
+  "Локальный репозиторий подключён к студии.": ["Local repository connected to the studio.","Repositorio local conectado al estudio.","Dépôt local relié au studio.","本地仓库已连接到工作室。"],
   "Нужно выбрать, как продолжить": ["Choose how to continue","Elige cómo continuar","Choisissez comment continuer","请选择继续方式"],
   "Сейчас открыта другая копия этой студии.": ["Another copy of this studio is currently open.","Actualmente está abierta otra copia de este estudio.","Une autre copie de ce studio est actuellement ouverte.","目前已打开此工作室的另一份副本。"],
   "Переключить папку": ["Switch folder","Cambiar de carpeta","Changer de dossier","切换文件夹"],

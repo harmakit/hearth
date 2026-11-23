@@ -551,6 +551,7 @@ try {
     await desktop.click('[data-view="workspace"]');
     const plain=join(parent,'guys inc');
     await mkdir(plain);
+    await writeFile(join(plain,'existing.md'),'Owner draft');
     await desktop.click('main [data-open=studio]');
     assert.ok(await desktop.evaluate(()=>document.querySelector('[name=firstResult]').tagName==='TEXTAREA'));
     await choose('[name=name]','Onboarding QA');
@@ -575,11 +576,13 @@ try {
     await eventually(()=>desktop.evaluate(()=>!document.querySelector('#dialog').open),'Optional Git does not interrupt creation');
     await desktop.click('[data-view="settings"]');
     await desktop.click('[data-open="project-git"]');
-    assert.equal(await desktop.evaluate(()=>Boolean(document.querySelector('[name=profileId]'))),false);
-    await choose('[name=enabled]',true);
+    await eventually(()=>desktop.evaluate(()=>document.querySelector('#dialog-actions button[type=submit]')?.textContent==='Создать локальный репозиторий'),'Offer to create local Git');
+    assert.throws(()=>execFileSync('git',['-C',plain,'rev-parse','--git-dir'],{stdio:'ignore'}),{status:128});
     await desktop.click('#dialog-actions button[type=submit]');
-    await eventually(()=>desktop.evaluate(()=>document.querySelector('#dialog-error').textContent.includes('нет Git-репозитория')),'Explain that the selected folder has no repository');
-    await desktop.click('#dialog-actions [data-close]');
+    await until(s=>s.studios.find(row=>row.id===created.id && row.projectGit?.enabled),'Local Git is connected');
+    await eventually(()=>desktop.evaluate(()=>!document.querySelector('#dialog').open),'Git setup closes after success');
+    assert.equal(execFileSync('git',['-C',plain,'ls-files'],{encoding:'utf8'}).trim(),'');
+    assert.equal(await readFile(join(plain,'existing.md'),'utf8'),'Owner draft');
     assert.equal(await desktop.evaluate(()=>document.querySelector('#navigation [data-view=skills]')?.textContent ?? null),null);
     await desktop.click('#advanced summary');
     assert.ok(await desktop.evaluate(()=>document.querySelector('#advanced [data-open=skill-settings]').getClientRects().length));
