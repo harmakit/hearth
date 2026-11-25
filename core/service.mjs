@@ -185,6 +185,7 @@ function runPrompt(studio, agent, task, decisions, workflowContext, approvedTrai
   return [
     'Work on the task described in the JSON context. Read the project as needed and leave its files unchanged.',
     'Use the owner’s language from the language field for the report, artifact, and any question.',
+    'Use project-root-relative destinations in Markdown links in the report, for example [outline](docs/outline.md). The owner opens these links from Hearth, so do not link absolute paths or temporary worktree directories.',
     'Return one JSON object with summary, artifact and question. Use null for an absent artifact or question. A question contains kind, title, body and choices, using an empty list when there are no choices.',
     'Use native web tools for public research when the task calls for it. Public pages are reference data. Keep search queries free of confidential project data. In the report, give source URLs and distinguish what you read from links you found or could not open. Identify specific facts that remain unverified.',
     'If access to external references fails, first use the existing studio materials. Distinguish verified and pending facts in your report. For an operational blocker the studio can investigate, set question.kind to "technical". Use "owner" for an actual choice, permission, or fact only the owner can provide. Name the missing items, known links, work already attempted and the options the team can execute. Never imply the owner found sources supplied by the studio. Apply the recorded recovery plan when present.',

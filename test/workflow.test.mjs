@@ -6,13 +6,23 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createStudioService as createService } from '../core/service.mjs';
-import { planPrompt } from '../core/protocol.mjs';
+import { planPrompt, reviewPrompt } from '../core/protocol.mjs';
 import { productionSnapshot, trainingReply } from './fixtures/training.mjs';
 
 test('planning avoids requiring evidence from a consumer before accepting its dependency', () => {
   const prompt = planPrompt({agents:[],language:'en',brief:'Prepare a shared brief for two authors.'},{kind:'initial'});
   assert.match(prompt,/Use dependsOn for handoffs/);
   assert.match(prompt,/Do not require proof that a dependent task has started or used a result before accepting the prerequisite/);
+  assert.match(prompt,/make delivery criteria checkable on the frozen candidate/);
+});
+
+test('Git candidate reviews use frozen evidence before the branch merge', () => {
+  const studio = { language: 'en' };
+  const task = { deliveryMode: 'git', title: 'Release check', criteria: 'Deliver results in Git' };
+  const prompt = reviewPrompt(studio, task);
+  assert.match(prompt, /Hearth merges this result after a successful review/);
+  assert.match(prompt, /assess Git-delivery criteria using the candidate, its changes and its completed checks/);
+  assert.doesNotMatch(reviewPrompt(studio, { ...task, deliveryMode: undefined }), /frozen candidate/);
 });
 
 function createStudioService({ run, ...settings }) {
@@ -155,6 +165,7 @@ test('initial plan recommends an allowed tuple but executes the owner’s saved 
   assert.deepEqual({ name, roleTitle, role, mode, runtime, model, effort }, { name: 'Мария', roleTitle: 'Главный редактор', role: 'editor', mode: 'fixed', ...fixed });
   const { prompt, ...workerCall } = calls.find(({ purpose }) => purpose === 'task');
   assert.deepEqual(workerCall, { purpose: 'task', ...fixed });
+  assert.match(prompt, /Use project-root-relative destinations in Markdown links in the report/);
   assert.equal(JSON.parse(prompt.split('\n\n').at(-1)).roleTitle, 'Главный редактор');
   const review = calls.find(({ purpose }) => purpose === 'review');
   assert.equal(JSON.parse(review.prompt.split('\n\n').at(-1)).reviewer.roleTitle, 'Рецензент');
