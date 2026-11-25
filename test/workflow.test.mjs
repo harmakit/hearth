@@ -96,8 +96,11 @@ test('a reviewer receives the owner’s saved clarification after a production q
       asked = true;
       return { text: JSON.stringify({ question: 'When is the handoff verified?', summary: 'The draft is ready.' }) };
     }
+    if (purpose === 'director' && JSON.parse(prompt.split('\n\n').at(-1)).task === draft.tasks[0].title) {
+      return { text: JSON.stringify({ action: 'next', taskKey: 'second' }) };
+    }
     const results = {
-      plan: { ...draft, tasks: [{ ...draft.tasks[0], artifactPath: undefined }] },
+      plan: { ...draft, tasks: [{ ...draft.tasks[0], artifactPath: undefined }, draft.tasks[1]] },
       task: { summary: 'The outline is ready.' },
       review: { pass: true, summary: 'The outline meets the clarified criteria.' },
       director: { action: 'finish' },
@@ -115,7 +118,13 @@ test('a reviewer receives the owner’s saved clarification after a production q
   service.answerInbox({ inboxId: question.id, answer });
   await until(service.snapshot, ({ sprints }) => sprints[0]?.status === 'completed');
   const review = calls.find(({ purpose }) => purpose === 'review').prompt;
+  const work = calls.find(({ purpose }) => purpose === 'task').prompt;
   assert.match(review, /Apply saved owner clarifications/);
+  assert.match(review, /Use only this task’s own acceptance criteria to decide pass or fail/);
+  assert.match(work, /The dependentTasks list names work scheduled after this task/);
+  const dependentTasks = [{ title: 'Second', criteria: 'One paragraph' }];
+  assert.deepEqual(JSON.parse(work.split('\n\n').at(-1)).dependentTasks, dependentTasks);
+  assert.deepEqual(JSON.parse(review.split('\n\n').at(-1)).dependentTasks, dependentTasks);
   assert.deepEqual(JSON.parse(review.split('\n\n').at(-1)).ownerClarifications, [{ question: question.title, answer }]);
 });
 

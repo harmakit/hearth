@@ -234,6 +234,7 @@ export function reviewPrompt(studio, task, agent, training) {
   return [
     'Review the studio task artifact.',
     'Assess the result against the acceptance criteria. Return one JSON object {"pass": true or false, "summary": "reason in the requested language"}. Leave project files unchanged.',
+    'Use only this task’s own acceptance criteria to decide pass or fail. The wider release, previous review and dependentTasks are reference data. If a later dependent task produces an index, chronology, assembled package, or other release material, assess that material when reviewing the dependent task, even if a previous review asked for it here. Keep suggestions for later work separate from blocking findings about this task.',
     ...(task.deliveryMode === 'git' ? ['Review the frozen candidate and the recorded checks. Hearth merges this result after a successful review and any owner approval. Treat a truthful statement that the merge is still pending as the expected pre-merge state. For this result, assess Git-delivery criteria using the candidate, its changes and its completed checks. Flag missing evidence or claims of an unverified merge.'] : []),
     ...(task.ownerClarifications?.length ? ['Apply saved owner clarifications for this task when interpreting the acceptance criteria. If the owner explicitly changed a criterion in an answer, use the latest applicable answer. Verify that the result meets the clarified criteria using available evidence.'] : []),
     'Review the production deliverable. Flag rehearsal artifacts, unrelated exercises, placeholders presented as complete outputs, and citations that do not support their claims.',
@@ -247,6 +248,7 @@ export function reviewPrompt(studio, task, agent, training) {
     JSON.stringify({
       language: studio.language, title: task.title, criteria: task.criteria, artifact: task.artifact,
       ownerClarifications: task.ownerClarifications?.length ? task.ownerClarifications : undefined,
+      dependentTasks: task.dependentTasks?.length ? task.dependentTasks : undefined,
       reviewer: agent && { name: agent.name, role: agent.role, roleTitle: agent.roleTitle, description: agent.description },
       artifactPath: task.artifactPath, previousArtifactPath: task.previousArtifactPath, previousReview: task.review,
       artifactWasTruncated: task.artifactWasTruncated || undefined, packageManifest: task.packageManifest,

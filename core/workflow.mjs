@@ -587,6 +587,7 @@ export function createWorkflow({
         const context = taskContext(studio, task, job.runAttemptId, decisions);
         prompt = runPrompt(studio, agent, task, decisions, {
           ...context, criteria: task.criteria, artifactPath: task.artifactTarget, previousArtifactPath: task.artifactPath,
+          dependentTasks: dependentTasksFor(task),
           referenceArtifacts: referenceArtifacts(task),
           training: (usedTraining=trainingFor()),
           dependencies: task.dependencies.slice(0, 16).map((id) => {
@@ -611,6 +612,7 @@ export function createWorkflow({
           artifactWasTruncated: task.artifact?.length > artifactLimit,
           referenceArtifacts: referenceArtifacts(task),
           ownerClarifications,
+          dependentTasks: dependentTasksFor(task),
         }, agent, (usedTraining=trainingFor()));
         break;
       }
@@ -763,6 +765,13 @@ export function createWorkflow({
 
   function sprintTasks(task) {
     return list('tasks').filter(({ sprintId }) => sprintId === task.sprintId);
+  }
+
+  function dependentTasksFor(task) {
+    if (!task.sprintId) return;
+    const tasks = sprintTasks(task).filter(item => item.dependencies?.includes(task.id))
+      .map(({ title, criteria }) => ({ title, criteria }));
+    return tasks.length ? tasks : undefined;
   }
 
   function readyAfter(task) {
