@@ -2874,7 +2874,8 @@ function openAcceptance(item) {
     !review && task?.artifactPath ? actionFor(copy('Открыть файл'),'artifact',task.id) : '';
   const firstParagraph = String(item.body??'').trim().split(/\r?\n\s*\r?\n/u)[0];
   const excerpt = firstParagraph.length > 500 ? firstParagraph.slice(0,500).trimEnd()+'…' : firstParagraph;
-  const body = `<div data-acceptance-status>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>
+  const decisionStatus = review?.reworkRequired ? copy('Нужна доработка') : copy('Приёмка результата');
+  const body = `<div data-acceptance-status>${badge(pending ? decisionStatus : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>
     <div${scope}>${renderReportMarkdown(excerpt)}</div>
     ${target ? copy`<p class="decision-target"><strong>Ветка доставки</strong> <code>${safe(target.replace(/^refs\/heads\//u,''))}</code></p>` : ''}
     ${renderRecordedChecks(git)}

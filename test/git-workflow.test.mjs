@@ -152,27 +152,38 @@ test('a moving delivery target starts a fresh review without an obsolete error o
   assert.equal(merges, 2);
 });
 
-test('summary sprint acceptance reviews the integrated Git snapshot and exposes its files', async t => {
-  const targetOid = 'a'.repeat(40);
+test('a rejected sprint package reopens a member and reviews the new integrated Git snapshot', async t => {
+  const revisions = ['a'.repeat(40), 'b'.repeat(40)];
+  const checks = [{ checkId:'verify', phase:'candidate', status:'PASS', required:true }];
+  let evaluations = 0;
+  let summaryReviews = 0;
   let assembled;
   const service = createStudioService({ dbPath: ':memory:', prepareTarget: async () => ({ targetRef: 'refs/heads/delivery' }),
     projectPipeline: {
       workScope: async () => ({ worktreeId: 'tree', scope: { root: '/work', access: 'worktree-write' }, release: async () => {} }),
-      evaluate: async () => ({ worktreeId: 'tree', revision: {candidateOid:targetOid}, artifactPaths: ['character.md'], status: 'review', checks: [], evidence: [] }),
+      evaluate: async () => ({ worktreeId: 'tree', revision: {candidateOid:revisions[evaluations++]}, artifactPaths: ['character.md'], status: 'review', checks, evidence: [] }),
       reviewScope: async () => ({ scope: {root:'/candidate',access:'read'}, release: async () => {} }),
-      merge: async () => ({status:'merged',targetOid}),
+      merge: async ({task}) => ({status:'merged',targetOid:task.gitDelivery.revision.candidateOid}),
       packageReviewScope: async ({members,referencePaths}) => {
         assembled = members;
         assert.deepEqual(referencePaths, ['character.md']);
-        return {scope:{root:'/delivered',access:'read'},context:{revision:{candidateOid:targetOid},referenceFiles:[{path:'character.md',text:'# Character'}]},release:async()=>{}};
+        return {scope:{root:'/delivered',access:'read'},context:{revision:{candidateOid:members[0].gitDelivery.targetOid},referenceFiles:[{path:'character.md',text:'# Character'}]},release:async()=>{}};
       },
     },
     run: async request => {
       const training=trainingReply(request); if(training)return training;
       if(request.purpose==='plan')return {text:JSON.stringify({...plan,tasks:[{...plan.tasks[0],requiresAcceptance:false}]})};
-      if(request.purpose==='review' && request.prompt.includes('sprint package')) {
+      if(request.purpose==='review' && request.prompt.startsWith('Review the assembled sprint package')) {
         assert.equal(request.scope.root,'/delivered');
         assert.match(request.prompt,/character\.md/);
+        assert.match(request.prompt,/A pre-merge report documents the state when it was written/);
+        const context=JSON.parse(request.prompt.split('\n\n')[1]);
+        assert.equal(context.targetRef,'refs/heads/delivery');
+        assert.equal(context.integratedDeliveries[0].targetOid,revisions[summaryReviews]);
+        assert.equal(context.integratedDeliveries[0].status,'merged');
+        assert.equal(context.integratedDeliveries[0].reviewResult,'PASS');
+        assert.deepEqual(context.integratedDeliveries[0].checks,checks);
+        if (++summaryReviews === 1) return {text:JSON.stringify({pass:false,summary:'The released character needs one factual correction.'})};
       }
       return {text:JSON.stringify({task:{summary:'Created'},review:{pass:true,summary:'Checked'},director:{action:'finish'}}[request.purpose])};
     },
@@ -183,10 +194,19 @@ test('summary sprint acceptance reviews the integrated Git snapshot and exposes 
   service.initializeStudio({studioId});
   const draft=await until(service,state=>state.plans[0]);
   service.decidePlan({planId:draft.id,decision:'approve'});
-  const item=await until(service,state=>state.inbox.find(row=>row.kind==='acceptance' && row.review?.members));
+  const rejected=await until(service,state=>state.inbox.find(row=>row.kind==='acceptance' && row.review?.reworkRequired));
+  assert.equal(summaryReviews,1);
+  assert.equal(rejected.review.packageRevision,revisions[0]);
+  assert.ok(rejected.directorSuggestions.some(choice=>choice.id==='revise'));
+  assert.ok(!rejected.directorSuggestions.some(choice=>choice.id==='approve'));
+  assert.throws(()=>service.answerInbox({inboxId:rejected.id,decision:'approve',expectedResult:rejected.review.key}),/верните работу на доработку/);
+  service.answerInbox({inboxId:rejected.id,decision:'revise',answer:'Correct the character’s date.',
+    reworkTaskId:rejected.review.members[0].taskId,expectedResult:rejected.review.key});
+  const item=await until(service,state=>state.inbox.find(row=>row.kind==='acceptance' && row.id!==rejected.id && row.review?.members));
+  assert.equal(summaryReviews,2);
   assert.equal(assembled.length,1);
   assert.deepEqual(item.review.members[0].artifactPaths,['character.md']);
-  assert.equal(item.review.packageRevision,targetOid);
+  assert.equal(item.review.packageRevision,revisions[1]);
   assert.deepEqual(item.review.artifactPaths,['character.md']);
   service.answerInbox({inboxId:item.id,decision:'approve',expectedResult:item.review.key,operationId:'accept-summary'});
   await until(service,state=>state.sprints[0].status==='completed');

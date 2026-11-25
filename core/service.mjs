@@ -1101,12 +1101,12 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       (!git || row.revision?.digest === git.revision?.digest)).map(row=>row.id) };
   }
 
-  function addInbox(task, kind, { title, body, choices, kind: classification }) {
+  function addInbox(task, kind, { title, body, choices, kind: classification, reworkRequired }) {
     const item = {
       id: randomUUID(), studioId: task.studioId, taskId: task.id, kind,
       title, body, status: 'open', answer: '', createdAt: now(),
       ...(choices?.length ? { choices, version: 1 } : {}), ...(classification?{classification}:{}),
-      ...(kind==='acceptance' ? {review:reviewedResult(read('tasks',task.id,'Задача'))} : {}),
+      ...(kind==='acceptance' ? {review:{...reviewedResult(read('tasks',task.id,'Задача')), ...(reworkRequired ? { reworkRequired: true } : {})}} : {}),
     };
     return insert('inbox',item);
   }
@@ -1270,6 +1270,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
   }
 
   function confirmedInboxApproval(item, task, text) {
+    if (item.review?.reworkRequired) return false;
     const branch = mergeBranch(item, task);
     return Boolean((item.kind !== 'acceptance' || task?.deliveryMode !== 'git' || branch) &&
       explicitInboxApproval(branch ? 'merge' : item.kind, text, branch));
@@ -1350,7 +1351,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
 
   function directorInboxPrompt(message, target, sourceDirective) {
     const {item,studio,task,plan,meeting,proposal,attempt}=target;
-    const actions={plan:['approve','revise'],question:['answer'],acceptance:['approve','revise'],meeting:['approve'],
+    const actions={plan:['approve','revise'],question:['answer'],acceptance:item.review?.reworkRequired ? ['revise'] : ['approve','revise'],meeting:['approve'],
       roster:['approve','revise'],error:['retry'],reconcile:safeReconciliation(attempt)?['retry']:[]};
     const diagnostics=['error','reconcile'].includes(item.kind) ? diagnoseStudio({studioId:studio.id}) : undefined;
     const references = task && item.kind==='question' ? [task,...(task.dependencies ?? []).slice(0,8)

@@ -1389,6 +1389,8 @@ export const catalogue = {
   "Принять": ["Accept", "Aceptar", "Accepter", "接受( E)"],
   "Принять и слить в": ["Accept and merge into", "Aceptar y fusionar en", "Accepter et fusionner dans", "接受并合并到"],
   "Принять результат": ["Accept result", "Aceptar resultado", "Accepter le résultat", "接受结果"],
+  "Нужна доработка": ["Needs revision", "Necesita revisión", "Révision nécessaire", "需要修改"],
+  "Нужна доработка ·": ["Needs revision ·", "Necesita revisión ·", "Révision nécessaire ·", "需要修改 ·"],
   "Принять результат ·": ["Accept the result.", "Acepta el resultado.", "Accepter le résultat.", "接受结果。"],
   "Приоритет (0–100)": ["Priority (0-100)", "Prioridad (0 a 100)", "Priorité (0-100)", "优先权(0-100)"],
   "Приоритет ·": ["Priority ·", "Prioridad ·", "Priorité", "优先事项 ·"],

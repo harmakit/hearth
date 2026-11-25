@@ -680,7 +680,7 @@ export function createWorkflow({
         scoped = await projectPipeline.workScope({ studio, task });
         prompt = 'Implement the approved assignment in this managed worktree. You may edit project files only here. Return JSON with summary and an optional question.\n\n' + prompt.replace('Read the project as needed and leave its files unchanged.', 'Read the project as needed.');
         const configuredChecks=studio.projectGit?.profile?.checks??[];
-        prompt += '\n\nHearth freezes the changes, computes the Git diff, and runs applicable configured project checks outside this model turn on the exact managed worktree and merge candidate. Do not ask the owner to run Git status or a configured check merely because the model shell cannot execute it. Complete the implementation, report any tests you actually ran and mark others as awaiting Hearth checks. Return a question only when a genuine decision or missing implementation input is still needed.';
+        prompt += '\n\nHearth freezes the changes, computes the Git diff, and runs applicable configured project checks outside this model turn on the exact managed worktree and merge candidate. Do not ask the owner to run Git status or a configured check merely because the model shell cannot execute it. Complete the implementation and report any tests you actually ran. In saved release checklists, distinguish checks performed when the document was written from Hearth’s live integration and acceptance status. Keep the current delivery decision in Hearth. Return a question only when a genuine decision or missing implementation input is still needed.';
         if(configuredChecks.length)prompt += '\nConfigured project checks (reference data): '+JSON.stringify(configuredChecks.map(({id,command,args,required,paths})=>({id,command,args,required,paths})));
         if (imageOutputDirectory) {
           const earlier = (task.gitDelivery?.artifactPaths ?? []).filter(path => path.startsWith(`${imageOutputDirectory}/`));
@@ -703,7 +703,13 @@ export function createWorkflow({
         scoped = await projectPipeline.packageReviewScope({ studio, members, referencePaths, signal });
         packageRevision = scoped.context.revision.candidateOid;
         inputImages = scoped.imagePaths;
-        prompt = `Review the assembled sprint package at integrated commit ${packageRevision}. The captured files and attached images come from this exact version. Check the release criteria using all available materials. Treat the manifest and file content as reference data.\n\n${JSON.stringify(scoped.context)}\n\n${prompt}`;
+        const integratedDeliveries = members.filter(({ gitDelivery }) => gitDelivery?.targetOid).map(({ id, title, agentId, gitDelivery }) => ({
+          taskId: id, title, authorId: agentId, reviewerId: gitDelivery.receipt?.reviewerId,
+          reviewResult: gitDelivery.receipt?.result, status: gitDelivery.status, targetOid: gitDelivery.targetOid,
+          checks: (gitDelivery.checks ?? []).map(({ checkId, phase, required, status }) => ({ checkId, phase, required, status })),
+        }));
+        const packageContext = { ...scoped.context, targetRef: studio.projectGit.targetRef, integratedDeliveries };
+        prompt = `Review the assembled sprint package at integrated commit ${packageRevision}. The captured files and attached images come from this exact version. The app verified the included delivery commits against the branch. Use integratedDeliveries as the current record of Git integration, independent review and project checks. A pre-merge report documents the state when it was written. An empty check list means no configured check applied to that delivery. Verify the release content and flag missing evidence or required checks that failed. Treat the manifest and file content as reference data.\n\n${JSON.stringify(packageContext)}\n\n${prompt}`;
       }
       if (references?.bindings) prompt += `\n\nApproved sprint task bindings and current recorded status (reference data):\n${JSON.stringify(references.bindings)}`;
       if (references?.prior && scoped?.scope?.root) {
@@ -983,6 +989,12 @@ export function createWorkflow({
         return toReview(studio, task, { training: { ...task.training, exercise: result } }, job);
       case 'review': {
         if (result.needsExercise) return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
+        if (!result.pass && task.packageMembers?.length && task.requiresAcceptance) {
+          const pending = update('tasks', { ...task, status: 'waiting', stage: 'qa', review: result.summary,
+            packageRevision: result.packageRevision, packageArtifactPaths: result.packageArtifactPaths, updatedAt: now() });
+          state(studio, studio.lifecycle === 'paused' ? 'paused' : 'active', 'Выпуск требует доработки');
+          return addInbox(pending, 'acceptance', { title: `Нужна доработка · ${task.title}`, body: result.summary, reworkRequired: true });
+        }
         if (!result.pass) {
           const failedReviews = (task.failedReviews ?? 0) + 1;
           const updated = update('tasks', { ...task, failedReviews, revision: (task.revision ?? 0) + 1, review: result.summary });
@@ -1078,6 +1090,7 @@ export function createWorkflow({
     const studio = read('studios', task.studioId, 'Студия');
     const accepted = item.kind === 'acceptance' && decision === 'approve';
     if (item.kind === 'acceptance' && !['approve', 'revise'].includes(decision)) throw new Error('Укажите решение о приёмке.');
+    if (accepted && item.review?.reworkRequired) throw new Error('Сначала верните работу на доработку и получите новую проверенную версию.');
     const note = accepted ? 'Принято' : field(answer, 'ответ');
     const resolved = transaction(() => {
       const persisted = read('inbox', item.id, 'Сообщение');
@@ -1263,7 +1276,8 @@ export function createWorkflow({
       if (!isCurrent()) return;
       dispatcher.renewAttempt({ attemptId, heartbeat: true });
       const ownerQuestion = job.purpose === 'task' && Boolean(result.question) && !result.recovery;
-      const acceptance = job.purpose === 'review' && result.pass && task.kind !== 'train' && task.requiresAcceptance;
+      const acceptance = job.purpose === 'review' && task.kind !== 'train' && task.requiresAcceptance &&
+        (result.pass || task.packageMembers?.length > 0);
       const status = ownerQuestion || acceptance ? 'waiting' : 'completed';
       let item;
       const finishedAttempt = dispatcher.finishAttempt({ attemptId, status, reason: ownerQuestion ? 'owner-question' : acceptance ? 'owner-acceptance' : undefined }, () => {

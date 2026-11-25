@@ -156,7 +156,7 @@ export function directorInboxSuggestions(item, locale, { branch, retry, reconcil
     }
   };
   const key=item.kind==='acceptance' && branch ? 'merge' : item.kind;
-  if (approval[key]) append('approve', key==='merge'?approval.merge[index]+branch:approval[key][index]);
+  if (approval[key] && !item.review?.reworkRequired) append('approve', key==='merge'?approval.merge[index]+branch:approval[key][index]);
   const revision = {plan:'planRevision',acceptance:'reviewRevision',roster:'rejectRoster'}[item.kind];
   if (revision) append('revise', defaults[revision][index]);
   if (retry) append('retry', defaults.retry[index]);
