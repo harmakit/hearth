@@ -18,14 +18,14 @@ export function answerPayload(item, { answer = '', choiceId, attachmentIds = [],
   } : {}) };
 }
 
-export function renderQuestionDetails(item) {
+export function renderQuestionDetails(item,{taskTitles=new Map()}={}) {
   const options = questionOptions(item);
   const history = item.history ?? item.versions ?? [];
   return (item.version ? copy`<p class="muted">Версия ${safe(item.version)}</p>` : '') +
     (item.context ? section(copy('Контекст'), paragraph(item.context)) : '') +
     (options.length ? section(copy('Варианты'), list(options.map(choice => `<strong>${safe(choice.label ?? choice.title ?? choice.text ?? choice.id)}</strong>${choice.description ? paragraph(choice.description) : ''}`))) : '') +
     (item.answerChoiceId || item.choiceId ? section(copy('Выбранный вариант'), paragraph(options.find(choice => choice.id === (item.answerChoiceId || item.choiceId))?.label ?? (item.answerChoiceId || item.choiceId))) : '') +
-    (item.blockedTaskIds?.length ? section(copy('Ждут этого решения'), list(item.blockedTaskIds.map(id => button(copy('Открыть задачу'), 'task', id)))) : '') +
+    (item.blockedTaskIds?.length ? section(copy('Ждут этого решения'), list(item.blockedTaskIds.map(id => button(taskTitles.get(id) ?? copy('Открыть задачу'), 'task', id)))) : '') +
     (history.length ? section(copy('История'), list(history.map(entry => copy`<strong>Версия ${safe(entry.version)}</strong>${paragraph(entry.answer ?? entry.body ?? entry.status)}`))) : '');
 }
 
@@ -42,12 +42,14 @@ const revisionText = revision => typeof revision === 'object' && revision
   : revision;
 const recordRevision = revision => revision ? copy`<p class="muted legacy-oid">Версия: ${safe(revisionText(revision))}</p>` : '';
 
-export function renderEvidence(evidence = []) {
+export function renderEvidence(evidence = [], { attributes, heading = true } = {}) {
   if (!evidence.length) return '';
-  return section(copy('Доказательства'), list(evidence.map(item => `<strong>${safe(item.name ?? item.filename ?? item.sourcePath ?? item.kind ?? copy('Файл'))}</strong>
+  const rows = `<ul class="legacy-list">${evidence.map(item => `<li${attributes ? ' '+attributes(item) : ''}>
+    <strong>${safe(item.name ?? item.filename ?? item.sourcePath ?? item.kind ?? copy('Файл'))}</strong>
     <p class="muted">${[item.contentType, Number.isFinite(item.size) ? copy`${amounts.format(item.size)} байт` : '', item.digest].filter(Boolean).map(safe).join(' · ')}</p>
     ${recordRevision(item.revision)}<div class="actions">${!item.contentType || /^(?:text\/|image\/(?:jpeg|png|webp|gif)$|video\/|audio\/|application\/(?:json|pdf)$)/.test(item.contentType)
-    ? button(copy('Открыть'), 'evidence', item.id) : ''}${button(copy('Показать в папке'), 'reveal-evidence', item.id)}${button(copy('Копировать путь'), 'copy-evidence-path', item.id)}${button(copy('Сохранить копию'), 'save-evidence', item.id)}</div>`)));
+    ? button(copy('Открыть'), 'evidence', item.id) : ''}${button(copy('Показать в папке'), 'reveal-evidence', item.id)}${button(copy('Копировать путь'), 'copy-evidence-path', item.id)}${button(copy('Сохранить копию'), 'save-evidence', item.id)}</div></li>`).join('')}</ul>`;
+  return heading ? section(copy('Доказательства'), rows) : rows;
 }
 
 export function renderDelivery({ checks = [], evidence = [], delivery, worktree, receipts = [] } = {}) {

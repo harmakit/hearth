@@ -70,6 +70,12 @@
 .provider-card-actions { border-block-start:1px solid var(--line); padding-top:8px; }
 .provider-card .checkbox-field { gap:8px; }
 .task-recovery,.decision { padding:10px 12px; background:var(--surface-raised); border-inline-start:2px solid var(--blocked); border-radius:var(--radius); }
+.decision[data-decision-tone="warn"] { border-inline-start-color:var(--yellow); }
+.workspace-decision { border-inline-start:2px solid var(--yellow); padding-inline-start:10px; }
+.workspace-path > summary,.decision-detail > summary,.plan-task-detail > summary { cursor:pointer; }
+.decision-detail[open] > summary { margin-block-end:8px; }
+.plan-task-detail[open] > summary { margin-block-end:6px; }
+.decision-target code { overflow-wrap:anywhere; }
 .task-recovery h3 { color:var(--blocked); }
 .task-recovery { min-width:0; overflow-wrap:anywhere; }
 #owner-body .task-recovery { margin-block:4px; }

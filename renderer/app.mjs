@@ -4,8 +4,8 @@ import { agentActivity, actorState, buildRooms, languageChoices, pendingStudioPl
 import { paintRooms } from './room-art.mjs';
 import {localeNames, textFor,tokenCount} from './locale.mjs';
 import {createInspectorHistory, membersOfEpic} from './inspector.mjs';
-import { currentStudioTasks, studioActivityStatus, taskFacts } from './owner-facts.mjs';
-import { publishedPaths, renderWork, registerRows } from './work-view.mjs';
+import { currentStudioTasks, isSavedTask, studioActivityStatus, taskFacts, taskOwnerState } from './owner-facts.mjs';
+import { boardRows, publishedPaths, renderWork, registerRows } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
 import { installInspectorResize } from './inspector-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey } from './model-policy.mjs';
@@ -121,6 +121,7 @@ let registryQuery = '';
 let registryStage = '';
 let registryOwner = '';
 let registrySprint = '';
+let registryDecision = false;
 const expandedEpics = new Set();
 const expandedRecords = new Set();
 let boardShowEmpty=false;
@@ -165,10 +166,12 @@ const actionFor = (label, target, id, secondary = true) => button(label, `data-$
 const heading = (title, detail = '', actions = '') => `<header class="page-heading"><div><h1>${safe(title)}</h1>${detail ? `<p class="muted">${safe(detail)}</p>` : ''}</div>${actions && `<div class="actions">${actions}</div>`}</header>`;
 const empty = (title, detail, action = '') => `<div class="panel empty"><h2>${safe(title)}</h2><p class="muted">${safe(detail)}</p>${action}</div>`;
 const badge = (label, tone = '') => `<span class="status ${tone}"><span aria-hidden="true"></span>${safe(label)}</span>`;
-const status = task => {
-  if (task.status==='completed' && task.workflowManaged && task.stage && task.stage!=='done') return badge(copy('На ревью'),'warn');
-  if (task.stage==='blocked' && task.status==='queued') return badge(copy('Ждёт зависимостей'),'warn');
-  return badge(...(statuses[task.status] ?? [task.status, '']));
+const status = record => {
+  if (record.title || record.stage) {
+    const {stage,label} = taskOwnerState(record,{inbox:entries(),tasks:tasks()});
+    return stageMark(stage,label);
+  }
+  return badge(...(statuses[record.status] ?? [record.status, '']));
 };
 const titleFor = agent => agent?.systemRole === 'coach' ? coachTitle : agent?.roleTitle || roleNames[agent?.role] || agent?.role || copy('Директор');
 const nameFor = agent => agent?.systemRole === 'coach' ? coachTitle : agent?.name || titleFor(agent);
@@ -202,6 +205,7 @@ function selectStudio(id) {
   registryStage = '';
   registryOwner = '';
   registrySprint = '';
+  registryDecision = false;
   expandedEpics.clear();
   expandedRecords.clear();
   boardShowEmpty=false;
@@ -265,6 +269,7 @@ function render() {
   const savedFields=sameView ? ['[data-file-query]','[data-file-from]','[data-file-to]','[data-local-library]','[data-registry-sprint]','[data-registry-owner]']
     .flatMap(selector=>{const el=content.querySelector(selector);return el?[{selector,value:el.value,focus:el===document.activeElement,caret:el.selectionStart}]:[];}) : [];
   const savedTop=sameView ? content.scrollTop : 0;
+  const savedWorkScroll=sameView ? content.querySelector('.work-board,.registry-scroll')?.scrollLeft : undefined;
   renderedViewKey=nextKey;
   const current = studio();
   const inStudio = Object.hasOwn(studioViews, view);
@@ -285,8 +290,8 @@ function render() {
   $('.studio-controls .picker span').textContent = ui('studio');
   $('.studio-controls [data-open="studio"]').textContent = '＋ '+ui('newStudio');
   const focused = document.activeElement;
-  const registryControl = focused?.matches('[data-registry-query]') ? '[data-registry-query]'
-    : focused?.matches('[data-registry-stage]') ? '[data-registry-stage]' : '';
+  const registryControl = ['query','stage','owner','sprint','decision']
+    .map(key=>`[data-registry-${key}]`).find(selector=>focused?.matches(selector));
   const registryCaret = registryControl === '[data-registry-query]' ? [focused.selectionStart, focused.selectionEnd] : null;
   const focusRoot = [content, $('#navigation'), $('#workspace-navigation')].find(container => container.contains(focused) && focused !== container);
   const focusTarget = focusRoot && Object.entries(focused.dataset).find(([key]) => ['view', 'enterStudio', 'workspaceInbox', 'providerEnabled', 'agent', 'task', 'inbox', 'scope', 'open', 'inspect', 'editAgent', 'plan', 'initialize', 'runAction', 'artifact', 'workTab', 'assessDebt', 'message', 'meetingDetail', 'legacyAction', 'evidence','todayId'].includes(key));
@@ -295,6 +300,7 @@ function render() {
     ? [focused.selectionStart, focused.selectionEnd] : null;
   const libraryDetails = view === 'skills'
     ? new Set(Array.from(content.querySelectorAll('[data-library-detail][open]'), node => node.dataset.libraryDetail)) : null;
+  const artifactEvidenceOpen = sameView && content.querySelector('[data-artifact-evidence]')?.open;
   picker.disabled = !state.studios.length;
   picker.innerHTML = state.studios.filter(s=>!s.archivedAt).map(item => option(String(item.id), item.name, studioId)).join('') || copy('<option>Нет студий</option>');
   $('.studio-controls').hidden = !inStudio || !current;
@@ -310,6 +316,8 @@ function render() {
     : heading(views[view]) + empty(copy('Создайте студию'), copy('Опишите проект, выберите рабочую папку и подключение директора.'), button(copy('Создать студию'), 'data-open="studio"'));
   if(['workspace','today'].includes(view) && bridge)refreshFolderAvailability();
   if (view === 'workshop' && current) paintRooms(content);
+  const evidenceGroup = content.querySelector('[data-artifact-evidence]');
+  if (evidenceGroup && artifactEvidenceOpen) evidenceGroup.open = true;
   for(const saved of savedFields){
     const el=content.querySelector(saved.selector);
     if(!el)continue;
@@ -318,6 +326,8 @@ function render() {
     if(saved.focus){el.focus({preventScroll:true});if(saved.caret!=null && el.setSelectionRange)el.setSelectionRange(saved.caret,saved.caret);}
   }
   content.scrollTop=savedTop;
+  const workScroll=content.querySelector('.work-board,.registry-scroll');
+  if (workScroll && savedWorkScroll!==undefined) workScroll.scrollLeft=savedWorkScroll;
   if (registryControl) {
     const control = content.querySelector(registryControl);
     control?.focus({ preventScroll: true });
@@ -409,8 +419,8 @@ function paintOnboardingHints() {
 function work() {
   const rows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
   return heading(copy('Работа'), studio().name, button(copy('Новая задача'), 'data-open="task"')) + renderWork({
-    studio: studio(), tasks: tasks(), epics: rows('epics'), stories: rows('stories'),
-    sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab ?? 'registry', expandedEpics,expandedRecords,boardShowEmpty,boardAllSprints, registryQuery, registryStage, registryOwner, registrySprint,
+    studio: studio(), tasks: tasks(), inbox: entries(), epics: rows('epics'), stories: rows('stories'),
+    sprints: rows('sprints'), meetings: rows('meetings'), plans: plans(), tab: workTab ?? 'registry', expandedEpics,expandedRecords,boardShowEmpty,boardAllSprints, registryQuery, registryStage, registryOwner, registrySprint, registryDecision,
     phases: rows('phases'),
     evidence: rows('evidence').filter(item => item.kind !== 'attachment'),
   });
@@ -547,7 +557,7 @@ function todayOutcomeDetails() {
     status='attention'; source=detail;
   }
   else if(active){
-    detail=copy`В работе · ${active.id}`; status='running'; source=active.id;
+    detail=copy('Новый запуск начат.'); status='running'; source=active.id;
   }
   else if(studio?.scheduleWaiting){
     detail=copy`Ближайшее рабочее окно · ${studioDate(studio.nextScheduleAt)}`; status='scheduled'; source=studio.nextScheduleAt;
@@ -626,15 +636,16 @@ function overview() {
   const current = studio();
   const all = tasks().toSorted((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const open = entries().filter(item => item.status === 'open');
-  const blocking = item=>Boolean(item.blockedTaskIds?.length || item.taskId || item.kind==='plan');
-  const decision = open.toSorted((a,b)=>Number(blocking(b))-Number(blocking(a)) || String(a.createdAt??'9999').localeCompare(String(b.createdAt??'9999')))[0];
+  const nextDecision = todayItems(state,Object.fromEntries(folderProbes)).find(row=>row.studioId===current.id && row.inboxId);
+  const decision = open.find(item=>item.id===nextDecision?.inboxId);
   const currentWork = currentStudioTasks(all);
   const failedTask=(decision?.kind==='error'&&all.find(task=>task.id===decision.taskId&&task.status==='failed'))
     ||(!decision&&all.find(task=>task.status==='failed'));
   const failure=failedTask?taskRecoveryBlock(failedTask):'';
   const last = all.find(task => task.status === 'completed' && task.kind!=='train' && !task.packageMembers && (!task.stage || task.stage === 'done'));
   const rooms = buildRooms({ ...current, agents: activeRoster(current) });
-  const workCount = currentWork.filter(task => ['running', 'queued', 'scheduled'].includes(task.status)).length;
+  const queued = currentWork.filter(task => ['queued', 'scheduled'].includes(task.status)).length;
+  const saved = all.filter(isSavedTask).length;
   const activeAttempts = current.activeAttempts ?? all.filter(task => task.status === 'running').length;
   const needsAttention = all.some(task => task.status === 'failed') || open.some(item => item.kind === 'error' || item.kind === 'reconcile');
   const displayStatus = studioActivityStatus(current, activeAttempts, needsAttention);
@@ -646,12 +657,12 @@ function overview() {
   const canInitialize = current.lifecycle === 'draft';
   const provider=providerState[current.director?.runtime];
   const unavailable=canInitialize&&provider&&(provider.enabled===false||provider.available===false||provider.authenticated===false);
-  const running = !canInitialize && !current.projectDetached && (['active', 'planning'].includes(current.lifecycle) || workCount > 0 || current.scheduleWaiting);
+  const running = !canInitialize && !current.projectDetached && (['active', 'planning'].includes(current.lifecycle) || queued > 0 || current.scheduleWaiting);
   const manuallyPaused = current.manualPaused || current.lifecycle === 'paused';
-  const stop = (activeAttempts > 0 || workCount > 0) && current.activity !== 'Студия остановлена' ? button(copy('Прервать работу'),
+  const stop = (activeAttempts > 0 || queued > 0) && current.activity !== 'Студия остановлена' ? button(copy('Прервать работу'),
     `data-run-action="stop" title="${safe(copy('Прервать текущие шаги и приостановить очередь.'))}"`, true) : '';
   const runButtons = manuallyPaused || current.lifecycle === 'error'
-    ? actionFor(current.lifecycle === 'error' ? copy('Повторить шаг') : copy('Возобновить'), 'run-action', 'resume', false) + stop
+    ? actionFor(current.lifecycle === 'error' ? copy('Повторить шаг') : copy('Возобновить'), 'run-action', 'resume', Boolean(pendingPlan)) + stop
     : running ? button(copy('Поставить на паузу'),
       `data-run-action="pause" title="${safe(copy('Дать текущим шагам закончиться. Новые пока не запускать.'))}"`, true) + stop : '';
   const intro = canInitialize ? copy('<p class="muted">Нажмите кнопку ниже. Директор подготовит команду и план по вашей первой задаче. Работа по плану начнётся после вашего согласования.</p>')
@@ -660,7 +671,12 @@ function overview() {
     displayStatus === 'error' && current.lifecycle !== 'error' ? copy('Продолжение ждёт решения по задаче.') :
     displayStatus === 'idle' && current.lifecycle === 'active' ? '' :
     copySystem(current.activity) || (current.lifecycle === 'planning' ? copy('Директор готовит предложение по проекту.') : '');
-  return heading(copy('Обзор студии'), current.name, button(copy('Связь с командой'), 'data-open="messages"', true) + (canInitialize ? '' : button(copy('Новая задача'), 'data-open="task"')) + runButtons) +
+  const planInDecision = decision?.kind === 'plan' && decision.planId === pendingPlan?.id;
+  const decisionLabel = {plan:'Согласование плана',acceptance:'На приёмке',question:'Нужно решение',reconcile:'Прерванный шаг'}[decision?.kind] ?? 'Требуется внимание';
+  const decisionAction = {plan:'Посмотреть план',acceptance:'Открыть приёмку',question:'Ответить',reconcile:'Посмотреть прерванный шаг'}[decision?.kind] ?? 'Открыть во входящих';
+  const decisionTone = ['error','reconcile'].includes(decision?.kind) ? 'attention' : 'warn';
+  return heading(copy('Обзор студии'), current.name, button(copy('Связь с командой'), 'data-open="messages"', true) +
+    (canInitialize ? '' : button(copy('Новая задача'), 'data-open="task"', Boolean(decision))) + runButtons) +
     copy`<div class="split"><div class="stack">
       ${current.lifecycle || activity || pendingPlan ? copy`<section class="panel padded stack compact">
         <div class="row"><h2>${canInitialize ? copy('Начало работы') : copy('Студия')}</h2>${current.quotaPause ? badge(copy('Пауза по недельной квоте'),'warn') : waitingForSchedule ? badge(copy('Ждёт рабочего времени'), 'warn') :
@@ -668,16 +684,19 @@ function overview() {
         ${intro}${activity ? `<p class="activity" role="status">${safe(activity)}</p>` : ''}
         ${current.quotaPause?`<div class="inline-result stack compact" role="status"><p>${safe(quotaPauseText(current.quotaPause))}</p><div>${button(copy('Настроить порог'),`data-open="${current.quotaPause.scope==='app'?'app-quota':'studio-quota'}"`,true)}</div></div>`:''}
         ${sprint ? progressMark(sprintTasks.filter(t=>t.stage==='done').length,sprintTasks.length) : ''}
-        <p class="muted">Активные попытки: ${safe(activeAttempts)} из ${safe(current.wipLimit ?? 1)}${current.nextScheduleAt ? copy` · Следующее окно: ${safe(studioDate(current.nextScheduleAt))}` : ''}</p>
+        ${!canInitialize || activeAttempts ? copy`<p class="muted">Активные запуски · ${safe(activeAttempts)} / ${safe(current.wipLimit ?? 1)}${queued ? copy` · В очереди · ${queued}` : ''}${current.nextScheduleAt ? copy` · Следующее окно: ${safe(studioDate(current.nextScheduleAt))}` : ''}</p>` : ''}
         ${unavailable ? fieldHint(copy('Подключите провайдера директора, чтобы подготовить план.')):''}
         <div class="actions">${canInitialize ? button(copy('Подготовить план первого спринта'), 'data-initialize' + (workBusy||unavailable ? ' disabled' : '')) : ''}
           ${unavailable?button(copy('Настройки приложения'),'data-view="app-settings" data-hint-provider',true):''}
-          ${pendingPlan ? actionFor(copy('Посмотреть план'), 'plan', pendingPlan.id, false) : activePlan ? actionFor(copy('Открыть план'), 'plan', activePlan.id) : ''}</div>
+          ${pendingPlan && !planInDecision ? actionFor(copy('Посмотреть план'), 'plan', pendingPlan.id, false) : !pendingPlan && activePlan ? actionFor(copy('Открыть план'), 'plan', activePlan.id) : ''}
+          ${(needsAttention||manuallyPaused||current.quotaPause) ? button(copy('Диагностика'), 'data-open="diagnosis"', true) : ''}</div>
       </section>` : ''}
-      ${failure || (decision ? copy`<article class="panel padded decision stack compact">
-        <div class="row">${badge(decision.kind === 'acceptance' ? copy('На приёмке') : decision.kind === 'question' ? copy('Нужно решение') : copy('Требуется внимание'), 'attention')}<small>${open.length} открыто</small></div>
+      ${failure || (decision ? copy`<article class="panel padded decision stack compact" data-decision-tone="${decisionTone}">
+        <div class="row">${badge(copy(decisionLabel),decisionTone)}<small>${safe(studioDate(decision.createdAt))}</small></div>
         <h2>${safe(inboxHeading(decision))}</h2><p class="clamp">${safe(inboxDetail(decision))}</p>
-        <div ${['error','reconcile'].includes(decision.kind)?'data-hint-recovery':''}>${actionFor(decision.kind === 'reconcile' ? copy('Посмотреть прерванный шаг') : copy('Открыть во входящих'), 'inbox', decision.id, false)}</div>
+        ${nextDecision.affectedTaskIds?.length ? copy`<small class="muted">Связанных задач · ${nextDecision.affectedTaskIds.length}</small>` : ''}
+        <div class="actions" ${['error','reconcile'].includes(decision.kind)?'data-hint-recovery':''}>${actionFor(copy(decisionAction),decision.kind==='plan'?'plan':'inbox',decision.kind==='plan'?decision.planId:decision.id,false)}
+          ${open.length>1 ? button(copy('Все входящие'),'data-view="inbox"',true) : ''}</div>
       </article>` : '')}
       <section class="stack compact"><div class="row"><h2>Последний отчёт</h2>${button(copy('Все артефакты'), 'data-work-pane="artifacts"', true)}</div>
         ${last ? `<article class="panel report">
@@ -687,16 +706,17 @@ function overview() {
           : empty(copy('Отчётов пока нет'), copy('Здесь появится результат первой завершённой задачи.'))}</section>
     </div><aside class="stack">
       <section class="panel padded stack compact"><div class="row"><h2>Мастерская</h2>${glyph('workshop')}</div>
-        <p class="muted">Комнат: ${rooms.length} · В работе и очереди: ${workCount}</p>
+        <p class="muted">Комнат: ${rooms.length}</p>
         <div>${button(copy('Открыть карту'), 'data-view="workshop"', true)}</div></section>
       <section class="stack compact"><div class="row"><h2>Текущие задачи</h2>${button(copy('Все задачи'), 'data-work-pane="registry"', true)}</div>
         ${currentWork.length ? `<div class="panel work-list">${currentWork.slice(0,8).map(taskRow).join('')}</div>` :
-          empty(copy('Нет текущих задач'), canInitialize ? copy('Первые задачи появятся после согласования плана.') : copy('Поставьте задачу директору или участнику студии.'))}</section>
+          empty(copy('Нет текущих задач'), canInitialize ? copy('Первые задачи появятся после согласования плана.') : '')}
+        ${saved ? `<div class="actions"><small class="muted">${safe(copy('Сохранённые задачи без запуска'))} · ${saved}</small>${button(copy('Открыть бэклог'),'data-work-pane="planning"',true)}</div>` : ''}</section>
     </aside></div>`;
 }
 
 function taskRow(task) {
-  const mark=task.status==='running'?stageMark('in_progress',copy('В работе')):status(task);
+  const mark=status(task);
   return `<button type="button" class="list-row" data-task="${safe(task.id)}"><span><strong>${safe(task.title)}</strong><small>${safe(nameFor(taskAgent(task)))}${task.kind === 'debt' ? copy(' · Улучшение') : ''}</small></span>${mark}</button>`;
 }
 
@@ -733,7 +753,7 @@ function taskRecoveryBlock(task) {
   return copy`<section class="task-recovery stack compact" aria-label="Следующий шаг">
     <h3>Следующий шаг</h3>${summary?plain(summary):''}
     ${reason&&summary!==reason?copy`<details class="advanced" data-section="failure-reason"><summary>Замечания директора</summary>${plain(reason)}</details>`:''}
-    ${action?`<p>${safe(next[action])}</p><div class="actions">${buttons[action]()}</div>`:''}
+    ${action?`<p>${safe(next[action])}</p><div class="actions">${buttons[action]()}${actionFor(copy('Диагностика запуска'),'task-diagnosis',task.id)}</div>`:''}
   </section>`;
 }
 
@@ -801,10 +821,11 @@ function inboxCard(item) {
 function teamContext(current) {
   const direction = state.attempts?.find(attempt => attempt.studioId === current.id && attempt.purpose === 'director' && attempt.status === 'running');
   const currentTasks = tasks();
+  const scheduledTasks = currentStudioTasks(currentTasks);
   const directionTask = direction && currentTasks.find(task => task.id === direction.taskId);
   const jobFor = person => {
     if (!person.id && directionTask) return { ...directionTask, stage: 'director', status: 'running' };
-    return taskForAgent(currentTasks, current.id, person.id || null);
+    return taskForAgent(scheduledTasks, current.id, person.id || null);
   };
   const activityFor = person => {
     const job = jobFor(person);
@@ -844,11 +865,15 @@ function workshop() {
     </button>`;
   };
   const table = stored('team-view') !== 'map';
-  return heading(ui('team'), current.name, button(table ? ui('map') : ui('team'),'data-team-toggle',true)) +
-    (table ? `<div class="registry-scroll"><table class="owner-table"><thead><tr>${['team','role','state','model','training','running','accepted'].map(k=>'<th>'+ui(k)+'</th>').join('')}</tr></thead><tbody>${roster.map(({agent:person})=>{
+  const controls = button(table ? ui('map') : ui('team'),'data-team-toggle',true) +
+    button(copy('Управление ролями'),'data-roster-settings',true) +
+    button(copy('История состава'),'data-open="roster-history"',true);
+  return heading(ui('team'), current.name, controls) +
+    (table ? `<div class="registry-scroll"><table class="owner-table"><thead><tr>${['team','role','state','model','training','running'].map(k=>'<th>'+ui(k)+'</th>').join('')}<th>${copy('Последний результат')}</th></tr></thead><tbody>${roster.map(({agent:person})=>{
       const work=jobFor(person);
       const past=currentTasks.filter(t=>!['train'].includes(t.kind) && (t.agentId ?? null)===(person.id??null) && t.stage==='done');
-      return `<tr><td>${actionFor(nameFor(person),'owner-agent',person.id??'')}</td><td>${safe(titleFor(person))}</td><td>${badge(...activityFor(person))}</td><td>${safe(configText(person) || modeNames[person.mode] || '—')}</td><td>${person.id ? roleReadiness(person,currentTasks) : '—'}</td><td>${work ? actionFor(work.title,'task',work.id) : '—'}</td><td>${past.length}</td></tr>`;
+      const latest=past.toSorted((a,b)=>String(b.updatedAt??'').localeCompare(String(a.updatedAt??'')))[0];
+      return `<tr><td>${actionFor(nameFor(person),'owner-agent',person.id??'')}</td><td>${safe(titleFor(person))}</td><td>${badge(...activityFor(person))}</td><td>${safe(configText(person) || modeNames[person.mode] || '—')}</td><td>${person.id ? roleReadiness(person,currentTasks) : '—'}</td><td>${work ? actionFor(work.title,'task',work.id) : '—'}</td><td>${latest ? actionFor(latest.title,'task',latest.id) : '—'}</td></tr>`;
     }).join('')}</tbody></table></div>` :
 copy`<div class="work-map" role="group" aria-label="Карта мастерской">
       ${rooms.map(zone => copy`<section class="work-room" data-zone="${safe(zone.id)}"><div class="room-header"><h2>${zone.name}</h2><span aria-label="Участников в комнате: ${zone.desks.length}">${zone.desks.length}</span></div>
@@ -882,7 +907,7 @@ function appSettings() {
       ${info?.authenticated && !info?.models?.length ? copy('<p class="muted">Подключение не передало каталог. Можно использовать модель по умолчанию или указать идентификатор.</p>') : ''}
       </div><div class="stack compact provider-card-actions">
       <label class="checkbox-field"><input type="checkbox" data-provider-enabled="${id}"${info?.enabled !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Разрешить запуски через ${label}</span></label>
-      <div>${button(checking ? copy('Проверяем…') : copy('Проверить подключение'), `data-inspect="${id}"${checking ? ' disabled' : ''}`, true)}</div>
+      <div>${button(checking ? copy('Проверяем…') : copy('Проверить подключение'), `data-inspect="${id}" aria-label="${safe((checking ? copy('Проверяем…') : copy('Проверить подключение'))+' · '+label)}"${checking ? ' disabled' : ''}`, true)}</div>
       </div>
     </article>`;
   }).join('');
@@ -896,7 +921,7 @@ function appSettings() {
         ${state.quotaPolicy?.pause?`<p class="activity" role="status">${safe(quotaPauseText(state.quotaPolicy.pause))}</p>`:''}
       </div></section>
       <section class="stack compact"><h2>CodeGraph</h2><div class="panel padded stack compact">
-        ${rowAction(copy('Локальная навигация по коду'),copy(state.codeGraphPolicy?.enabled?'Включена по умолчанию':'Выключена по умолчанию'),button(copy('Настроить'),'data-open="app-codegraph"',true))}
+        ${rowAction(copy('Локальная навигация по коду'),copy(state.codeGraphPolicy?.enabled?'Включена по умолчанию':'Выключена по умолчанию'),button(copy('Настроить CodeGraph'),'data-open="app-codegraph"',true))}
       </div></section>
       <section class="stack compact"><h2>Модели приложения</h2><div class="panel padded stack compact">
         ${rowAction(copy('Политика по умолчанию'), state.modelPolicy?.configured
@@ -963,7 +988,7 @@ function settings() {
   const current = studio();
   return heading(copy('Настройки студии'), current.name) + copy`<div class="stack settings">
       <section class="stack compact"><h2>Студия</h2><div class="panel padded stack compact">
-        <div class="row"><h3>${safe(current.name)}</h3><div class="actions">${button(copy('Изменить'), 'data-open="edit-studio"', true)}${current.projectDetached ? safe(ui('detached')) : actionFor(ui('detach'),'detach-folder',current.id)}${actionFor(ui('archive'),'archive-studio',current.id)}${button(copy('Удалить студию'), 'data-open="delete-studio"', true)}</div></div>
+        <div class="row"><h3>${safe(current.name)}</h3><div class="actions">${button(copy('Изменить сведения о студии'), 'data-open="edit-studio"', true)}${current.projectDetached ? safe(ui('detached')) : ''}</div></div>
         ${current.brief ? plain(current.brief) : ''}<dl class="studio-meta"><dt>Рабочая папка</dt><dd>${safe(current.root || copy('Не выбрана'))}</dd><dt>Язык отчётов</dt><dd>${safe(current.language || copy('Не выбран'))}</dd>
           ${current.projectLanguage ? copy`<dt>Язык материалов</dt><dd>${safe(current.projectLanguage)}</dd>` : ''}</dl>
         ${current.root ? `<div>${button(copy('Открыть папку проекта'), 'data-open="project-folder"', true)}</div>` : ''}
@@ -977,17 +1002,17 @@ function settings() {
         ${rowAction(copy('Расписание'), copy`${scheduleLabel(current.schedule)} · Запуск новых задач по часам студии`, button(copy('Настроить расписание'), 'data-open="schedule"', true))}
         ${rowAction(copy('Порог студии'),quotaThresholdText(current.weeklyQuotaThreshold),button(copy('Настроить порог'),'data-open="studio-quota"',true))}
         ${current.quotaPause?`<p class="activity" role="status">${safe(quotaPauseText(current.quotaPause))}</p>`:''}
-        ${rowAction(copy('Одновременные запуски'), `${current.wipLimit ?? 1} · ${(current.wipLimit ?? 1) === 1 ? copy('Задачи идут по очереди') : copy('Независимые рабочие шаги могут идти параллельно')}`, button(copy('Настроить'), 'data-open="dispatch"', true))}
+        ${rowAction(copy('Одновременные запуски'), `${current.wipLimit ?? 1} · ${(current.wipLimit ?? 1) === 1 ? copy('Задачи идут по очереди') : copy('Независимые рабочие шаги могут идти параллельно')}`, button(copy('Настроить число запусков'), 'data-open="dispatch"', true))}
         ${rowAction(copy('Подготовка задач к спринту'), current.groomingPolicy?.enabled
           ? copy('Директор уточняет очередь, когда готовых задач мало и в следующем спринте есть место.')
-          : copy('Автоматическая подготовка выключена. Разбор очереди можно начать из раздела «Работа».'), button(copy('Настроить'), 'data-open="grooming-settings"', true))}
+          : copy('Автоматическая подготовка выключена. Разбор очереди можно начать из раздела «Работа».'), button(copy('Настроить подготовку задач'), 'data-open="grooming-settings"', true))}
       </div></section>
       <section class="stack compact"><h2>Доставка проекта</h2><div class="panel padded stack compact">
         ${rowAction(copy('Репозиторий Git'), current.projectGit?.enabled
           ? [copy('Локальный репозиторий подключён'),current.projectGit.targetRef?.replace(/^refs\/heads\//,'')].filter(Boolean).join(' · ')
           : copy('Git-доставка не подключена.'), button(copy('Настроить Git и проверки'), 'data-open="project-git"', true))}
         ${current.projectGit?.enabled ? rowAction(copy('Рабочие копии'), copy('Посмотрите, какие управляемые копии доступны для уборки.'), button(copy('Проверить уборку'), 'data-open="cleanup"', true)) : ''}
-        ${rowAction('CodeGraph',copy(({inherit:'Наследовать настройку приложения',on:'Использовать CodeGraph',off:'Не использовать CodeGraph'})[current.codeGraphMode??'inherit']),button(copy('Настроить'),'data-open="studio-codegraph"',true))}
+        ${rowAction('CodeGraph',copy(({inherit:'Наследовать настройку приложения',on:'Использовать CodeGraph',off:'Не использовать CodeGraph'})[current.codeGraphMode??'inherit']),button(copy('Настроить CodeGraph'),'data-open="studio-codegraph"',true))}
       </div></section>
       <section class="stack compact"><h2>Модели студии</h2><div class="panel padded stack compact">
         <div class="row"><div><h3>Директор</h3><p class="muted">${safe(configText(current.director) || copy('Модель и усилие по умолчанию'))}</p></div>${button(copy('Настроить директора'), 'data-open="director"', true)}</div>
@@ -1005,7 +1030,7 @@ function settings() {
         ${rowAction(copy('Порог поиска на GitHub'), copy`Минимум звёзд · ${skillStarLabel(current)}`, button(copy('Настроить порог'), 'data-open="skill-settings"', true))}
       </div></section>
       ${renderDebtSettings(current, debtAssessments.get(current.id))}
-      <section class="stack compact"><div class="row"><h2>Роли</h2><div class="actions">${button(copy('Предложить найм'), 'data-open="roster-hire"')}
+      <section class="stack compact" id="studio-roles" tabindex="-1"><div class="row"><h2>Роли</h2><div class="actions">${button(copy('Предложить найм'), 'data-open="roster-hire"')}
         ${button(copy('Лимиты состава'), 'data-open="staffing"', true)}${button(copy('Предложения и история'), 'data-open="roster-history"', true)}</div></div>
         <div class="panel work-list">${current.agents?.length ? current.agents.map(agent => `<div class="list-row static-row"${agent.systemRole === 'coach' ? ' data-system-role="coach"' : ''}><span><strong>${safe(nameFor(agent))}</strong>
           <small>${safe([secondaryTitle(agent), modeNames[agent.mode], agent.mode === 'fixed' ? configText(agent) : ''].filter(Boolean).join(' · '))}</small>
@@ -1016,7 +1041,11 @@ function settings() {
           : copy('<p class="padded muted">Роли появятся после согласования плана. Предложение можно подготовить вручную.</p>')}</div></section></div></details>
       <section class="stack compact"><h2>Экспорт студии</h2><div class="panel padded stack compact">
         <div class="actions">${actionFor(copy('Экспортировать шаблон'), 'export-mode', 'template')}${actionFor(copy('Экспортировать снимок'), 'export-mode', 'snapshot')}</div>
-      </div></section></div>`;
+      </div></section>
+      <details class="panel padded advanced" data-studio-management><summary>Управление хранением и архивом</summary>
+        <div class="stack compact"><p class="muted">Архивация скрывает студию из активных. Отсоединение прекращает связь с папкой проекта.</p>
+        <div class="actions">${current.projectDetached ? '' : actionFor(ui('detach'),'detach-folder',current.id)}${actionFor(ui('archive'),'archive-studio',current.id)}${button(copy('Удалить студию'), 'data-open="delete-studio"', true)}</div></div>
+      </details></div>`;
 }
 
 function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusSummary = false, inlineSubmit = false } = {}) {
@@ -1050,7 +1079,7 @@ function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusS
 
 function dialogBodyFocus() {
   return Array.from($('#dialog-body').querySelectorAll('input:not([readonly]), textarea, select, button'))
-    .find(element => !element.closest('[hidden]'));
+    .find(element => !element.disabled && !element.closest('[hidden],details:not([open])'));
 }
 
 function dialogError(message = '') {
@@ -1132,9 +1161,9 @@ function projectCheckFields(check = {}) {
     <legend>Проверка${check.id ? ` · ${safe(check.id)}` : ''}</legend>
     ${input(copy('Идентификатор проверки'), `${key}-id`, check.id, 'maxlength="64" placeholder="test"')}
     ${input(copy('Исполняемая команда'), `${key}-command`, check.command, 'placeholder="npm"')}
-    ${textarea(copy('Аргументы, по одному на строку'), `${key}-args`, check.args?.join('\n'), 'placeholder="test"')}
     ${checkbox(copy('Обязательная проверка'), `${key}-required`, check.required ?? true)}
-    <details><summary>Пути, доказательства и время</summary><div class="form-body">
+    <details${check.id?'':' open'}><summary>Аргументы, пути, доказательства и время</summary><div class="form-body">
+      ${textarea(copy('Аргументы, по одному на строку'), `${key}-args`, check.args?.join('\n'), 'placeholder="test"')}
       ${textarea(copy('Пути изменений, по одному шаблону на строку'), `${key}-paths`, check.paths?.join('\n'), 'placeholder="src/**"')}
       ${textarea(copy('Файлы с доказательствами, по одному шаблону на строку'), `${key}-evidence`, check.evidenceGlobs?.join('\n'), 'placeholder="reports/**"')}
       ${input(copy('Лимит времени, мс'), `${key}-timeout`, check.timeoutMs ?? 120000, 'type="number" min="1" max="2147483647"')}
@@ -1170,6 +1199,7 @@ function projectGitSettings(current, title) {
     checkbox(copy('Разрешить Git-доставку для задач студии'), 'enabled', git.enabled) +
     input(copy('Целевая локальная ветка'), 'targetRef', git.targetRef, copy('placeholder="Автоматически создать управляемую ветку"')) +
     copy`<p>Проверки проекта — необязательные команды, например тесты или сборка. Hearth запускает их на изменениях задачи перед слиянием. Если обязательная проверка не проходит, Hearth ждёт исправления.</p>
+      <p class="muted">Обязательные проверки · ${checks.filter(check=>check.required).length} / ${checks.length}</p>
       <p class="muted">Команды запускаются в рабочей копии задачи. Например, для <code>npm test</code> укажите команду <code>npm</code> и аргумент <code>test</code>.</p>
       <div class="form-body" data-project-checks>${checks.map(projectCheckFields).join('')}</div>
       <div>${button(copy('Добавить проверку'), 'data-add-project-check', true)}</div>`,
@@ -1472,14 +1502,20 @@ function usageTariffEditor() {
     }));
 }
 
-async function diagnosisDialog() {
+async function diagnosisDialog(task) {
   const current = studio();
   await loadDialog(copy('Диагностика студии'), async isCurrent => {
     const report = await bridge.request('diagnoseStudio', { studioId: current.id });
     const actions = (['resume', 'recover', 'retry'].includes(report.action) ? actionFor(copy('Восстановить работу'), 'run-action', 'resume', false) : '') +
       button(copy('Сохранить диагностику'), 'data-save-diagnostics', true) +
       button(copy('Перезапустить Hearth'), 'data-open="restart-app"', true);
-    if (isCurrent()) dialogTo(copy('Диагностика студии'), renderDiagnostic(report) + (actions ? `<div class="actions">${actions}</div>` : ''));
+    const attempt = task && studioRows('attempts').filter(row=>row.taskId===task.id)
+      .toSorted((a,b)=>String(a.startedAt??'').localeCompare(String(b.startedAt??''))).at(-1);
+    const taskContext = task ? `<section class="inline-result"><h3>${safe(task.title)}</h3>${status(task)}
+      ${attempt?.startedAt ? `<p class="muted">${safe(studioDate(attempt.startedAt))}</p>` : ''}
+      ${attempt?.error || task.error ? plain(attempt?.error || task.error) : ''}</section>` : '';
+    if (isCurrent()) dialogTo(copy('Диагностика студии'), taskContext + renderDiagnostic(report) +
+      (actions ? `<div class="actions">${actions}</div>` : ''),undefined,undefined,{focusSummary:true});
   });
 }
 
@@ -2169,17 +2205,19 @@ function taskEditor(agentId = '', backlog = false) {
   const choices = [option('', copy('Директор'), agentId), ...agents.map(agent => option(String(agent.id), nameFor(agent), agentId))].join('');
   const selectedAttachments = [];
   const records = tasks();
-  dialogTo(copy('Новая задача'), input(copy('Название'), 'title', '', 'required maxlength="160"') +
+  dialogTo(copy(backlog ? 'Добавить в бэклог' : 'Новая задача'), input(copy('Название'), 'title', '', 'required maxlength="160"') +
     textarea(copy('Что нужно сделать'), 'prompt', '', 'required') + select(copy('Исполнитель'), 'agentId', choices) +
-    textarea(copy('Критерии приёмки'),'criteria','') +
+    decisionFold(copy('Критерии, приоритет и зависимости'),textarea(copy('Критерии приёмки'),'criteria','') +
     select(copy('Эпик'),'epicId',option('',copy('Без эпика'))+studioRows('epics').map(e=>option(e.id,e.title,ownerTrail.current?.kind==='epic'?ownerTrail.current.id:'')).join(''))+
     input(copy('Приоритет (0–100)'),'priority',0,'type="number" min="0" max="100"')+
     input(copy('Оценка, баллов'),'points','','type="number" min="1" max="100"')+
     (records.length ? copy`<details class="advanced"><summary>Зависимости</summary>${checkList(copy('Должны завершиться раньше'),records,'dependency',[])}</details>` : '')+
-    attachmentFields() + checkbox(copy('Улучшение проекта'), 'debt') + checkbox(copy('Запустить задачу после создания'), 'startImmediately', !backlog) +
+    checkbox(copy('Улучшение проекта'), 'debt'))+attachmentFields() +
     (current.projectGit?.enabled ? select(copy('Доставка результата'), 'deliveryMode', option('', copy('Текстовый результат или файл')) + option('git', copy('Изменения в Git'))) +
-      select(copy('Независимое ревью для Git'), 'reviewerId', option('', copy('Выбирает студия')) + agents.map(agent => option(String(agent.id), nameFor(agent))).join('')) : ''),
-    copy('Создать задачу'), async ({ agentId: raw, debt, deliveryMode, reviewerId, startImmediately, ...values }) => {
+      `<div data-task-reviewer hidden>${select(copy('Независимое ревью для Git'), 'reviewerId', option('', copy('Выбирает студия')) + agents.map(agent => option(String(agent.id), nameFor(agent))).join(''))}</div>` : '')+
+    checkbox(copy('Запустить задачу после создания'), 'startImmediately', !backlog)+
+    `<p class="muted" data-task-action-hint="${backlog?'backlog':'task'}" aria-live="polite"></p>`,
+    copy(backlog ? 'Добавить в бэклог' : 'Создать и запустить'), async ({ agentId: raw, debt, deliveryMode, reviewerId, startImmediately, ...values }) => {
       const agent = agents.find(item => same(item.id, raw));
       const reviewer = deliveryMode === 'git' && agents.find(item => same(item.id, reviewerId));
       if (deliveryMode === 'git' && !agent) throw new Error(copy('Выберите исполнителя из команды для задачи Git.'));
@@ -2196,6 +2234,7 @@ function taskEditor(agentId = '', backlog = false) {
         await refresh();
         dialog.close();
         inspectObject('task',task.id);
+        notice(copy(startImmediately ? 'Задача создана, запуск запрошен.' : 'Задача сохранена.'));
         return false;
       } catch (error) {
         await refresh();
@@ -2205,6 +2244,22 @@ function taskEditor(agentId = '', backlog = false) {
       }
     }, {adjustable:true});
   dialogAttachments = selectedAttachments;
+  updateTaskEditorFeedback();
+}
+
+function updateTaskEditorFeedback() {
+  const hint = form.querySelector('[data-task-action-hint]');
+  if (!hint) return;
+  const start = form.elements.startImmediately.checked;
+  const backlog = hint.dataset.taskActionHint === 'backlog';
+  const reviewer = form.querySelector('[data-task-reviewer]');
+  if (reviewer) reviewer.hidden = form.elements.deliveryMode.value !== 'git';
+  const label = start ? 'Создать и запустить' : backlog ? 'Добавить в бэклог' : 'Сохранить задачу';
+  const submit = $('#dialog-actions button[type="submit"]');
+  if (submit) submit.textContent = copy(label);
+  hint.textContent = copy(start
+    ? 'Запуск встанет в очередь с учётом паузы, квоты и свободных мест.'
+    : backlog ? 'Карточка станет доступна для планирования спринта.' : 'Задача сохранится. Запуск доступен из её карточки.');
 }
 
 async function loadTransitions(button, task) {
@@ -2513,7 +2568,12 @@ function directorOptionButtons(item) {
 function directorChoiceEffect(item, text) {
   const choice = item.directorSuggestions?.find(option => option.text===text);
   if (!choice) return copy('Вариант заполнит сообщение. Отправьте его, чтобы директор обработал запрос.');
-  if (choice.id==='approve' && item.kind==='plan') return copy('После утверждения Hearth поставит задачи спринта в очередь с учётом зависимостей и подготовки команды.');
+  if (choice.id==='approve' && item.kind==='plan') {
+    const current = state.studios.find(row=>row.id===item.studioId);
+    return copy(current?.manualPaused
+      ? 'Hearth согласует план и поставит задачи в очередь. Запуски начнутся после возобновления студии.'
+      : 'После утверждения Hearth поставит задачи спринта в очередь с учётом зависимостей и подготовки команды.');
+  }
   if (choice.id==='approve' && item.kind==='acceptance') {
     if (item.review?.members?.length) return copy(item.review.delivery
       ? 'Пакет встанет в очередь на слияние. После доставки директор завершит спринт.'
@@ -2560,7 +2620,7 @@ function renderDirectorComposer(item, text) {
   </section>`;
 }
 
-function presentDirectorInbox(item, title, body, {plan, extras=''} = {}) {
+function presentDirectorInbox(item, title, body, {plan, extras='', details=''} = {}) {
   const draft=readReplyDraft(item);
   const captured={ studioId:item.studioId,inboxId:item.id,version:item.version??1,
     expectedResult:item.review?.key,expectedEditVersion:plan ? plan.editVersion??0 : undefined,
@@ -2575,7 +2635,7 @@ function presentDirectorInbox(item, title, body, {plan, extras=''} = {}) {
     await refresh();
     return false;
   };
-  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? ''),undefined,({directorReply})=>send(directorReply),
+  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? '')+details,undefined,({directorReply})=>send(directorReply),
     {adjustable:true,focusSummary:true,inlineSubmit:true});
   directorDialog={ item, captured, send, origin:todayContext, optionsKey:JSON.stringify([state.appLocale,item.directorSuggestions]) };
   if (plan) dialog.dataset.reviewPlan=plan.id;
@@ -2742,8 +2802,14 @@ form.addEventListener('input',event=>{
   }
 });
 form.addEventListener('change',event=>{
+  if (event.target.matches('[name="deliveryMode"],[name="startImmediately"]')) updateTaskEditorFeedback();
   if (directorDialog && event.target.matches('[data-reconciliation-check]')) updateReconciliationChoices(directorDialog,directorDialog.replyBusy);
 });
+form.addEventListener('invalid',event=>{
+  for (let el=event.target.parentElement;el && el!==form;el=el.parentElement) {
+    if (el.matches('details')) el.open = true;
+  }
+},true);
 
 function openInbox(item) {
   if (item.kind === 'plan') {
@@ -2759,8 +2825,8 @@ function openInbox(item) {
   const task=item.kind==='error' && item.status==='open' && tasks().find(row=>row.id===item.taskId);
   const recovery=task ? taskRecoveryBlock(task) : '';
   const body=(recovery ? `<div data-inbox-recovery>${recovery}</div>` : renderReportMarkdown(inboxDetail(item))) +
-    (question ? renderQuestionDetails(item) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
-    (item.taskId ? actionFor(copy('Открыть задачу'), 'task', item.taskId) : '') +
+    (question ? renderQuestionDetails(item,{taskTitles:new Map(tasks().map(task=>[task.id,task.title]))}) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
+    (item.taskId && !item.blockedTaskIds?.includes(item.taskId) ? actionFor(tasks().find(row=>row.id===item.taskId)?.title ?? copy('Открыть задачу'), 'task', item.taskId) : '') +
     (item.meetingId ? actionFor(copy('Открыть протокол'), 'meeting-detail', item.meetingId) : '');
   presentDirectorInbox(item,inboxHeading(item),body);
 }
@@ -2798,17 +2864,35 @@ function openAcceptance(item) {
   const review = item.review;
   const git = review ? review.delivery : task?.gitDelivery;
   const reviewedPaths=review?.artifactPaths ?? (git?.revision?.candidateOid===task?.gitDelivery?.revision?.candidateOid ? task?.gitDelivery?.artifactPaths : undefined) ?? [];
-  const body = `<div data-acceptance-status>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>` +
-    `<div${review ? ` data-report-inbox="${safe(item.id)}"` : ''}>${reviewedPaths.length ? `<section class="stack compact"><h3>${safe(copy('Файлы на приёмке'))}</h3>
-      <div class="actions">${reviewedPaths.map(path=>actionFor(path,'report-link',encodeURI(path))).join('')}</div></section>` : ''}
-      ${renderReportMarkdown(item.body)}${review?.summary && review.summary!==item.body ? renderReportMarkdown(review.summary) : ''}</div>` +
-    (review ? `${review.criteria ? renderReportMarkdown(listText(review.criteria)) : ''}<small>${safe(review.key.slice(0,12))}</small>` : '') +
-    (review?.members ? `<section data-report-inbox="${safe(item.id)}"><h3>${ui('members')}</h3>${review.members.map(m=>`<div>${actionFor(m.title,'task',m.taskId)} · ${safe(m.revision)}${renderReportMarkdown(m.summary)}</div>`).join('')}</section>` : '') +
-    (review?.artifactPath ? `<div class="actions">${actionFor(copy('Открыть файл этой версии'),'review-file',item.id)}${actionFor(copy('Показать в папке'),'reveal-review-file',item.id)}${actionFor(copy('Копировать путь'),'copy-review-file',item.id)}</div>` :
-      !review && task?.artifactPath ? actionFor(copy('Открыть файл'),'artifact',task.id) : '') +
-    (git ? renderDelivery({ checks:git.checks, delivery:git, receipts:git.receipt ? [git.receipt] : [],
-      evidence: studioRows('evidence').filter(row => (review ? review.evidenceIds.includes(row.id) : row.taskId === task.id) && row.kind !== 'attachment') }) : '');
-  presentDirectorInbox(item,inboxLabel(item),body);
+  const target = review?.targetRef ?? git?.targetRef;
+  const scope = review ? ` data-report-inbox="${safe(item.id)}"` : '';
+  const pathButtons = reviewedPaths.map(path=>actionFor(path,'report-link',encodeURI(path)));
+  const filePreview = pathButtons.length>1
+    ? decisionFold(copy`Файлы на приёмке · ${pathButtons.length}`,`<div class="actions"${scope}>${pathButtons.join('')}</div>`)
+    : pathButtons.length ? `<div class="actions"${scope}>${pathButtons[0]}</div>` : '';
+  const copyControls = review?.artifactPath ? `<div class="actions">${actionFor(copy('Открыть файл этой версии'),'review-file',item.id)}${actionFor(copy('Показать в папке'),'reveal-review-file',item.id)}${actionFor(copy('Копировать путь'),'copy-review-file',item.id)}</div>` :
+    !review && task?.artifactPath ? actionFor(copy('Открыть файл'),'artifact',task.id) : '';
+  const firstParagraph = String(item.body??'').trim().split(/\r?\n\s*\r?\n/u)[0];
+  const excerpt = firstParagraph.length > 500 ? firstParagraph.slice(0,500).trimEnd()+'…' : firstParagraph;
+  const body = `<div data-acceptance-status>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>
+    <div${scope}>${renderReportMarkdown(excerpt)}</div>
+    ${target ? copy`<p class="decision-target"><strong>Ветка доставки</strong> <code>${safe(target.replace(/^refs\/heads\//u,''))}</code></p>` : ''}
+    ${renderRecordedChecks(git)}
+    ${copyControls}${filePreview}
+    ${review?.key ? `<small class="muted">${safe(copy('Версия приёмки'))} · <code>${safe(review.key.slice(0,12))}</code></small>` : ''}`;
+  const delivery = git ? renderDelivery({checks:git.checks,delivery:git,receipts:git.receipt?[git.receipt]:[],
+    evidence:studioRows('evidence').filter(row => (review ? review.evidenceIds?.includes(row.id) : row.taskId === task?.id) && row.kind !== 'attachment')}) : '';
+  const reportDetails = excerpt !== item.body?.trim() || review?.summary && review.summary!==item.body;
+  const details =
+    (reportDetails ? decisionFold(copy('Полный отчёт'),`<div${scope}>${excerpt !== item.body?.trim() ? renderReportMarkdown(item.body) : ''}${review?.summary && review.summary!==item.body ? renderReportMarkdown(review.summary) : ''}</div>`) : '') +
+    (review?.criteria ? decisionFold(copy('Критерии приёмки'),renderReportMarkdown(listText(review.criteria))) : '') +
+    (review?.members?.length ? decisionFold(ui('members'),`<div${scope}>${review.members.map(m=>`<div>${actionFor(m.title,'task',m.taskId)} · ${safe(m.revision)}${renderReportMarkdown(m.summary)}</div>`).join('')}</div>`) : '') +
+    (delivery ? decisionFold(copy('Проверки и доказательства'),delivery) : '');
+  presentDirectorInbox(item,inboxLabel(item),body,{details});
+}
+
+function decisionFold(label, body) {
+  return `<details class="advanced decision-detail"><summary>${safe(label)}</summary><div class="stack compact">${body}</div></details>`;
 }
 
 const listText = value => Array.isArray(value) ? value.join('\n') : value;
@@ -2822,7 +2906,7 @@ async function showDecisionOutcome(taskId,origin=todayContext) {
   if(!ownerTrail.current) route('work');
   if(tasks().some(t=>t.id===taskId))inspectObject('task',taskId);
   const run=studioRows('attempts').filter(r=>r.taskId===taskId && r.status==='running').at(-1);
-  notice(run ? ui('running')+' · '+run.id : (studio().scheduleWaiting ? ui('window')+' · '+studioDate(studio().nextScheduleAt) : ui('saved')));
+  notice(run ? copy('Новый запуск начат.') : (studio().scheduleWaiting ? ui('window')+' · '+studioDate(studio().nextScheduleAt) : ui('saved')));
   return false;
 }
 
@@ -2853,30 +2937,40 @@ function planBody(plan, compare=true) {
   const titles = new Map((plan.tasks ?? []).map(task => [task.key ?? task.id, task.title]));
   const entity = (label, value) => value ? `<section class="inline-result"><h3>${label}</h3><p>${safe(value.title ?? value)}</p>
     ${value.description ? plain(value.description) : ''}${value.acceptance ? plain(listText(value.acceptance)) : ''}</section>` : '';
-  return `<div class="actions"><span data-plan-dialog-status>${planStatusBadge(plan.status)}</span>${plan.debtSprint ? badge(copy('Спринт улучшений')) : ''}</div>
-    ${plan.goal ? `<p>${safe(plan.goal)}</p>` : ''}
-    ${plan.status==='pending' ? `<p class="muted">${ui('firstWork')} · ${safe((plan.tasks??[]).filter(t=>!t.dependsOn?.length).map(t=>t.title).join(', ') || '—')}</p>
-      <p class="muted">${ui('newRoles')} · ${safe(agents.filter(a=>!studio().agents.some(r=>(r.key??r.id)===a.key)).map(nameFor).join(', ') || '—')}</p>` : ''}
+  const firstTasks = (plan.tasks??[]).filter(t=>!t.dependsOn?.length);
+  const newRoles = agents.filter(a=>!studio().agents.some(r=>(r.key??r.id)===a.key));
+  const older = previous && planBody(previous,false);
+  const summary = `<div class="actions"><span data-plan-dialog-status>${planStatusBadge(plan.status)}</span>${plan.debtSprint ? badge(copy('Спринт улучшений')) : ''}</div>
+    ${plan.goal ? renderReportMarkdown(plan.goal) : ''}
+    <p class="muted">${safe(copy('Задач в спринте'))} · ${plan.tasks?.length??0}${newRoles.length ? ` · ${safe(ui('newRoles'))} · ${newRoles.length}` : ''}</p>
+    ${plan.status==='pending' && firstTasks.length ? `<p class="muted">${ui('firstWork')} · ${safe(firstTasks.slice(0,3).map(t=>t.title).join(', '))}${firstTasks.length>3?` (+${firstTasks.length-3})`:''}</p>` : ''}
     <p>${ui('release')} · ${ui(({off:'releaseOff',summary:'releaseSummary',hold:'releaseHold'})[plan.sprintReview ?? studio().sprintReview ?? 'off'])}</p>
-    ${previous ? `<section>${plain(previous.feedback)}<p>${ui('changedTasks')} · ${safe(differences.join(', ') || '—')}</p><details><summary>${ui('previousPlan')}</summary>${planBody(previous,false)}</details></section>` : ''}
-    ${entity(copy('Эпик'), plan.epic)}${entity(copy('Первая история'), plan.story)}
-    ${agents.length ? copy`<section class="stack compact"><h3>Команда</h3><ul class="plan-list">${agents.map(agent =>
+    ${previous ? `<section>${previous.feedback ? renderReportMarkdown(previous.feedback) : ''}<p>${ui('changedTasks')} · ${safe(differences.slice(0,5).join(', ') || '—')}${differences.length>5?` (+${differences.length-5})`:''}</p></section>` : ''}`;
+  const team = agents.length ? `<ul class="plan-list">${agents.map(agent =>
       `<li><strong>${safe(nameFor(agent))}</strong>${secondaryTitle(agent) ? `<span class="muted"> · ${safe(secondaryTitle(agent))}</span>` : ''}
         <div>${safe(agent.description || roleDetails[agent.role] || '')}</div>
-        ${planAgentModelSummary(agent, plan.kind === 'initial')}</li>`).join('')}</ul></section>` : ''}
-    ${plan.tasks?.length ? copy`<section class="stack compact"><h3>Задачи</h3><ol class="plan-list">${plan.tasks.map(task => copy`<li>
-      <strong>${safe(task.title)}</strong>${task.kind === 'debt' ? ' ' + badge(copy('Улучшение')) : ''}
+        ${planAgentModelSummary(agent, plan.kind === 'initial')}</li>`).join('')}</ul>` : '';
+  const taskList = plan.tasks?.length ? `<ol class="plan-list">${plan.tasks.map(task => copy`<li><details class="plan-task-detail">
+      <summary>${safe(task.title)}${task.kind === 'debt' ? ' ' + badge(copy('Улучшение')) : ''}
+        ${task.agentKey ? `<small> · ${safe(nameFor(agentByKey(task.agentKey)))}</small>` : ''}</summary>
       ${task.agentKey ? copy`<p class="muted">Исполнитель — ${safe(nameFor(agentByKey(task.agentKey)))}</p>` : ''}
       <small>${safe(assignedModel(task))}</small>
       ${task.reviewerKey ? copy`<p class="muted">Проверяет — ${safe(nameFor(agentByKey(task.reviewerKey)))}</p>` : ''}
       <p class="muted">Принимает результат — ${task.requiresAcceptance ? copy('владелец') : copy('студия')}</p>
-      ${task.criteria ? `<div>${plain(listText(task.criteria))}</div>` : ''}
+      ${task.criteria ? renderReportMarkdown(listText(task.criteria)) : ''}
       ${task.dependsOn?.length ? copy`<small>После задач ${safe(task.dependsOn.map(key => titles.get(key) ?? key).join(', '))}</small>` : ''}
-    </li>`).join('')}</ol></section>` : ''}
-    ${plan.files?.length ? copy`<section class="stack compact"><h3>Файлы плана</h3><ul class="plan-list">${plan.files.map(file =>
+    </details></li>`).join('')}</ol>` : '';
+  const files = plan.files?.length ? `<ul class="plan-list">${plan.files.map(file =>
       `<li>${published.has(file.path) ? `<button type="button" class="text-button" data-plan-file="${safe(file.path)}" data-plan-id="${safe(plan.id)}">${safe(file.path)}</button>`
-        : safe(file.path)}</li>`).join('')}</ul></section>` : ''}
-    ${plan.feedback ? copy`<section class="inline-result"><h3>Комментарий владельца</h3>${plain(plan.feedback)}</section>` : ''}`;
+        : safe(file.path)}</li>`).join('')}</ul>` : '';
+  const taskDetails = taskList ? decisionFold(copy`Задачи и критерии · ${plan.tasks.length}`,taskList) : '';
+  const details =
+    (team ? decisionFold(copy`Команда · ${agents.length}`,team) : '') +
+    (plan.epic || plan.story ? decisionFold(copy('Эпик и история'),entity(copy('Эпик'),plan.epic)+entity(copy('Первая история'),plan.story)) : '') +
+    (files ? decisionFold(copy('Файлы плана'),files) : '') +
+    (older ? decisionFold(ui('previousPlan'),older.summary+older.taskDetails+older.details) : '') +
+    (plan.feedback ? decisionFold(copy('Комментарий владельца'),renderReportMarkdown(plan.feedback)) : '');
+  return {summary,details,taskDetails};
 }
 
 function planAgentModelSummary(agent, showMode = true) {
@@ -2889,11 +2983,12 @@ function planAgentModelSummary(agent, showMode = true) {
 function openPlan(plan) {
   const item = entries().find(row=>row.planId===plan.id && row.kind==='plan');
   const title = plan.title || (plan.kind === 'initial' ? copy('План инициализации') : copy('План спринта'));
-  const body = planBody(plan) + (plan.status==='pending' ? autonomyHint() : '');
+  const {summary,details,taskDetails} = planBody(plan);
+  const extraDetails = details+(plan.status==='pending' ? autonomyHint() : '');
   const edits = plan.status==='pending' ? actionFor(copy('Изменить задачи и приёмку'), 'edit-plan-tasks', plan.id) +
     (plan.kind === 'initial' && plan.agents?.length ? actionFor(copy('Изменить состав'), 'edit-plan-team', plan.id) : '') : '';
-  if (item) presentDirectorInbox(item,title,body,{plan,extras:edits});
-  else dialogTo(title,body,undefined,undefined,{adjustable:true,focusSummary:true});
+  if (item) presentDirectorInbox(item,title,summary+taskDetails,{plan,extras:edits,details:extraDetails});
+  else dialogTo(title,summary+taskDetails+extraDetails,undefined,undefined,{adjustable:true,focusSummary:true});
 }
 
 function planTasksEditor(plan) {
@@ -3481,18 +3576,33 @@ content.addEventListener('input', event => {
   if (event.target.matches('[data-file-query],[data-file-from],[data-file-to]')) {
     const query=content.querySelector('[data-file-query]').value.trim().toLocaleLowerCase();
     const from=content.querySelector('[data-file-from]').value, to=content.querySelector('[data-file-to]').value;
+    const searching = Boolean(query || from || to);
+    let visible = 0;
     for(const row of content.querySelectorAll('[data-file-key]')) {
       const date=row.dataset.fileDate;
       row.hidden=!row.dataset.fileKey.toLocaleLowerCase().includes(query) || Boolean(from && (!date || date<from)) || Boolean(to && (!date || date>to));
+      if (!row.hidden) visible++;
     }
+    const empty = content.querySelector('[data-file-no-matches]');
+    if (empty) empty.hidden = visible > 0;
+    for (const section of content.querySelectorAll('[data-file-section]')) {
+      section.hidden = searching && !section.querySelector('[data-file-key]:not([hidden])');
+    }
+    const evidence = content.querySelector('[data-artifact-evidence]');
+    if (searching && evidence?.querySelector('[data-file-key]:not([hidden])')) evidence.open = true;
     return;
   }
-  if (!event.target.matches('[data-registry-query], [data-registry-stage], [data-registry-owner], [data-registry-sprint]')) return;
+  if (!event.target.matches('[data-registry-query], [data-registry-stage], [data-registry-owner], [data-registry-sprint], [data-registry-decision]')) return;
   registryQuery = content.querySelector('[data-registry-query]').value;
   registryStage = content.querySelector('[data-registry-stage]').value;
   registryOwner = content.querySelector('[data-registry-owner]').value;
   registrySprint = content.querySelector('[data-registry-sprint]').value;
-  content.querySelector('[data-registry-rows]').innerHTML = registerRows(tasks(), studio(), studioRows('sprints'), registryQuery, registryStage,registrySprint,registryOwner);
+  registryDecision = content.querySelector('[data-registry-decision]').checked;
+  const rows=content.querySelector('[data-registry-rows]');
+  const board=content.querySelector('[data-board-rows]');
+  if (rows) rows.innerHTML = registerRows(tasks(),studio(),studioRows('sprints'),registryQuery,registryStage,registrySprint,registryOwner,{decision:registryDecision,inbox:entries()});
+  if (board) board.innerHTML = boardRows(tasks(),studio(),studioRows('sprints'),{showEmpty:boardShowEmpty,allSprints:boardAllSprints,
+    query:registryQuery,stage:registryStage,sprintId:registrySprint,agentId:registryOwner,decision:registryDecision,inbox:entries()});
 });
 
 document.addEventListener('click', event => {
@@ -3525,6 +3635,7 @@ document.addEventListener('click', event => {
   else if(data.skillDecline) void workCommand('decideSkillVersion',{studioId,skillId:data.skillDecline,commit:data.skillVersion,decision:'decline'},copy('Текущая версия сохранена.'));
   else if (data.copyId!==undefined) void bridge.request('copyTaskId',{studioId,taskId:data.copyId})
     .then(()=>notice(copy('ID задачи скопирован.'))).catch(e=>notice(e.message,true));
+  else if (data.taskDiagnosis!==undefined) withRow(tasks(),data.taskDiagnosis,diagnosisDialog);
   else if(data.taskCheckResults!==undefined) {
     if(!dialog.open&&ownerTrail.current?.id!==data.taskCheckResults)inspectObject('task',data.taskCheckResults);
     const region=(dialog.open?$('#dialog-body'):$('#owner-body')).querySelector('[data-task-delivery]');
@@ -3636,6 +3747,11 @@ document.addEventListener('click', event => {
     dialog.close();
     route('settings');
     $('#autonomy').focus();
+  } else if (data.rosterSettings !== undefined) {
+    if (dialog.open) dialog.close();
+    advancedOpen = true;
+    route('settings');
+    $('#studio-roles')?.focus();
   } else if (data.importLegacy !== undefined) importEditor(data.importLegacy);
   else if (data.exportMode) exportEditor(data.exportMode);
   else if (data.task !== undefined) {

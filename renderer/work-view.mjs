@@ -4,6 +4,7 @@ import { roleNames } from './workshop.mjs';
 import { coachTitle, pendingDependencies } from './coach-view.mjs';
 import {progressMark,stageMark} from './presentation.mjs';
 import { renderEvidence, renderRetrospective } from './legacy-view.mjs';
+import { taskOwnerDecision, taskOwnerState, taskStage as stageOf } from './owner-facts.mjs';
 
 const makeTabs = () => ({
   registry: uiCopy('Реестр задач'),
@@ -17,10 +18,6 @@ const makeStages = () => ({
 });
 let stages = makeStages();
 onCopyLocale(() => { stages = makeStages(); });
-const legacyStages = {
-  queued: 'ready', scheduled: 'ready', running: 'in_progress', waiting: 'blocked',
-  completed: 'done', failed: 'blocked', interrupted: 'blocked', cancelled: 'blocked',
-};
 const makePlanStatuses = () => ({
   draft: uiCopy('Черновик'), pending: uiCopy('Ждёт согласования'), approved: uiCopy('Согласован'), returned: uiCopy('На доработке'),
 });
@@ -42,7 +39,6 @@ onCopyLocale(()=>{ meetingDate=new Intl.DateTimeFormat(getCopyLocale(), { dateSt
 const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const safe = value => String(value ?? '').replace(/[&<>"']/g, character => entities[character]);
 const lookup = (dictionary, key) => Object.hasOwn(dictionary, key) ? dictionary[key] : undefined;
-const stageOf = task => lookup(stages, task.stage) ? task.stage : (lookup(legacyStages, task.status) ?? 'backlog');
 const listed = value => Array.isArray(value) ? value : (value ? [value] : []);
 const nameOf = (record, fallback) => record.title || record.name || fallback;
 const groupByField = (records, field) => Map.groupBy(records, record => record[field]);
@@ -88,27 +84,34 @@ function linkedTasks(tasks, byTask) {
     </li>`).join('')}</ul>`;
 }
 
-function board(tasks, studio, byTask, sprints, showEmpty, allSprints) {
+export function boardRows(tasks, studio, sprints, {showEmpty, allSprints, query='', stage='', sprintId='', agentId='', decision=false, inbox=[]}={}) {
+  const allTasks = tasks;
+  const byTask = new Map(allTasks.map(task => [task.id, task]));
   const active=sprints.findLast(row=>row.status==='active');
-  if(active&&!allSprints)tasks=tasks.filter(t=>t.sprintId===active.id||active.taskIds?.includes(t.id));
+  const explicitSearch = Boolean(query.trim() || stage || sprintId || agentId || decision);
+  if (active && !allSprints && !explicitSearch) tasks = tasks.filter(t=>t.sprintId===active.id||active.taskIds?.includes(t.id));
+  const { matches, owners } = taskSearch(studio,sprints,{query,stage,sprintId,agentId,decision,inbox});
+  tasks = tasks.filter(matches);
   const replaced = tasks.filter(task => task.stage === 'replaced');
   const byStage = Map.groupBy(tasks.filter(task => task.stage !== 'replaced'), stageOf);
-  const agents = new Map((studio.agents ?? []).map(agent => [agent.id, agent]));
   const control = action(showEmpty?uiCopy('Скрыть пустые этапы'):uiCopy('Показать пустые этапы'),'board-empty','toggle')+
-    (active?action(allSprints?uiCopy('Текущий спринт'):uiCopy('Все задачи'),'board-scope','toggle'):'');
+    (active && !explicitSearch ? action(allSprints?uiCopy('Текущий спринт'):uiCopy('Все задачи'),'board-scope','toggle'):'');
   return uiCopy`<div class="actions">${control}</div>
-  ${!tasks.length&&!showEmpty?empty(uiCopy('На доске пока пусто'),uiCopy('Задачи появятся здесь после согласования плана или создания вручную.')):''}
+  ${!tasks.length&&!showEmpty ? explicitSearch
+    ? `<p class="work-muted" role="status">${uiCopy('По этим условиям задач нет.')}</p>`
+    : empty(uiCopy('На доске пока пусто'),uiCopy('Задачи появятся здесь после согласования плана или создания вручную.')) : ''}
   <div class="work-board" role="region" aria-label="Доска задач" tabindex="0">
     ${Object.entries(stages).filter(([stage])=>showEmpty||byStage.has(stage)).map(([stage, label]) => {
       const lane = byStage.get(stage) ?? [];
       return `<section class="work-lane" data-stage="${stage}" aria-labelledby="work-stage-${stage}">
         <header><h2 id="work-stage-${stage}">${stageMark(stage,label)}</h2><span>${lane.length}</span></header>
         <ul>${lane.map(task => {
-          const agent = agents.get(task.agentId);
-          const owner = agent ? (agent.systemRole === 'coach' ? coachTitle : agent.name || lookup(roleNames, agent.role)) :
-            (task.agentId ? '' : (studio.director?.name || uiCopy('Директор')));
+          const owner = owners.get(task.agentId) ?? (!task.agentId ? studio.director?.name || uiCopy('Директор') : '');
+          const state = taskOwnerState(task,{inbox,tasks:allTasks});
+          const reason = state.label !== label ? `<small class="work-muted">${safe(state.label)}</small>` : '';
           return `<li class="work-task"${['train', 'debt'].includes(task.kind) ? ` data-task-kind="${task.kind}"` : ''}>
             ${taskLink(task, false)}
+            ${reason}
             <div class="work-ticket-meta"><small class="registry-meta">${safe(task.legacyId||task.id?.slice(0,8))}</small>${dependencyLink(task,byTask)||`<small class="work-owner">${safe(owner)}</small>`}</div>
           </li>`;
         }).join('')}</ul>
@@ -276,7 +279,8 @@ function artifactsView(tasks, plans, evidence, studio, sprints) {
   const attrs=(key,at)=>`data-file-key="${safe(key.filter(Boolean).join(' '))}" data-file-date="${safe(at?.slice(0,10))}"`;
   const fileButtons=(id,path,isPlan)=>['revealArtifact','copyArtifactPath'].map((cmd,i)=>
     `<button type="button" class="text-button" data-file-action="${cmd}" data-file-source="${isPlan?'plan':'task'}" data-file-id="${safe(id)}" data-file-path="${safe(path)}">${uiCopy(i ? 'Копировать путь' : 'Показать в папке')}</button>`).join(' ');
-  const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary || task.gitDelivery?.artifactPaths?.length);
+  const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary || task.gitDelivery?.artifactPaths?.length)
+    .toSorted((a,b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')));
   const planResults = plans.map(plan => ({ plan, paths: [...new Set(publishedPaths(plan))] }))
     .filter(({ paths }) => paths.length);
   if (!taskResults.length && !planResults.length && !evidence.length) {
@@ -285,8 +289,8 @@ function artifactsView(tasks, plans, evidence, studio, sprints) {
 
   return `<div class="work-records">
     <div class="actions"><input data-file-query aria-label="${ui('findFile')}" placeholder="${ui('findFile')}"><label>${ui('periodFrom')} <input type="date" data-file-from></label><label>${ui('periodTo')} <input type="date" data-file-to></label></div>
-    ${evidence.map(e=>`<div ${attrs([e.sourcePath,e.kind,...info(tasks.find(t=>t.id===e.taskId))],e.recordedAt)}>${renderEvidence([e])}</div>`).join('')}
-    ${taskResults.length ? uiCopy`<section class="work-record">
+    <p class="work-muted" role="status" data-file-no-matches hidden>${uiCopy('Файлов по этим условиям нет.')}</p>
+    ${taskResults.length ? uiCopy`<section class="work-record" data-file-section>
       <h2>Результаты задач</h2>
       <ul class="work-links">${taskResults.map(task => `<li data-report-task="${safe(task.id)}" ${attrs([...info(task),task.artifactPath,...(task.artifactVersions??[]),...(task.gitDelivery?.artifactPaths??[])],task.updatedAt)}>
         ${taskLink(task, false)} <small>${safe(info(task).slice(2).join(" · "))} ${safe(task.updatedAt?.slice(0,10))}</small>
@@ -296,7 +300,7 @@ function artifactsView(tasks, plans, evidence, studio, sprints) {
         ${(task.gitDelivery?.artifactPaths??[]).map(path=>`<div><button type="button" class="text-button work-file-link" data-report-link="${safe(encodeURI(path))}">${safe(path)}</button></div>`).join('')}
       </li>`).join('')}</ul>
     </section>` : ''}
-    ${planResults.length ? uiCopy`<section class="work-record">
+    ${planResults.length ? uiCopy`<section class="work-record" data-file-section>
       <h2>Файлы планов</h2>
       ${planResults.map(({ plan, paths }) => `<section class="work-story">
         <h3>${safe(nameOf(plan, uiCopy('План без названия')))}</h3>
@@ -305,6 +309,10 @@ function artifactsView(tasks, plans, evidence, studio, sprints) {
         </li>`).join('')}</ul>
       </section>`).join('')}
     </section>` : ''}
+    ${evidence.length ? uiCopy`<details class="work-record" data-artifact-evidence data-file-section>
+      <summary>Журналы и доказательства · ${evidence.length}</summary>
+      ${renderEvidence(evidence, {heading:false, attributes:e=>attrs([e.name,e.sourcePath,e.kind,...info(tasks.find(t=>t.id===e.taskId))],e.recordedAt)})}
+    </details>` : ''}
   </div>`;
 }
 
@@ -336,31 +344,40 @@ function planningView(studio, phases, tasks) {
   </div>`;
 }
 
-export function registerRows(tasks, studio, sprints, query, stage, sprintId='', agentId='') {
-  const owners = new Map((studio.agents ?? []).map(a => [a.id, a.name || a.roleTitle || a.role]));
+function taskSearch(studio, sprints, {query='',stage='',sprintId='',agentId='',decision=false,inbox=[]}={}) {
+  const owners = new Map((studio.agents ?? []).map(a => [a.id, a.systemRole==='coach' ? coachTitle : a.name || a.roleTitle || lookup(roleNames,a.role) || a.role]));
   const sprintNames = new Map(sprints.map(s => [s.id, s.title]));
   const needle = query.trim().toLocaleLowerCase();
-  const rows = [];
+  return {owners,sprintNames,matches(task) {
+    if (sprintId && task.sprintId !== sprintId) return false;
+    if (agentId && (agentId==='director' ? Boolean(task.agentId) : task.agentId !== agentId)) return false;
+    if (stage && stageOf(task) !== stage) return false;
+    if (decision && !taskOwnerDecision(task,inbox)) return false;
+    return [task.title, task.id, task.legacyId, owners.get(task.agentId) ?? studio.director?.name ?? uiCopy('Директор'),
+      sprintNames.get(task.sprintId), task.prompt].join(' ').toLocaleLowerCase().includes(needle);
+  }};
+}
+
+export function registerRows(tasks, studio, sprints, query, stage, sprintId='', agentId='', {decision=false,inbox=[]}={}) {
+  const {matches,owners,sprintNames} = taskSearch(studio,sprints,{query,stage,sprintId,agentId,decision,inbox});
   const byTask=new Map(tasks.map(task=>[task.id,task]));
-  for (const task of tasks) {
-    if ((sprintId && task.sprintId!==sprintId) || (agentId && task.agentId!==agentId)) continue;
+  const rows = tasks.filter(matches).map(task => {
     const owner = owners.get(task.agentId) || (task.agentId ? uiCopy('Неизвестный агент') : uiCopy('Директор'));
     const sprint = sprintNames.get(task.sprintId) || '';
-    const state = task.stage === 'replaced' ? 'replaced' : stageOf(task);
-    if (stage && state !== stage) continue;
-    if (![task.title, task.id, owner, sprint, task.prompt].join(' ').toLocaleLowerCase().includes(needle)) continue;
-    rows.push(`<tr><td><div class="registry-task">${taskLink(task, false)}<small class="registry-meta">${safe(task.legacyId || task.id?.slice(0,8))}${task.priority!=null ? ' · P'+safe(task.priority) : ''}</small></div></td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${stageMark(state,stages[state]||uiCopy('Заменена'))}${dependencyLink(task,byTask)}</td></tr>`);
-  }
+    const state = taskOwnerState(task,{inbox,tasks});
+    return `<tr><td><div class="registry-task">${taskLink(task, false)}<small class="registry-meta">${safe(task.legacyId || task.id?.slice(0,8))}${task.priority!=null ? ' · P'+safe(task.priority) : ''}</small></div></td><td>${safe(owner)}</td><td>${safe(sprint || '—')}</td><td>${stageMark(state.stage,state.label)}${dependencyLink(task,byTask)}${task.updatedAt ? `<time class="registry-meta" datetime="${safe(task.updatedAt)}">${safe(task.updatedAt.slice(0,10))}</time>` : ''}</td></tr>`;
+  });
   return rows.join('') || uiCopy('<tr><td colspan="4">По этим условиям задач нет.</td></tr>');
 }
 
-export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], tab = 'board', expandedEpics = new Set(), expandedRecords=new Set(), boardShowEmpty=false, boardAllSprints=false, registryQuery = '', registryStage = '', registrySprint = '', registryOwner = '' } = {}) {
+export function renderWork({ studio = {}, tasks = [], epics = [], stories = [], sprints = [], meetings = [], plans = [], phases = [], evidence = [], inbox=[], tab = 'board', expandedEpics = new Set(), expandedRecords=new Set(), boardShowEmpty=false, boardAllSprints=false, registryQuery = '', registryStage = '', registrySprint = '', registryOwner = '', registryDecision=false } = {}) {
   const filterSelect=(name,label,items,selected)=>uiCopy`<label class="registry-filter">${label}<select data-registry-${name}><option value="">Все</option>${items.map(i=>`<option value="${safe(i.id)}" ${i.id===selected?'selected':''}>${safe(i.title || i.name || i.roleTitle || i.role || i.id)}</option>`).join('')}</select></label>`;
   const selected = lookup(tabs, tab) ? tab : 'board';
   const byTask = new Map(tasks.map(task => [task.id, task]));
+  const filters = uiCopy`<div class="actions"><input type="search" data-registry-query aria-label="Найти задачу" placeholder="Название, ID, агент, спринт" value="${safe(registryQuery)}"><select data-registry-stage aria-label="Этап"><option value="">Все этапы</option>${Object.entries({...stages, replaced: uiCopy('Заменена')}).map(([key,label]) => `<option value="${key}" ${registryStage === key ? 'selected' : ''}>${label}</option>`).join('')}</select>${filterSelect('sprint',uiCopy('Спринт'),sprints,registrySprint)}${filterSelect('owner',uiCopy('Исполнитель'),[{id:'director',name:uiCopy('Директор')},...(studio.agents ?? [])],registryOwner)}<label class="checkbox-field"><input type="checkbox" data-registry-decision${registryDecision?' checked':''}> <span>Требуется моё решение</span></label></div>`;
   const views = {
-    registry: () => uiCopy`<section><div class="actions"><input type="search" data-registry-query aria-label="Найти задачу" placeholder="Название, ID, агент, спринт" value="${safe(registryQuery)}"><select data-registry-stage aria-label="Этап"><option value="">Все этапы</option>${Object.entries({...stages, replaced: uiCopy('Заменена')}).map(([key,label]) => `<option value="${key}" ${registryStage === key ? 'selected' : ''}>${label}</option>`).join('')}</select>${filterSelect("sprint",uiCopy("Спринт"),sprints,registrySprint)}${filterSelect("owner",uiCopy("Исполнитель"),studio.agents ?? [],registryOwner)}</div><div class="registry-scroll"><table class="registry"><thead><tr><th>Задача</th><th>Ответственный</th><th>Спринт</th><th>Этап</th></tr></thead><tbody data-registry-rows>${registerRows(tasks, studio, sprints, registryQuery, registryStage, registrySprint, registryOwner)}</tbody></table></div></section>`,
-    board: () => board(tasks, studio, byTask,sprints,boardShowEmpty,boardAllSprints),
+    registry: () => uiCopy`<section>${filters}<div class="registry-scroll"><table class="registry"><thead><tr><th>Задача</th><th>Ответственный</th><th>Спринт</th><th>Этап</th></tr></thead><tbody data-registry-rows>${registerRows(tasks, studio, sprints, registryQuery, registryStage, registrySprint, registryOwner,{decision:registryDecision,inbox})}</tbody></table></div></section>`,
+    board: () => `${filters}<div data-board-rows>${boardRows(tasks,studio,sprints,{showEmpty:boardShowEmpty,allSprints:boardAllSprints,query:registryQuery,stage:registryStage,sprintId:registrySprint,agentId:registryOwner,decision:registryDecision,inbox})}</div>`,
     epics: () => epicView(epics, stories, tasks, byTask, expandedEpics,expandedRecords),
     sprints: () => sprintView(studio, sprints, plans, tasks, byTask,expandedRecords),
     meetings: () => meetingsView(meetings, byTask, sprints,expandedRecords),

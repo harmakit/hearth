@@ -71,7 +71,11 @@ export function todayItems(snapshot, projectAvailability = {}) {
     if(!Object.hasOwn(decisionType,kind))continue;
     const members=(entry.review?.members??[]).map(m=>m.taskId).filter(taskId=>taskByKey.has(scopedKey(studioId,taskId)));
     const roots=[...new Set([...(task&&unresolved(task)?[task.id]:[]),...members])];
-    const dependencies=affected(studioId,[...roots]);
+    const explicit=(entry.blockedTaskIds??[]).filter(id=>{
+      const blocked=taskByKey.get(scopedKey(studioId,id));
+      return blocked && unresolved(blocked) && !roots.includes(id);
+    });
+    const dependencies=[...new Set([...explicit,...affected(studioId,[...roots,...explicit])])];
     const affectedTaskIds=[...new Set([...members,...dependencies])];
     append({studioId,kind,id,inboxId:id,label:entry.title,detail:entry.body,createdAt:entry.createdAt,affectedTaskIds,target,action,blocking:dependencies.length>0});
   }

@@ -1,3 +1,42 @@
+import { copy } from './copy.mjs';
+
+const stageLabels = {
+  backlog:'Бэклог', ready:'Готова к работе', in_progress:'В работе', review:'На ревью',
+  qa:'На проверке', done:'Готово', blocked:'Заблокирована', replaced:'Заменена',
+};
+const legacyStages = {
+  queued:'ready', scheduled:'ready', running:'in_progress', waiting:'blocked',
+  completed:'done', failed:'blocked', interrupted:'blocked', cancelled:'blocked',
+};
+
+export function taskStage(task) {
+  if (Object.hasOwn(stageLabels,task.stage)) return task.stage;
+  return Object.hasOwn(legacyStages,task.status) ? legacyStages[task.status] : 'backlog';
+}
+
+export function taskOwnerDecision(task, inbox) {
+  return inbox.find(item => item.status === 'open' && item.taskId === task.id &&
+    (!task.studioId || !item.studioId || item.studioId === task.studioId) &&
+    ['acceptance','question','error','reconcile'].includes(item.kind));
+}
+
+export function taskOwnerState(task, {inbox=[], tasks=[]}={}) {
+  const stage = taskStage(task);
+  const entry = taskOwnerDecision(task,inbox);
+  let label = stageLabels[stage];
+  if (task.status === 'cancelled') label = 'Отменена';
+  else if (stage === 'done' || stage === 'replaced') return {stage,label:copy(label)};
+  else if (entry?.kind === 'acceptance') return {stage:'qa',label:copy('Ждёт вашей приёмки')};
+  else if (entry?.kind === 'question') label = 'Ждёт вашего ответа';
+  else if (entry?.kind === 'reconcile') label = 'Нужна сверка прерванного шага';
+  else if (task.status === 'failed' || entry?.kind === 'error') label = 'Ошибка выполнения';
+  else if (task.status === 'interrupted') label = 'Прервана';
+  else if (stage === 'in_progress' && task.status === 'completed') label = 'Передача результата';
+  else if (stage === 'blocked' && task.dependencies?.some(id => tasks.find(row=>row.id===id)?.stage !== 'done')) label = 'Ждёт зависимую задачу';
+  else if (task.status === 'scheduled') label = 'В очереди на запуск';
+  return {stage,label:copy(label)};
+}
+
 export function studioActivityStatus(studio, activeAttempts, needsAttention) {
   if (studio.manualPaused || studio.lifecycle === 'paused') return 'paused';
   if (activeAttempts > 0 && ['active', 'idle'].includes(studio.lifecycle)) return 'active';
@@ -9,7 +48,11 @@ export function studioActivityStatus(studio, activeAttempts, needsAttention) {
 export function currentStudioTasks(tasks) {
   return tasks.filter(task => task.status !== 'cancelled' && task.stage !== 'replaced' &&
     (task.status !== 'completed' || (task.workflowManaged && task.stage !== 'done')) &&
-    (task.stage !== 'backlog' || task.sprintId || task.kind === 'train' || task.status !== 'queued'));
+    !isSavedTask(task));
+}
+
+export function isSavedTask(task) {
+  return task.status === 'queued' && !task.sprintId && task.kind !== 'train' && !task.workflowManaged;
 }
 
 // Derive the inspector from the same published snapshot as the board.
