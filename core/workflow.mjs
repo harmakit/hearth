@@ -679,10 +679,11 @@ export function createWorkflow({
     const referencePaths = references?.paths ?? [];
     try {
       if (task?.deliveryMode === 'git' && purpose === 'task') {
-        scoped = await projectPipeline.workScope({ studio, task });
+        scoped = await projectPipeline.workScope({ studio, task, signal });
         prompt = 'Implement the approved assignment in this managed worktree. You may edit project files only here. Return JSON with summary and an optional question.\n\n' + prompt.replace('Read the project as needed and leave its files unchanged.', 'Read the project as needed.');
         const configuredChecks=studio.projectGit?.profile?.checks??[];
         prompt += '\n\nHearth freezes the changes, computes the Git diff, and runs applicable configured project checks outside this model turn on the exact managed worktree and merge candidate. Do not ask the owner to run Git status or a configured check merely because the model shell cannot execute it. Complete the implementation and report any tests you actually ran. In saved release checklists, distinguish checks performed when the document was written from Hearth’s live integration and acceptance status. Keep the current delivery decision in Hearth. Return a question only when a genuine decision or missing implementation input is still needed.';
+        if (scoped.trackedPaths) prompt += '\n\nTracked files in the working copy at launch (reference data):\n' + JSON.stringify(scoped.trackedPaths);
         if(configuredChecks.length)prompt += '\nConfigured project checks (reference data): '+JSON.stringify(configuredChecks.map(({id,command,args,required,paths})=>({id,command,args,required,paths})));
         if (imageOutputDirectory) {
           const earlier = (task.gitDelivery?.artifactPaths ?? []).filter(path => path.startsWith(`${imageOutputDirectory}/`));
@@ -829,14 +830,17 @@ export function createWorkflow({
       dependencies.push(item);
       queue.push(...(item.dependencies ?? []));
     }
-    const previousSprint = task.sprintId && list('sprints').findLast(sprint => sprint.studioId === task.studioId && sprint.status === 'completed' && sprint.id !== task.sprintId);
-    const previous = previousSprint ? list('tasks').filter(item => item.sprintId === previousSprint.id && item.stage === 'done').toReversed() : [];
+    const previousSprints = task.sprintId ? list('sprints')
+      .filter(sprint => sprint.studioId === task.studioId && sprint.status === 'completed' && sprint.id !== task.sprintId)
+      .slice(-2).reverse() : [];
+    const completedTasks = previousSprints.length ? list('tasks').filter(item => item.stage === 'done').toReversed() : [];
+    const previous = previousSprints.map(sprint => completedTasks.filter(item => item.sprintId === sprint.id));
+    const [latest = []] = previous;
     const pathsFor = items => [...new Set(items.flatMap(item => item.gitDelivery?.artifactPaths ?? (item.artifactPath ? [item.artifactPath] : [])))];
-    const previousResults = previous.filter(item => !item.packageMembers);
-    const previousPaths = pathsFor(previousResults);
-    const previousDeliveries = previousResults.filter(item => item.gitDelivery?.status === 'merged');
+    const previousPaths = pathsFor(previous.flat().filter(item => !item.packageMembers));
+    const previousDeliveries = latest.filter(item => !item.packageMembers && item.gitDelivery?.status === 'merged');
     const previousGitPaths = pathsFor(previousDeliveries);
-    const revision = previous.find(item=>item.packageRevision)?.packageRevision
+    const revision = latest.find(item=>item.packageRevision)?.packageRevision
       ?? previousDeliveries.toSorted((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]?.gitDelivery.targetOid;
     const sprint = task.sprintId && list('sprints').find(item=>item.id===task.sprintId);
     const plan = sprint && list('plans').find(item=>item.id===sprint.planId);

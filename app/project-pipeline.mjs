@@ -10,7 +10,7 @@ const otherBinary = /\.(?:gif|pdf)$/iu;
 async function workspaceContents(root, paths, { images = false, signal, textBudget = 38_000 } = {}) {
   const files = [], imagePaths = [];
   let budget = textBudget, imageBudget = 24 * 1024 * 1024;
-  for (const path of [...new Set(paths)].filter(isReportFilePath).slice(0, 24)) {
+  for (const path of [...new Set(paths)].filter(isReportFilePath).slice(0, 40)) {
     signal?.throwIfAborted();
     const absolute = join(root, path);
     const info = await lstat(absolute).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -36,6 +36,17 @@ async function workspaceContents(root, paths, { images = false, signal, textBudg
 }
 
 export function createProjectPipeline({ storageDir, worktrees, delivery, checks, evidence, git, lookupEvidence }) {
+  async function trackedProjectPaths(root, signal) {
+    if (!git) return;
+    try {
+      const result = await git(root, ['ls-files', '--cached', '-z'], { signal, maxBuffer: 512 * 1024 });
+      const paths = result.split('\0').filter(path => path && path.split('/').every(part => !part.startsWith('.')));
+      return { paths: paths.slice(0, 200), truncated: paths.length > 200, hiddenPathsExcluded: true };
+    } catch {
+      signal?.throwIfAborted();
+    }
+  }
+
   async function scratch() {
     await mkdir(storageDir, { recursive: true, mode: 0o700 });
     return mkdtemp(join(storageDir, 'run-'));
@@ -50,16 +61,18 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
     return tree;
   }
 
-  async function workScope({ studio, task }) {
+  async function workScope({ studio, task, signal }) {
     if (!studio.projectGit?.enabled) throw new Error('Разрешите работу с Git в настройках студии.');
     if (task.packageTargetRef) await worktrees.prepareTarget({repository:studio.root,targetRef:task.packageTargetRef,baseRef:task.packageFinalRef,create:true});
     const tree = await worktrees.ensureWorktree({
       studioId: studio.id, taskId: task.id, repository: studio.root, targetRef: studio.projectGit.targetRef,
     });
+    const trackedPaths = await trackedProjectPaths(tree.path, signal);
     const workspace = await scratch();
     return {
       worktreeId: tree.id,
       scope: { root: tree.path, scratch: workspace, access: 'worktree-write' },
+      trackedPaths,
       release: () => rm(workspace, { recursive: true, force: true }),
     };
   }
@@ -163,6 +176,7 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
       const changedPaths = new Set(candidate.changedPaths ?? result.artifactPaths ?? []);
       const textBudget = delivered || task.packageMembers || referencePaths.length>12 ? 96_000 : 38_000;
       const { files: captured, imagePaths } = await workspaceContents(candidate.root, [...changedPaths, ...referencePaths], { images: true, signal, textBudget });
+      const trackedPaths = await trackedProjectPaths(candidate.root, signal);
       const files = captured.filter(file => changedPaths.has(file.path));
       const referenceFiles = captured.filter(file => !changedPaths.has(file.path));
       const checked = [];
@@ -176,7 +190,7 @@ export function createProjectPipeline({ storageDir, worktrees, delivery, checks,
       }
       return {
         scope: { root: candidate.root, scratch: workspace, access: 'read' },
-        context: { revision, diff: diff?.slice(0, 8_000), checks: checked, files, referenceFiles, implementationSummary: task.summary?.slice(0, 2_000) },
+        context: { revision, diff: diff?.slice(0, 8_000), checks: checked, trackedPaths, files, referenceFiles, implementationSummary: task.summary?.slice(0, 2_000) },
         imagePaths,
         async release() {
           try { await delivery.releaseCandidate({ worktree, root: candidate.root }); }

@@ -58,20 +58,30 @@ test('unassessed required verification cannot integrate the change', async () =>
 test('review gets the frozen text and image paths without relying on model file tools', async t => {
   const root=await mkdtemp(join(await realpath(tmpdir()),'hearth-review-files-'));
   t.after(()=>rm(root,{recursive:true,force:true}));
+  await git(root,['init','--initial-branch=main']);
   await writeFile(join(root,'dossier.md'),'# Reviewed person\n');
   await writeFile(join(root,'portrait.png'),Buffer.from('89504e470d0a1a0a','hex'));
   await writeFile(join(root,'accepted-background.md'),'The accepted dossier is available in the candidate checkout.');
+  await writeFile(join(root,'entry.js'),'// Part of the submitted application\n');
+  await writeFile(join(root,'.internal.txt'),'Project metadata');
+  await git(root,['add','--','dossier.md','portrait.png','accepted-background.md','entry.js','.internal.txt']);
   await symlink('dossier.md',join(root,'alias.md'));
   const pipeline=createProjectPipeline({
-    storageDir:join(root,'scratch'),worktrees:{getWorktree:async()=>worktree},
+    git, storageDir:join(root,'scratch'),worktrees:{getWorktree:async()=>worktree,ensureWorktree:async()=>({...worktree,path:root})},
     delivery:{getCandidate:async()=>({root,revision,changedPaths:['dossier.md','alias.md','portrait.png']}),releaseCandidate:async()=>{}},
   });
-  const review=await pipeline.reviewScope({studio,task:{...task,gitDelivery:{worktreeId:'tree',revision}},
+  const head=(await git(root,['write-tree'])).trim();
+  const review=await pipeline.reviewScope({studio,task:{...task,gitDelivery:{worktreeId:'tree',revision:{targetOid:head,candidateOid:head}}},
     referencePaths:['accepted-background.md','dossier.md','alias.md','missing.md']});
   t.after(()=>review.release());
   assert.deepEqual(review.context.files,[{path:'dossier.md',text:'# Reviewed person\n',truncated:false},{path:'portrait.png',image:true}]);
   assert.deepEqual(review.context.referenceFiles,[{path:'accepted-background.md',text:'The accepted dossier is available in the candidate checkout.',truncated:false}]);
   assert.deepEqual(review.imagePaths,[join(root,'portrait.png')]);
+  const tracked={paths:['accepted-background.md','dossier.md','entry.js','portrait.png'],truncated:false,hiddenPathsExcluded:true};
+  assert.deepEqual(review.context.trackedPaths,tracked);
+  const editable=await pipeline.workScope({studio,task});
+  t.after(()=>editable.release());
+  assert.deepEqual(editable.trackedPaths,tracked);
 });
 
 test('prior delivery comparison checks actual Git files and keeps more than three referenced portraits',async t=>{

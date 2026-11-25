@@ -258,11 +258,13 @@ test('a final Git task receives transitive delivered files and the approved spri
 
 test('a later Git comparison uses delivered paths and still receives standalone artifacts as context', async t => {
   const gitRevision = 'a'.repeat(40);
+  const nextRevision = 'b'.repeat(40);
   const firstPlan = { ...plan, tasks: [
     { ...plan.tasks[0], key:'outline', title:'Draft outline', deliveryMode:undefined, artifactPath:'outline.md', requiresAcceptance:false },
     { ...plan.tasks[0], key:'tracked', title:'Deliver file', dependsOn:['outline'], requiresAcceptance:false },
   ] };
   const nextPlan = { ...plan, title:'Next sprint', tasks:[{ ...plan.tasks[0], key:'next', title:'Continue project', requiresAcceptance:false }] };
+  const thirdPlan = { ...plan, title:'Third sprint', tasks:[{ ...plan.tasks[0], key:'third', title:'Use both releases', requiresAcceptance:false }] };
   let plans = 0;
   let directions = 0;
   const comparisons = [];
@@ -271,9 +273,11 @@ test('a later Git comparison uses delivered paths and still receives standalone 
     prepareTarget:async()=>({targetRef:'refs/heads/delivery'}),
     writeArtifact:async({path})=>({path}),
     projectPipeline:{
-      workScope:async({task})=>({worktreeId:task.id,scope:{root:'/work',access:'worktree-write'},release:async()=>{}}),
+      workScope:async({task})=>({worktreeId:task.id,scope:{root:'/work',access:'worktree-write'},
+        trackedPaths:{paths:['next.md','tracked.md'],truncated:false},release:async()=>{}}),
+      workspaceContents:async(_root,paths)=>({files:paths.map(path=>({path,text:`Read ${path}`}))}),
       evaluate:async({task,worktreeId})=>({ worktreeId, status:'review',
-        revision:{candidateOid:task.key==='tracked'?gitRevision:'b'.repeat(40)},
+        revision:{candidateOid:task.key==='tracked'?gitRevision:task.key==='next'?nextRevision:'c'.repeat(40)},
         artifactPaths:[task.key+'.md'], checks:[], evidence:[] }),
       reviewScope:async()=>({scope:{root:'/candidate',access:'read'},release:async()=>{}}),
       merge:async({task})=>({status:'merged',targetOid:task.gitDelivery.revision.candidateOid}),
@@ -285,11 +289,16 @@ test('a later Git comparison uses delivered paths and still receives standalone 
     run:async request=>{
       const training = trainingReply(request);
       if(training)return training;
-      if(request.purpose==='plan')return {text:JSON.stringify(++plans===1?firstPlan:nextPlan)};
-      if(request.purpose==='director')return {text:JSON.stringify({action:['next','nextSprint','finish'][directions++]})};
+      if(request.purpose==='plan')return {text:JSON.stringify([firstPlan,nextPlan,thirdPlan][plans++])};
+      if(request.purpose==='director')return {text:JSON.stringify({action:['next','nextSprint','nextSprint','finish'][directions++]})};
       if(request.purpose==='review')return {text:'{"pass":true,"summary":"Checked"}'};
       if(!request.scope)return {text:'{"summary":"Draft ready","artifact":"Standalone outline","artifactPath":"outline.md"}'};
       if(plans===2)assert.match(request.prompt,/Standalone outline/);
+      if(plans===3) {
+        assert.match(request.prompt,/Tracked files in the working copy at launch/);
+        assert.match(request.prompt,/Read next\.md/);
+        assert.match(request.prompt,/Read tracked\.md/);
+      }
       return {text:'{"summary":"Work ready"}'};
     },
   });
@@ -301,6 +310,11 @@ test('a later Git comparison uses delivered paths and still receives standalone 
   service.decidePlan({planId:first.id,decision:'approve'});
   const next=await until(service,state=>state.plans.find(item=>item.title==='Next sprint'));
   service.decidePlan({planId:next.id,decision:'approve'});
-  await until(service,state=>state.sprints.length===2&&state.sprints.every(sprint=>sprint.status==='completed'));
-  assert.deepEqual(comparisons,[{revision:gitRevision,paths:['tracked.md']},{revision:gitRevision,paths:['tracked.md']}]);
+  const third=await until(service,state=>state.plans.find(item=>item.title==='Third sprint'));
+  service.decidePlan({planId:third.id,decision:'approve'});
+  await until(service,state=>state.sprints.length===3&&state.sprints.every(sprint=>sprint.status==='completed'));
+  assert.deepEqual(comparisons,[
+    {revision:gitRevision,paths:['tracked.md']},{revision:gitRevision,paths:['tracked.md']},
+    {revision:nextRevision,paths:['next.md']},{revision:nextRevision,paths:['next.md']},
+  ]);
 });
