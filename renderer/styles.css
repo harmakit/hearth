@@ -103,7 +103,21 @@ main { max-width: 1500px; padding: 16px clamp(12px, 2vw, 24px) 24px; margin: aut
 .status.attention { color: var(--blocked); }
 .decision .status { background: var(--surface); }
 .report { overflow: hidden; }
-.excerpt { padding: 20px; background: var(--surface-raised); border-bottom: 1px solid var(--line); font: 18px/1.5 Georgia, serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+.excerpt { padding: 12px 16px 16px; border-top: 1px solid var(--line); }
+.report-text { max-inline-size: 72ch; min-inline-size: 0; font: inherit; line-height: 1.55; overflow-wrap: anywhere; }
+.recorded-checks { display: flex; align-items: baseline; flex-wrap: wrap; gap: .35rem .75rem; }
+.report-text > * { margin: 0; }
+.report-text > * + * { margin-block-start: .7em; }
+.report-text :is(h4,h5,h6) { font-size: 1em; font-weight: 650; }
+.report-text :is(ul,ol) { padding-inline-start: 1.4em; }
+.report-text li + li { margin-block-start: .2em; }
+.report-text blockquote { border-inline-start: 2px solid var(--line); padding-inline-start: .75em; }
+.report-text pre { padding: .65em .8em; background: var(--surface-raised); border-radius: var(--radius); white-space: pre-wrap; }
+.report-text hr { border: 0; border-top: 1px solid var(--line); }
+.report-text table { border-collapse: collapse; table-layout: fixed; width: 100%; }
+.report-text :is(th,td) { padding: .45em .6em; border: 1px solid var(--line); text-align: start; vertical-align: top; }
+:is(.report-text,.research-source-url) :is(a,.report-link) { color: var(--active); text-decoration: underline; text-underline-offset: .15em; }
+.report-link { display: inline; padding: 0; border: 0; background: transparent; text-align: start; overflow-wrap: anywhere; }
 .clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .work-list { display: grid; }
 .list-row { display: flex; min-height: var(--row-height); width: 100%; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; color: inherit; text-align: start; border: 0; border-bottom: 1px solid var(--line); background: transparent; }

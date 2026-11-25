@@ -209,6 +209,46 @@ test('keeps the wait shared beyond a single search and does not call GitHub agai
   assert.equal(requests, 2);
 });
 
+test('checks the exact registered path at a new pinned revision, without unrelated repository searches',async()=>{
+  const nextCommit='d'.repeat(40), folderTree='e'.repeat(40);
+  const calls=[];
+  let updatedContent=content;
+  const check=createGitHubSkillFinder({fetchImpl:async target=>{
+    const url=new URL(target);calls.push(url.pathname);
+    if(url.pathname==='/repos/coach/skill')return Response.json(repo('skill',20000));
+    if(url.pathname.endsWith('/commits/release%2Fstable'))return Response.json({sha:nextCommit,commit:{tree:{sha:tree}}});
+    if(url.pathname.endsWith('/git/trees/'+tree))return Response.json({tree:[{path:'skills',type:'tree',mode:'040000',sha:folderTree}]});
+    if(url.pathname.endsWith('/git/trees/'+folderTree))return Response.json({tree:[{path:'SKILL.md',type:'blob',mode:'100644',sha:blob}]});
+    if(url.pathname.endsWith('/git/blobs/'+blob))return Response.json({sha:blob,encoding:'base64',content:Buffer.from(updatedContent).toString('base64')});
+    return new Response(null,{status:404});
+  }});
+  const registered={repo:'coach/skill',path:'skills/SKILL.md',commit,license:'MIT',content};
+  const same=await check.checkVersion(registered);
+  assert.equal(same.status,'current');
+  updatedContent=content+'\nReview accessibility too.';
+  const updated=await check.checkVersion(registered);
+  assert.equal(updated.status,'available');
+  assert.equal(updated.candidate.commit,nextCommit);
+  assert.equal(updated.candidate.content,updatedContent);
+  assert.ok(calls.every(path=>path.startsWith('/repos/coach/skill')));
+  assert.equal(registered.content,content);
+});
+
+test('version checks respect shared GitHub cooldown and return the next retry time',async()=>{
+  let clock=0,requests=0;
+  const finder=createGitHubSkillFinder({now:()=>clock,wait:async ms=>{clock+=ms;},fetchImpl:async()=>{
+    requests++;
+    return new Response(null,{status:403,headers:{'x-ratelimit-remaining':'0','x-ratelimit-reset':'3600'}});
+  }});
+  const input={repo:'coach/skill',path:'SKILL.md',commit,license:'MIT',content};
+  const result=await finder.checkVersion(input);
+  assert.equal(result.status,'unavailable');
+  assert.match(result.message,/rate limit/i);
+  assert.ok(Date.parse(result.retryAt)>clock);
+  assert.equal((await finder.checkVersion(input)).status,'unavailable');
+  assert.equal(requests,1);
+});
+
 test('waits a full minute for a bare 429 and stops when the next backoff exceeds the lookup budget', async () => {
   let clock = 0;
   const timestamps = [];

@@ -80,6 +80,11 @@ test('freezes managed edits, merges the checked candidate, and opens an uncontam
   assert.equal(await f.delivery.isMerged(f.worktree), true);
   assert.equal(await readFile(join(f.worktree.repository, 'project.txt'), 'utf8'), 'original\n');
   assert.equal(await f.readRef('refs/heads/main'), f.worktree.baseOid);
+  const integrated = await f.delivery.getIntegratedCandidate({ worktree: f.worktree, revision: candidate.revision });
+  assert.equal(await readFile(join(integrated.root, 'project.txt'), 'utf8'), 'task version\n');
+  assert.equal(integrated.revision.candidateOid, result.targetOid);
+  await f.delivery.releaseCandidate({ worktree: f.worktree, root: integrated.root });
+  await assert.rejects(f.delivery.getIntegratedCandidate({ worktree: f.worktree, revision: { ...candidate.revision, digest: 'invalid' } }), {code:'STALE_REVISION'});
   await f.delivery.releaseCandidate({ worktree: f.worktree, root: candidate.root });
   await f.delivery.releaseCandidate({ worktree: f.worktree, root: review.root });
 });

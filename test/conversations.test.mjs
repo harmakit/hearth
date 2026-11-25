@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createConversations, prepareInboxAnswer } from '../core/conversations.mjs';
+import * as conversationLogic from '../core/conversations.mjs';
+const { createConversations, prepareInboxAnswer } = conversationLogic;
 
 function setup(saved = {}) {
   const records = Object.assign({
@@ -70,6 +71,20 @@ test('agent conversation scope stays isolated and histories are bounded', () => 
   }
   assert.equal(conversations.conversationHistory({ studioId: 's', conversationId: first.conversationId }).length, 24);
   assert.equal(conversations.conversationHistory({ studioId: 's', conversationId: first.conversationId }).at(-1).text, '39');
+});
+
+test('conversation context reserves the draft and respects both complete-message limits',()=>{
+  const {selectConversationContext}=conversationLogic;
+  const rows=Array.from({length:26},(_,index)=>({id:String(index),text:'x'}));
+  assert.deepEqual(selectConversationContext(rows).map(row=>row.id),Array.from({length:24},(_,index)=>String(index+2)));
+  const withAttachment=selectConversationContext(rows,{hasDraftAttachments:true});
+  assert.equal(withAttachment.length,23);
+  assert.equal(withAttachment[0].id,'3');
+  const long=[{id:'old',text:'a'},{id:'one',text:'b'.repeat(12_000)},{id:'two',text:'c'.repeat(12_000)}];
+  assert.deepEqual(selectConversationContext(long).map(row=>row.id),['one','two']);
+  assert.deepEqual(selectConversationContext(long,{draftText:' z '}).map(row=>row.id),['two']);
+  assert.deepEqual(selectConversationContext(long,{draftText:'  '}).map(row=>row.id),['one','two']);
+  assert.deepEqual(selectConversationContext(long,{requestMessageId:'old'}).map(row=>row.id),['old','two']);
 });
 
 test('versioned answers enforce freshness, choices and attachment IDs', () => {

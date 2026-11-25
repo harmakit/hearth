@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createProjectPipeline } from '../app/project-pipeline.mjs';
+import { git } from '../app/git-worktrees.mjs';
 
 const worktree = { id: 'tree', path: '/work/tree' };
 const revision = { headOid: 'work', targetOid: 'target', candidateOid: 'candidate', digest: 'content' };
@@ -49,4 +53,41 @@ test('unassessed required verification cannot integrate the change', async () =>
   assert.equal(evaluated.revision.candidateOid, undefined);
   assert.deepEqual(calls, [['capture', 'report.png'], ['release', '/work/frozen']]);
   await assert.rejects(pipeline.merge({ studio, task: { ...task, gitDelivery: evaluated } }), /приёмк|ревью|кандидат/i);
+});
+
+test('review gets the frozen text and image paths without relying on model file tools', async t => {
+  const root=await mkdtemp(join(await realpath(tmpdir()),'hearth-review-files-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await writeFile(join(root,'dossier.md'),'# Reviewed person\n');
+  await writeFile(join(root,'portrait.png'),Buffer.from('89504e470d0a1a0a','hex'));
+  await writeFile(join(root,'accepted-background.md'),'The accepted dossier is available in the candidate checkout.');
+  await symlink('dossier.md',join(root,'alias.md'));
+  const pipeline=createProjectPipeline({
+    storageDir:join(root,'scratch'),worktrees:{getWorktree:async()=>worktree},
+    delivery:{getCandidate:async()=>({root,revision,changedPaths:['dossier.md','alias.md','portrait.png']}),releaseCandidate:async()=>{}},
+  });
+  const review=await pipeline.reviewScope({studio,task:{...task,gitDelivery:{worktreeId:'tree',revision}},
+    referencePaths:['accepted-background.md','dossier.md','alias.md','missing.md']});
+  t.after(()=>review.release());
+  assert.deepEqual(review.context.files,[{path:'dossier.md',text:'# Reviewed person\n',truncated:false},{path:'portrait.png',image:true}]);
+  assert.deepEqual(review.context.referenceFiles,[{path:'accepted-background.md',text:'The accepted dossier is available in the candidate checkout.',truncated:false}]);
+  assert.deepEqual(review.imagePaths,[join(root,'portrait.png')]);
+});
+
+test('prior delivery comparison checks actual Git files and keeps more than three referenced portraits',async t=>{
+  const root=await mkdtemp(join(await realpath(tmpdir()),'hearth-prior-delivery-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await git(root,['init','--initial-branch=main']);
+  const paths=['one.png','two.png','three.png','four.png','five.png'];
+  await Promise.all(paths.map(path=>writeFile(join(root,path),Buffer.from('89504e470d0a1a0a','hex'))));
+  await writeFile(join(root,'old.md'),'Earlier result');
+  await git(root,['add','--','old.md',...paths]);
+  await git(root,['-c','user.name=QA','-c','user.email=qa@hearth.invalid','commit','-m','Earlier result']);
+  const baseline=(await git(root,['rev-parse','HEAD'])).trim();
+  const pipeline=createProjectPipeline({git});
+  assert.equal((await pipeline.workspaceContents(root,paths,{images:true})).imagePaths.length,5);
+  const compare=()=>pipeline.priorDeliveryStatus(root,{revision:baseline,paths:['old.md',...paths]});
+  assert.equal((await compare()).status,'unchanged');
+  await writeFile(join(root,'old.md'),'Changed');
+  assert.deepEqual((await compare()).changedPaths,['old.md']);
 });

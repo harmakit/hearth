@@ -1,5 +1,5 @@
 const key='hearth:studio-creation-draft';
-const fieldNames=['name','brief','firstResult','folderMode','root','newFolderName','offerGit',
+const fieldNames=['name','brief','firstResult','folderMode','root','newFolderName','targetRef','offerGit',
   'language','projectLanguage','runtime','model','effort'];
 function normalize(value) {
   if (!value || typeof value!=='object' || !Number.isInteger(value.step) ||

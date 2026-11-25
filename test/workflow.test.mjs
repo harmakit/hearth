@@ -149,6 +149,27 @@ test('the initial sprint uses allowed dynamic recommendations and reroutes stale
   assert.deepEqual(calls, [['plan', undefined], ['task', 'proposed'], ['select-model', undefined], ['review', 'replacement'], ['director', undefined]]);
 });
 
+test('invalid optional training topics do not undo a completed task or block a ready dependency', async t => {
+  let decisions=0;
+  const service=createStudioService({dbPath:':memory:',run:async ({purpose})=>({text:JSON.stringify({
+    plan:{...draft,tasks:draft.tasks.map(task=>({...task,artifactPath:undefined}))},
+    task:{summary:'Delivered'},review:{pass:true,summary:'Verified'},
+    director:purpose==='director' && decisions++===0
+      ? {action:'train',taskKey:'second',objective:'Extra practice',topics:['x'.repeat(101)],summary:'First result verified'}
+      : {action:'finish',summary:'Sprint complete'},
+  }[purpose])})});
+  t.after(()=>service.close());
+  const {id:studioId}=service.createStudio({root:'/project',name:'Director recovery'});
+  service.initializeStudio({studioId});
+  const pending=await until(service.snapshot,state=>state.plans.some(plan=>plan.status==='pending'));
+  service.decidePlan({planId:pending.plans[0].id,decision:'approve'});
+  const state=await until(service.snapshot,view=>view.sprints[0]?.status==='completed'||view.inbox.some(row=>row.kind==='error'&&row.status==='open'));
+  assert.equal(state.sprints[0].status,'completed');
+  assert.equal(state.tasks.find(task=>task.key==='first').stage,'done');
+  assert.equal(state.tasks.find(task=>task.key==='second').stage,'done');
+  assert.ok(state.attempts.some(attempt=>attempt.purpose==='director' && attempt.decisionWarning?.includes('тема обучения')));
+});
+
 test('the Director can assess and save debt settings using current studio data', async (t) => {
   const calls = [];
   let release;
@@ -362,11 +383,13 @@ test('scheduled workflows retain a queued continuation after hours, manual pause
   assert.deepEqual(calls, ['plan', 'task', 'review', 'director']);
   const other = service.createStudio({ name: 'Other', root: '/project' });
   service.deleteStudio({ studioId, confirmation: 'Writer' });
-  const { studios, modelPolicy, notificationPreferences, appLocale, onboardingHintsEnabled, training, ...records } = service.snapshot();
+  const { studios, modelPolicy, notificationPreferences, quotaPolicy,codeGraphPolicy, appLocale, onboardingHintsEnabled, training, ...records } = service.snapshot();
   assert.equal(appLocale, 'en');
   assert.equal(onboardingHintsEnabled, true);
   assert.deepEqual(notificationPreferences, { enabled: true, studios: {} });
   assert.deepEqual(modelPolicy, { configured: false, allowed: [] });
+  assert.deepEqual(quotaPolicy,{threshold:null,pause:undefined});
+  assert.deepEqual(codeGraphPolicy,{enabled:false});
   assert.deepEqual(studios.map(({ id }) => id), [other.id]);
   assert.deepEqual(training.map(({ studioId }) => studioId), [other.id]);
   for (const table of Object.keys(records)) assert.deepEqual(records[table], [], table);
@@ -409,6 +432,26 @@ test('planning repairs one invalid director response and accepts criteria lists'
   assert.equal(result.attempts.filter(row => row.purpose === 'plan').length, 1);
 });
 
+test('planning repairs duplicate references to an existing backlog card before showing the plan', async t => {
+  let backlog;
+  const prompts = [];
+  const service = createStudioService({dbPath:':memory:',run:async ({prompt})=>{
+    prompts.push(prompt);
+    const plan = structuredClone(draft);
+    plan.tasks[0].backlogTaskId=backlog.id;
+    if (prompts.length===1) plan.tasks[1].backlogTaskId=backlog.id;
+    return {text:JSON.stringify(plan)};
+  }});
+  t.after(()=>service.close());
+  const {id:studioId}=service.createStudio({name:'One card per package',root:'/project'});
+  backlog=service.createTask({studioId,title:'New character',prompt:'Create a complete character',backlog:true});
+  service.initializeStudio({studioId});
+  const result=await until(service.snapshot,view=>view.plans.length || view.studios[0].lifecycle==='error');
+  assert.equal(prompts.length,2);
+  assert.match(prompts[1],/карточку бэклога/iu);
+  assert.deepEqual(result.plans[0].tasks.map(task=>task.backlogTaskId).filter(Boolean),[backlog.id]);
+});
+
 test('the next sprint sees completed artifacts and repairs reuse of an occupied path', async t => {
   let planning = 0;
   const followup = [];
@@ -416,7 +459,10 @@ test('the next sprint sees completed artifacts and repairs reuse of an occupied 
   const service = createStudioService({ dbPath: ':memory:', writeArtifact: async ({path}) => ({path}), run: async ({purpose,prompt}) => {
     if (purpose === 'plan') {
       planning++;
-      if (planning > 1) assert.match(prompt, /"recentCompleted"/);
+      if (planning > 1) {
+        assert.match(prompt, /"recentCompleted"/);
+        assert.match(prompt, /Create a new character called Mira/);
+      }
       if (planning === 3) assert.match(prompt, /outline\.md/);
       return { text: JSON.stringify(planning === 3 ? {...plan, tasks:[{...plan.tasks[0],artifactPath:'outline-edited.md'}]} : plan) };
     }
@@ -432,6 +478,7 @@ test('the next sprint sees completed artifacts and repairs reuse of an occupied 
   const first = await until(service.snapshot, s => s.plans[0]?.status === 'pending');
   service.decidePlan({planId:first.plans[0].id,decision:'approve'});
   await until(service.snapshot,s=>s.sprints[0]?.status==='completed');
+  service.createTask({studioId,title:'New character',prompt:'Create a new character called Mira',criteria:'Distinct character',backlog:true,priority:100});
   service.startNextSprint({studioId});
   const next = await until(service.snapshot,s=>s.plans.some(p=>p.kind==='sprint'&&p.status==='pending')||s.studios[0].lifecycle==='error');
   assert.equal(next.plans.find(p=>p.kind==='sprint')?.tasks[0].artifactPath,'outline-edited.md');
@@ -645,6 +692,27 @@ test('opening an existing profile clears old silence notices while keeping actua
   assert.equal(inbox.find(({id})=>id==='failure').status,'open');
 });
 
+test('a quiet but owned workflow can finish after a clock jump past its lease', async t => {
+  let time = Date.parse('2026-11-24T22:00:00Z');
+  const started = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  const service = createStudioService({ dbPath: ':memory:', now: () => new Date(time), run: async () => {
+    started.resolve();
+    await finish.promise;
+    return { text: JSON.stringify(draft) };
+  }});
+  t.after(() => { finish.resolve(); return service.close(); });
+  const { id: studioId } = service.createStudio({ name: 'Docs', root: '/project' });
+  service.initializeStudio({ studioId });
+  await started.promise;
+  time += 6 * 60_000;
+  service.refreshSchedules();
+  assert.equal(service.snapshot().attempts.find(row => row.purpose === 'plan').status, 'running');
+  assert.equal(service.snapshot().inbox.some(row => row.kind === 'reconcile'), false);
+  finish.resolve();
+  await until(service.snapshot, snapshot => snapshot.plans.some(row => row.status === 'pending'));
+});
+
 test('stopping the first plan publishes both the hold and release so an open dialog can recover', async t => {
   const snapshots = [];
   const started = Promise.withResolvers();
@@ -676,6 +744,33 @@ test('stopping the first plan publishes both the hold and release so an open dia
   assert.equal(calls,1);
   service.setStudioRunning({studioId,action:'resume'});
   await until(service.snapshot,snapshot=>snapshot.plans.some(row=>row.status==='pending'));
+  assert.equal(calls,2);
+});
+
+test('discarding interrupted initial planning preserves pause and lets the owner request a fresh plan', async t => {
+  let calls=0;
+  const started=Promise.withResolvers();
+  const service=createStudioService({dbPath:':memory:',run:async ({signal})=>{
+    if (++calls===1) {
+      started.resolve();
+      await new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+    }
+    return {text:JSON.stringify(draft)};
+  }});
+  t.after(()=>service.close());
+  const {id:studioId}=service.createStudio({root:'/project',name:'Restartable first plan'});
+  service.initializeStudio({studioId});
+  await started.promise;
+  service.setStudioRunning({studioId,action:'stop'});
+  const held=await until(service.snapshot,state=>state.attempts.find(row=>row.purpose==='plan'&&row.status==='reconcile'&&row.processActive===false));
+  const attempt=held.attempts.find(row=>row.purpose==='plan');
+  service.resolveReconciliation({attemptId:attempt.id,decision:'discard',reason:'Keep it interrupted'});
+  assert.equal(service.snapshot().studios[0].lifecycle,'paused');
+  assert.equal(calls,1);
+  service.setStudioRunning({studioId,action:'resume'});
+  assert.equal(service.snapshot().studios[0].lifecycle,'draft');
+  service.initializeStudio({studioId});
+  await until(service.snapshot,state=>state.plans.some(plan=>plan.status==='pending'));
   assert.equal(calls,2);
 });
 

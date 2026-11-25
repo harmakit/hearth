@@ -73,7 +73,7 @@ function decodeSession(sessionId, runtime, cwd) {
 }
 
 export function createRuntimes({
-  binaries = {}, env: sourceEnv = process.env, timeoutMs = 240_000, inspectTimeoutMs = 8000, isolateCommand = scopedCommand,
+  binaries = {}, env: sourceEnv = process.env, timeoutMs, startupTimeoutMs = 30_000, inspectTimeoutMs = 8000, isolateCommand = scopedCommand,
 } = {}) {
   const cwd = homedir();
 
@@ -115,7 +115,7 @@ export function createRuntimes({
     }
   }
 
-  async function run({ runtime, projectRoot, scope: requestedScope, prompt, model, effort, signal, onEvent, sessionId, nativeRole, outputSchema, portableProject }) {
+  async function run({ runtime, projectRoot, scope: requestedScope, prompt, model, effort, signal, onEvent, sessionId, nativeRole, outputSchema, portableProject, webEnabled, imageOutputDirectory, inputImages = [] }) {
     const provider = providerFor(runtime);
     const emit = (type, fields = {}) => onEvent?.({ runtime, type, ...fields });
     try {
@@ -127,6 +127,16 @@ export function createRuntimes({
         projectRoot: source, requireScratch: false,
       });
       const { root } = scope;
+      if (inputImages.length) {
+        if (runtime !== 'codex' || !['read', 'worktree-write'].includes(scope.access) || inputImages.length > 8) throw new Error('Изображения требуют проверенной рабочей копии.');
+        for (const path of inputImages) {
+          if (!isAbsolute(path) || !/\.(?:png|jpe?g|webp)$/iu.test(path)) throw new Error('Неподдерживаемое изображение для проверки.');
+          const child=relative(root,path);
+          if (!child || isAbsolute(child) || child==='..' || child.startsWith('..'+sep) || await realpath(path)!==path || !(await stat(path)).isFile()) {
+            throw new Error('Изображение находится за пределами проверяемой рабочей копии.');
+          }
+        }
+      }
       if(portableProject){
         scope.privateProject={root:source,state:join(source,'.hearth','state'),worktrees:join(source,'.hearth','worktrees')};
       }
@@ -166,11 +176,13 @@ export function createRuntimes({
       const binary = await locate(runtime, env);
       await checkVersion(binary, provider, { cwd, env, timeoutMs: inspectTimeoutMs, signal });
       signal?.throwIfAborted();
-      const result = await provider.run(binary, { cwd: root, env, timeoutMs, prompt, model, effort, nativeId, signal, emit, scope, isolateCommand, nativeRole, outputSchema });
+      const result = await provider.run(binary, { cwd: root, env, timeoutMs, startupTimeoutMs, prompt, model, effort, nativeId, signal, emit, scope, isolateCommand, nativeRole, outputSchema, webEnabled, imageOutputDirectory, inputImages });
       const text = typeof result.text === 'string' ? result.text.trim() : '';
       if (!text) throw Object.assign(new Error(`${provider.label} вернул пустой ответ.`), { code: 'EMPTY_RESPONSE' });
       emit('completed');
       const response={text,...(outputSchema?{structured:true}:{})};
+      if (result.web) response.web = result.web;
+      if (result.generatedImages?.length) response.generatedImages = result.generatedImages;
       if (!nativeIdPattern.test(result.nativeId ?? '')) return response;
       const handle = Buffer.from(JSON.stringify([runtime, root, result.nativeId])).toString('base64url');
       return { ...response, sessionId: handle };

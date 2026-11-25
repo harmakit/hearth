@@ -6,6 +6,8 @@ import test from 'node:test';
 import { createGitWorktrees, git, nativeGitPath, verifyGitVersion } from '../app/git-worktrees.mjs';
 import { createCommandRouter } from '../app/bridge.mjs';
 import { createStudioService } from '../core/service.mjs';
+import { createPortableStudioManager } from '../app/portable-studio.mjs';
+import { createProjectStudioFiles } from '../app/project-studio-files.mjs';
 
 test('Git version floor accepts platform builds and rejects the older Ubuntu worktree command', () => {
   assert.equal(verifyGitVersion('git version 2.43.0'), '2.43.0');
@@ -19,7 +21,7 @@ test('Git for Windows porcelain paths use the native separator when checking reg
   assert.equal(nativeGitPath('/work/file\\name', 'linux'), '/work/file\\name');
 });
 
-test('the existing folder wizard offers Git only for a repository root', async t => {
+test('the existing folder wizard connects Git by default and preserves a repository checkout and index', async t => {
   const parent = await realpath(await mkdtemp(join(tmpdir(),'hearth-project-history-')));
   t.after(()=>rm(parent,{recursive:true,force:true}));
   const { prepareTarget } = createGitWorktrees({storageDir:join(parent,'storage'),validateRepository:async () => true});
@@ -28,19 +30,43 @@ test('the existing folder wizard offers Git only for a repository root', async t
   const request = createCommandRouter({service});
   const plainFolder = join(parent,'guys inc');
   await mkdir(plainFolder);
-  const plain = await request('createStudio',{name:'Guys',root:plainFolder,offerGit:true});
-  assert.equal(plain.gitOfferAvailable,false);
+  await writeFile(join(plainFolder,'draft.md'),'Original draft');
+  assert.equal((await request('inspectProjectFolder',{root:plainFolder})).state,'missing');
+  const plain = await request('createStudio',{name:'Guys',root:plainFolder});
+  assert.equal(plain.projectGit.enabled,true);
   assert.equal(plain.lifecycle,'draft');
-  assert.deepEqual(await readdir(plainFolder),[]);
-  await assert.rejects(request('configureProject',{studioId:plain.id,enabled:true}),/папке нет Git-репозитория/);
+  assert.equal(await git(plainFolder,['ls-files']), '');
+  assert.equal(await readFile(join(plainFolder,'draft.md'),'utf8'),'Original draft');
   const initialized = await request('createStudio',{name:'New repo',root:parent,newFolderName:'Book'});
-  const existing = await request('createStudio',{name:'Existing repo',root:initialized.root,offerGit:true});
-  assert.equal(existing.gitOfferAvailable,true);
-  assert.equal(service.snapshot().studios.find(row=>row.id===existing.id).gitOfferAvailable,undefined);
-  assert.equal(existing.projectGit,undefined);
+  const root=initialized.root;
+  await writeFile(join(root,'staged.md'),'Staged text');
+  await git(root,['add','staged.md']);
+  await writeFile(join(root,'staged.md'),'Unstaged edit');
+  await writeFile(join(root,'draft.md'),'Untracked text');
+  const before=await git(root,['status','--porcelain']);
+  const head=await git(root,['rev-parse','HEAD']);
+  const inspected=await request('inspectProjectFolder',{root});
+  assert.equal(inspected.state,'existing');
+  assert.ok(inspected.branches.some(branch=>branch.ref===initialized.projectGit.targetRef && branch.checkedOut===false));
+  assert.ok(inspected.branches.some(branch=>branch.ref==='refs/heads/main' && branch.checkedOut===true));
+  const existing=await request('createStudio',{name:'Existing repo',root});
+  assert.equal(existing.projectGit.enabled,true);
+  assert.notEqual(existing.projectGit.targetRef,initialized.projectGit.targetRef);
+  assert.equal(await git(root,['rev-parse',existing.projectGit.targetRef]),head);
+  const selected=await request('createStudio',{name:'Selected branch',root,targetRef:initialized.projectGit.targetRef});
+  assert.equal(selected.projectGit.targetRef,initialized.projectGit.targetRef);
+  assert.equal(await git(root,['status','--porcelain']),before);
+  assert.equal(await git(root,['symbolic-ref','HEAD']),'refs/heads/main\n');
+  assert.equal(await git(root,['rev-parse','HEAD']),head);
+
+  const nested=join(root,'nested');
+  await mkdir(nested);
+  assert.equal((await request('inspectProjectFolder',{root:nested})).state,'nested');
+  await assert.rejects(request('createStudio',{name:'Nested',root:nested}),/корневую папку/iu);
+  assert.deepEqual(await readdir(nested),[]);
 });
 
-test('studio setup creates local history only for an explicitly new project folder', async t => {
+test('studio setup creates local history in new and existing project folders', async t => {
   // The positive case must live outside a Git checkout. Only disposable project data is written here.
   const parent = await realpath(await mkdtemp(join(tmpdir(),'hearth-project-history-')));
   t.after(()=>rm(parent,{recursive:true,force:true}));
@@ -60,10 +86,75 @@ test('studio setup creates local history only for an explicitly new project fold
   const existing = join(parent,'existing');
   await mkdir(existing);
   const plain = await request('createStudio',{name:'Архив',root:existing});
-  assert.equal(plain.projectGit,undefined);
-  assert.deepEqual(await readdir(existing),[]);
+  assert.equal(plain.projectGit.enabled,true);
+  assert.deepEqual(await readdir(existing),['.git']);
   await writeFile(join(existing,'notes.txt'),'original');
   await assert.rejects(make('existing'));
   assert.equal(await readFile(join(existing,'notes.txt'),'utf8'),'original');
   assert.equal(service.snapshot().studios.length,2);
+});
+
+test('an existing unborn repository receives a delivery branch without committing its staged files or moving HEAD',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'hearth-unborn-')));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const {prepareTarget}=createGitWorktrees({storageDir:join(root,'unused'),validateRepository:async()=>true});
+  const service=createStudioService({dbPath:':memory:',prepareTarget,projectPipeline:{}});
+  t.after(()=>service.close());
+  const dispatch=createCommandRouter({service});
+  await git(root,['init','--initial-branch=main']);
+  await writeFile(join(root,'not-yet.md'),'Do not commit me');
+  await git(root,['add','not-yet.md']);
+  const staged=await git(root,['ls-files','--stage']);
+  const created=await dispatch('createStudio',{root,name:'Unborn repository'});
+  assert.equal(created.projectGit.enabled,true);
+  assert.equal(await git(root,['ls-tree','-r','--name-only',created.projectGit.targetRef]),'');
+  assert.equal(await git(root,['ls-files','--stage']),staged);
+  assert.equal(await git(root,['symbolic-ref','HEAD']),'refs/heads/main\n');
+  await assert.rejects(git(root,['rev-parse','--verify','HEAD']));
+});
+
+test('portable opening and migration connect legacy Git once but respect a deliberate disable',async t=>{
+  const parent=await realpath(await mkdtemp(join(tmpdir(),'hearth-default-portable-')));
+  let first,second;
+  t.after(async()=>{await first?.close();await second?.close();await rm(parent,{recursive:true,force:true});});
+  const makeService=profile=>{
+    const {prepareTarget}=createGitWorktrees({storageDir:join(parent,'unused'),validateRepository:async()=>true});
+    const service=createStudioService({dbPath:join(parent,profile),prepareTarget,projectPipeline:{}});
+    const portable=createPortableStudioManager({service,files:createProjectStudioFiles(),validateRoot:async root=>root});
+    return {service,portable,dispatch:createCommandRouter({service,portable})};
+  };
+  const openedRoot=join(parent,'existing-portable');
+  const migratedRoot=join(parent,'existing-profile');
+  const repo=join(parent,'outer');
+  const nested=join(repo,'project');
+  await mkdir(openedRoot);await mkdir(migratedRoot);await mkdir(nested,{recursive:true});
+  await git(repo,['init','--initial-branch=main']);
+  const old=makeService('old.sqlite');
+  first=old.service;
+  const opened=first.createStudio({root:openedRoot,name:'Portable without Git'});
+  await old.portable.create(opened);
+  const migrating=first.createStudio({root:migratedRoot,name:'Profile without Git'});
+  const migrated=await old.dispatch('migrateStudioFolder',{studioId:migrating.id});
+  assert.equal(migrated.projectGit.enabled,true);
+  assert.equal(migrated.portable,true);
+  await first.configureProject({studioId:migrated.id,enabled:false});
+  await old.portable.publish(first.snapshot().studios.find(row=>row.id===migrated.id));
+  const nestedStudio=first.createStudio({root:nested,name:'Nested old studio'});
+  await old.portable.create(nestedStudio);
+  const parentRefs=await git(repo,['show-ref'],{allowExitCodes:[1]});
+  await first.close();
+
+  const next=makeService('new.sqlite');
+  second=next.service;
+  const result=await next.dispatch('openStudioFolder',{root:openedRoot});
+  assert.equal(result.projectGit.enabled,true);
+  assert.equal(result.manualPaused,true);
+  assert.equal(await git(openedRoot,['ls-files']),'');
+  const disabled=await next.dispatch('openStudioFolder',{root:migratedRoot});
+  assert.deepEqual(disabled.projectGit,{enabled:false});
+  const skipped=await next.dispatch('openStudioFolder',{root:nested});
+  assert.match(skipped.gitSetupWarning,/корневую папку/iu);
+  assert.equal(skipped.projectGit,undefined);
+  assert.equal(await git(repo,['show-ref'],{allowExitCodes:[1]}),parentRefs);
+  assert.equal((await readdir(nested)).includes('.git'),false);
 });

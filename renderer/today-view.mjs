@@ -122,6 +122,6 @@ export function renderToday(snapshot, {projectAvailability,studioFilter='',outco
     ${outcome?`<section class="today-outcome"><div role="status"><strong>${safe(outcome.label)}</strong><p>${safe(outcome.detail)}</p></div><div class="actions">
       ${outcome.taskId?`<button type="button" class="action secondary" data-portfolio-task="${safe(outcome.taskId)}" data-studio="${safe(outcome.studioId)}">${copy('Открыть задачу')}</button>`:''}
       <button type="button" class="action secondary" data-today-next>${rows.length?copy('Следующее решение'):copy('Все студии')}</button></div></section>`:''}
-    <div><div class="row today-heading"><h2>Нужно решение · ${rows.length}</h2>${select}</div>
+    <div><div class="row today-heading"><h2>${safe(copy('Нужно решение'))} · ${rows.length}</h2>${select}</div>
     ${rows.length?`<ul class="today-list">${rows.map(record).join('')}</ul>`:copy('<p class="muted">Открытых решений нет.</p>')}</div>`;
 }

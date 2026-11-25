@@ -3,11 +3,12 @@ import {textFor} from './locale.mjs';
 import {progressMark,stageMark} from './presentation.mjs';
 import {copy} from './copy.mjs';
 import {studioActivityStatus} from './owner-facts.mjs';
+import {quotaPauseText} from './quota-view.mjs';
 const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const safe = value => String(value ?? '').replace(/[&<>"']/g, symbol => entities[symbol]);
 const statuses = new Set(['draft', 'planning', 'awaiting-approval', 'active', 'paused', 'idle', 'error', 'stopped']);
 
-export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprints=[], inbox = [], appLocale = 'ru', projectAvailability={}, hasDraft=false }) {
+export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprints=[], inbox = [], appLocale = 'ru', projectAvailability={}, hasDraft=false,quotaPolicy }) {
   const ui = key=>textFor(appLocale,key);
   const archived=studios.filter(s=>s.archivedAt);
   studios=studios.filter(s=>!s.archivedAt);
@@ -49,6 +50,7 @@ export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprint
   return `<header class="page-heading"><h1>${ui('workspace')}</h1><div class="actions">${create}</div></header>
     <div class="stack"><dl class="workspace-summary panel padded" aria-label="${ui('workspace')}">
       <dt>${ui('studios')}</dt><dd>${studios.length}</dd>${metrics(running, open)}</dl>
+      ${quotaPolicy?.pause?`<p class="panel padded activity" role="status">${safe(quotaPauseText(quotaPolicy.pause))}</p>`:''}
       <div class="workspace-cards">${studios.map(studio => {
         const id = safe(studio.id);
         const name = safe(studio.name);
@@ -65,6 +67,7 @@ export function renderWorkspaceHome({ studios = [], tasks = [], attempts, sprint
           ${sprint?.goal || studio.brief ? `<p>${ui('goal')} · ${safe(sprint?.goal || studio.brief)}</p>` : ''}
           ${sprint?progressMark(members.filter(t=>t.stage==='done').length,members.length):''}
           ${studio.nextScheduleAt ? `<small>${ui('window')} · ${safe(new Date(studio.nextScheduleAt).toLocaleString(appLocale))}</small>` : ''}
+          ${studio.quotaPause?.scope==='studio'?`<p class="muted">${safe(quotaPauseText(studio.quotaPause))}</p>`:''}
           <dl class="workspace-card-metrics">${metrics(count.running, count.open,studio.id)}</dl>
           ${latest ? `<div><small>${ui('latest')} · ${safe(new Date(latest.updatedAt).toLocaleString(appLocale))}</small> ${taskButton(latest)}</div>` : ''}
           ${count.decision?.title ? `<div><button class="text-button" type="button" data-workspace-inbox="${id}" data-decision="${safe(count.decision.id)}">${safe(inboxLabelIn(count.decision,appLocale))}</button></div>` : ''}

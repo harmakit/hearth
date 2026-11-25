@@ -374,6 +374,23 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
     return openRevision(worktree, key, revision, signal);
   }
 
+  async function getIntegratedCandidate({ worktree, revision, signal }) {
+    const key = await validateWorktree(worktree, signal);
+    if (![revision?.headOid, revision?.targetOid, revision?.candidateOid].every(oid => oidPattern.test(oid ?? ''))) {
+      throw deliveryError('STALE_REVISION', 'The delivered candidate has no complete revision');
+    }
+    const workRevision = await makeRevision(worktree, key, revision, null, signal);
+    const saved = await refOid(worktree.repository, candidateRef(key, workRevision), signal);
+    const checked = await makeRevision(worktree, key, revision, revision.candidateOid, signal);
+    if (saved !== revision.candidateOid || !sameDeliveryRevision(checked, revision)) {
+      throw deliveryError('STALE_REVISION', 'The delivered candidate no longer matches its saved revision');
+    }
+    if (await refOid(worktree.repository, worktree.targetRef, signal) !== revision.candidateOid) {
+      throw deliveryError('TARGET_CHANGED', 'The package target has changed since its reviewed deliveries');
+    }
+    return openRevision(worktree, key, revision, signal);
+  }
+
   function operationDirectory(key) {
     return `refs/hearth/delivery-operations/${key}`;
   }
@@ -455,7 +472,7 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
     return false;
   }
 
-  return { freezeWork, prepareCandidate, getCandidate, releaseCandidate, verifyCheckout, integrate, isMerged };
+  return { freezeWork, prepareCandidate, getCandidate, getIntegratedCandidate, releaseCandidate, verifyCheckout, integrate, isMerged };
 }
 
 export function createProjectDelivery(legacy,git=defaultGit){
@@ -469,7 +486,7 @@ export function createProjectDelivery(legacy,git=defaultGit){
     }
     return projects.get(worktree.repository);
   };
-  const methods=Object.fromEntries(['freezeWork','prepareCandidate','getCandidate','releaseCandidate','verifyCheckout','integrate']
+  const methods=Object.fromEntries(['freezeWork','prepareCandidate','getCandidate','getIntegratedCandidate','releaseCandidate','verifyCheckout','integrate']
     .map(method=>[method,request=>forWorktree(request.worktree)[method](request)]));
   return {...methods,isMerged:worktree=>forWorktree(worktree).isMerged(worktree)};
 }

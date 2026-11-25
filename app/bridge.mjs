@@ -1,10 +1,12 @@
 import { access, lstat, mkdir, mkdtemp, realpath, rename, rm, stat } from "node:fs/promises";
-import { git, hasProjectGitDirectory, requireProjectGit } from "./git-worktrees.mjs";
+import { randomUUID } from "node:crypto";
+import { git, requireProjectGit } from "./git-worktrees.mjs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { reportLink } from "../renderer/report-link.mjs";
 
 const serviceCommands = new Set([
   "snapshot", "createStudio", "updateStudio", "assessDebtPolicy", "addAgent", "updateAgent", "createTask",
-  "updateProviderPreference", "updatePlanTasks", "taskHistory", "setAppLocale", "setOnboardingHintsEnabled", "setStudioArchived", "detachProject",
+  "updateProviderPreference", "updatePlanTasks", "taskHistory", "conversationView", "conversationPage", "setAppLocale", "setOnboardingHintsEnabled", "setStudioArchived", "detachProject",
   "startTask", "cancelTask", "answerInbox",
   "initializeStudio", "startNextSprint", "decidePlan", "setStudioRunning", "deleteStudio", "updateModelPolicy", "updatePlanAgents",
   "configureProject", "previewCleanup", "applyCleanup", "reviseBacklog", "closeSprint", "createPhase", "updatePhase",
@@ -12,6 +14,9 @@ const serviceCommands = new Set([
   "openMeeting", "resumeMeeting", "resolveMeeting", "replaceParticipant", "addPrerequisite", "waivePrerequisite",
   "proposeRosterChange", "decideRosterChange", "retirementPlan", "changeKnowledge", "publishLibraryEntry",
   "postStudioMessage", "postDirectorInboxReply", "saveInboxDraft", "applyConversationProposal", "studioUsage", "updateUsageTariff", "setEpicPriority", "diagnoseStudio", "updateNotifications", "resolveReconciliation",
+  "checkSkillVersions", "decideSkillVersion",
+  "updateQuotaPolicy",
+  "updateCodeGraphPolicy",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
 
@@ -82,8 +87,7 @@ async function newProjectFolder(parentPath, requestedName, protectedRoots) {
   await mkdir(root); // Exclusive creation protects pre-existing directories, even empty ones.
   try {
     await initializeHistory(root);
-    const targetRef = 'refs/heads/hearth-studio/delivery';
-    await git(root, ['branch',targetRef.slice('refs/heads/'.length),'HEAD']);
+    const {targetRef} = await createDeliveryBranch(root);
     return {root,targetRef};
   } catch (error) {
     throw new Error('Папка создана, но подготовить Git не удалось. Откройте её как существующую: '+root+' — '+error.message);
@@ -93,13 +97,49 @@ async function newProjectFolder(parentPath, requestedName, protectedRoots) {
 async function repositoryState(root) {
   for (let dir = root; ; dir = dirname(dir)) {
     try {
-      await lstat(join(dir, ".git"));
-      return dir === root ? "existing" : "nested";
+      const metadata = await lstat(join(dir, ".git"));
+      return dir === root ? metadata.isDirectory() ? "existing" : "linked" : "nested";
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
     if (dirname(dir) === dir) return "missing";
   }
+}
+
+async function inspectProjectFolder(root) {
+  const state = await repositoryState(root);
+  const branches = state === 'existing'
+    ? (await git(root, ['for-each-ref', '--format=%(refname)%00%(if)%(worktreepath)%(then)yes%(else)no%(end)', 'refs/heads/']))
+      .trim().split('\n').filter(Boolean).map(line => {
+        const [ref, checkedOut] = line.split('\0');
+        return {ref, checkedOut: checkedOut === 'yes'};
+      }).filter(branch => !branch.ref.startsWith('refs/heads/hearth/'))
+    : [];
+  return {root,state,branches};
+}
+
+async function prepareInitialBase(root) {
+  const head = await git(root, ['rev-parse','--verify','--quiet','HEAD'], {allowExitCodes:[1]});
+  if (head.trim()) return undefined;
+  const branch=(await git(root,['symbolic-ref','--quiet','HEAD'],{allowExitCodes:[1]})).trim();
+  if (!branch.startsWith('refs/heads/')) throw new Error('Git HEAD недоступен. Проверьте историю репозитория.');
+  // An existing unborn repository may already have staged changes. Build an
+  // empty commit without using its index or updating the current branch.
+  const tree = (await git(root, ['mktree'], {input:''})).trim();
+  return (await git(root, ['-c','user.name=Hearth Studio','-c','user.email=studio@hearth.invalid',
+    'commit-tree',tree,'-m','Initialize Hearth project history'])).trim();
+}
+
+async function createDeliveryBranch(root) {
+  const targetRef = 'refs/heads/hearth-studio/delivery';
+  await git(root, ['branch',targetRef.slice('refs/heads/'.length),'HEAD']);
+  return {targetRef};
+}
+
+async function requireStandaloneRepository(root) {
+  const state = await repositoryState(root);
+  if (state === 'nested' || state === 'linked') throw new Error('Выберите корневую папку самостоятельного Git-репозитория, а не вложенную папку или рабочую копию.');
+  return state;
 }
 
 async function initializeHistory(root) {
@@ -127,10 +167,37 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, revealArtifact, copyArtifactPath, openProject,
-  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, copyTaskId,
+export function createCommandRouter({ service, selectFolder, inspect, previewImport, openArtifact, revealArtifact, copyArtifactPath, openProject, openExternal,
+  openEvidence, revealEvidence, copyEvidencePath, saveEvidence, saveDiagnostics, pickAttachment, restart, findSkills, transfer, readArtifact, copyTaskId, openTaskWorktree, openGitReportFile,
   portable, protectedRoots = [] }) {
   const initializing = new Set();
+  async function prepareExistingProject(root, requestedTarget) {
+    const state = await requireStandaloneRepository(root);
+    const selected = typeof requestedTarget === 'string' && requestedTarget.trim();
+    if (state === 'missing') {
+      if (selected) throw new Error('В выбранной папке ещё нет этой ветки. Выберите управляемую ветку.');
+      await initializeExistingFolder(root);
+      return createDeliveryBranch(root);
+    }
+    if (selected) return service.prepareProjectTarget({repository:root,targetRef:selected,create:false});
+    const baseRef = await prepareInitialBase(root);
+    return service.prepareProjectTarget({repository:root,targetRef:`refs/heads/hearth-studio/${randomUUID()}`,baseRef,create:true});
+  }
+
+  async function enableDefaultProject(studio) {
+    if (studio.projectGit !== undefined || studio.projectDetached) return studio;
+    try {
+      return await service.configureProject({studioId:studio.id,enabled:true}, async current => {
+        const root = await validateProjectRoot(current.root, protectedRoots);
+        const state = await requireStandaloneRepository(root);
+        if (state === 'missing') await initializeExistingFolder(root);
+        return prepareInitialBase(root);
+      });
+    } catch (error) {
+      return {...studio,gitSetupWarning:error.message};
+    }
+  }
+
   async function create(input,prepared){
     await portable?.assertEmptyRecipe(input.root);
     const studio=service.createStudio(input,prepared);
@@ -140,6 +207,7 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
   return async (command, payload = {}) => {
     if (!isRecord(payload)) throw new Error("Переданы некорректные данные.");
     if (command === "pickFolder") return selectFolder();
+    if (command === 'inspectProjectFolder') return inspectProjectFolder(await validateProjectRoot(payload.root, protectedRoots));
     if (command === "inspectProjectRepository" || command === "initializeProjectRepository") {
       const studio = service.snapshot().studios.find(row => row.id === payload.studioId);
       if (!studio || studio.projectDetached || studio.archivedAt) throw new Error("Подключите доступную папку студии.");
@@ -161,13 +229,14 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
     }
     if (['inspectStudioFolder','openStudioFolder'].includes(command) && portable){
       const root=await validateProjectRoot(payload.root,protectedRoots);
-      return command==='inspectStudioFolder'?portable.inspect({root}):portable.open({root,replaceRoot:payload.replaceRoot===true});
+      return command==='inspectStudioFolder'?portable.inspect({root}):
+        enableDefaultProject(await portable.open({root,replaceRoot:payload.replaceRoot===true}));
     }
     if (command==='migrateStudioFolder' && portable){
       const studio=service.snapshot().studios.find(row=>row.id===payload.studioId);
       if(!studio)throw new Error('Студия не найдена.');
       const root=await validateProjectRoot(studio.root,protectedRoots);
-      return portable.migrate({studioId:studio.id,root});
+      return enableDefaultProject(await portable.migrate({studioId:studio.id,root}));
     }
     if(command==='prepareStudioCopy' && portable)return portable.prepare(payload);
     if (command === "copyTaskId") {
@@ -217,6 +286,27 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       if (!studio) throw new Error("Студия не найдена.");
       if (studio.projectDetached) throw new Error("Папка проекта недоступна.");
       return openProject(await directory(studio.root));
+    }
+    if (command === 'openReportLink') {
+      const link = reportLink(payload.destination);
+      if (!link) throw new Error('Эту ссылку нельзя открыть из отчёта.');
+      if (link.url) return openExternal(link.url);
+      const { studios, tasks, inbox } = service.snapshot();
+      const studio = studios.find(row => row.id === payload.studioId);
+      if (!studio || studio.projectDetached) throw new Error('Папка студии недоступна.');
+      const root = await validateProjectRoot(studio.root, protectedRoots);
+      const task = tasks?.find(row => row.id === payload.taskId && row.studioId === studio.id);
+      const review = payload.inboxId && inbox?.find(row=>row.id===payload.inboxId && row.studioId===studio.id && row.kind==='acceptance')?.review;
+      if (payload.inboxId && !review) throw new Error('Сверенная версия отчёта недоступна.');
+      if (studio.projectGit?.enabled && openGitReportFile && await openGitReportFile({ studio, task, review, root, path: link.path })) return true;
+      return openArtifact({ root, path: link.path });
+    }
+    if (command === 'openTaskWorktree') {
+      const { studios, tasks }=service.snapshot();
+      const studio=studios.find(row=>row.id===payload.studioId && !row.projectDetached);
+      const task=tasks.find(row=>row.id===payload.taskId && row.studioId===studio?.id && row.deliveryMode==='git');
+      if (!studio || !task) throw new Error('Рабочая копия задачи недоступна.');
+      return openTaskWorktree(studio,task);
     }
     const artifactActions = { openArtifact, revealArtifact, copyArtifactPath };
     if (Object.hasOwn(artifactActions, command)) {
@@ -271,12 +361,14 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
     if (command === "createStudio" || (command === "updateStudio" && Object.hasOwn(payload, "root"))) {
       payload = { ...payload, root: await validateProjectRoot(payload.root, protectedRoots) };
       if(command==='updateStudio') return service.updateStudio(payload,await directoryIdentity(payload.root));
-      const {offerGit, ...input} = payload;
-      if (offerGit === true) {
-        const gitOfferAvailable = await hasProjectGitDirectory(input.root).catch(() => false);
-        return {...await create(input), gitOfferAvailable};
-      }
-      return create(input);
+      const {offerGit, targetRef, ...input} = payload;
+      if (initializing.has(input.root)) throw new Error('Git-репозиторий уже создаётся.');
+      initializing.add(input.root);
+      try {
+        await portable?.assertEmptyRecipe(input.root);
+        const prepared = await prepareExistingProject(input.root, targetRef);
+        return await create(input,prepared);
+      } finally { initializing.delete(input.root); }
     }
     return service[command](payload);
   };

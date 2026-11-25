@@ -163,6 +163,23 @@ function skillTitle(content, path, repo) {
   return (name || heading || path.split('/').at(-2) || repo).slice(0, 120);
 }
 
+function licenseEntry(tree) {
+  return tree.find(entry=>/^(?:licen[cs]e|copying)(?:\.(?:md|txt))?$/iu.test(entry.path??'') &&
+    entry.type==='blob' && entry.mode==='100644' && SHA.test(entry.sha??'') &&
+    Number.isSafeInteger(entry.size) && entry.size<=MAX_SKILL_BYTES);
+}
+
+function skillCandidate(repo, commit, path, content, licenseText) {
+  const license=repo.license?.spdx_id;
+  return {
+    id:`${repo.full_name}@${commit}:${path}`,repo:repo.full_name,commit,path,
+    title:skillTitle(content,path,repo.full_name),stars:repo.stargazers_count,
+    license:typeof license==='string' && license!=='NOASSERTION' ? license : repo.license?.name ?? null,
+    url:`${WEB_ORIGIN}/${repo.full_name}/blob/${commit}/${path.split('/').map(encodeURIComponent).join('/')}`,
+    content,...(licenseText?{redistributable:true,files:{'LICENSE.txt':licenseText}}:{}),
+  };
+}
+
 function retryTime(headers, now, retry) {
   const after = headers.get('retry-after');
   const afterTime = /^\d+$/.test(after ?? '') ? now + Number(after) * 1_000 : Date.parse(after ?? '');
@@ -239,6 +256,52 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Da
   }
 
   return {
+    async checkVersion(skill, {signal}={}) {
+      const {repo:registeredRepo,path,commit:registeredCommit}=skill??{};
+      if(!REPO_NAME.test(registeredRepo??'') || !SHA.test(registeredCommit??'') ||
+        !validSkill({path,type:'blob',mode:'100644',sha:registeredCommit}) || path.split('/').length>24) {
+        return {status:'unavailable',message:'Invalid registered skill identity'};
+      }
+      const repoUrl=`${API_ORIGIN}/repos/${registeredRepo}`;
+      const deadline=now()+40_000;
+      const get=(url,limit)=>request(url,limit,signal,deadline);
+      try {
+        const repo=await get(repoUrl,MAX_SEARCH_RESPONSE_BYTES);
+        if(!publicRepository(repo,0) || repo.full_name.toLowerCase()!==registeredRepo.toLowerCase()) throw new GitHubReadError('registered public repository is unavailable');
+        const head=await get(`${repoUrl}/commits/${encodeURIComponent(repo.default_branch)}`,MAX_SEARCH_RESPONSE_BYTES);
+        const commit=head?.sha,treeSha=head?.commit?.tree?.sha;
+        if(!SHA.test(commit??'') || !SHA.test(treeSha??'')) throw new GitHubReadError('invalid commit or tree ID');
+        if(commit===registeredCommit)return {status:'current',observedCommit:commit};
+        const readTree=async sha=>{
+          const result=await get(`${repoUrl}/git/trees/${sha}`,MAX_TREE_RESPONSE_BYTES);
+          if(!Array.isArray(result?.tree) || result.truncated) throw new GitHubReadError('incomplete Git tree');
+          return result.tree;
+        };
+        const rootTree=await readTree(treeSha);
+        let files=rootTree,entry;
+        const parts=path.split('/');
+        for(const [index,part] of parts.entries()){
+          entry=files.find(item=>item.path===part);
+          if(index===parts.length-1)break;
+          if(entry?.type!=='tree' || entry.mode!=='040000' || !SHA.test(entry.sha??'')) throw new GitHubReadError('registered path is unavailable');
+          files=await readTree(entry.sha);
+        }
+        if(!validSkill({...entry,path})) throw new GitHubReadError('registered skill file is unavailable');
+        const content=readSkill(await get(`${repoUrl}/git/blobs/${entry.sha}`,MAX_BLOB_RESPONSE_BYTES),entry.sha);
+        const license=licenseEntry(rootTree);
+        const licenseText=license && shareableLicenses.has(repo.license?.spdx_id)
+          ? readSkill(await get(`${repoUrl}/git/blobs/${license.sha}`,MAX_BLOB_RESPONSE_BYTES),license.sha) : undefined;
+        const candidate=skillCandidate(repo,commit,path,content,licenseText);
+        const unchanged=candidate.content===skill.content && candidate.license===(skill.license??null) &&
+          Boolean(candidate.redistributable)===Boolean(skill.redistributable) &&
+          candidate.files?.['LICENSE.txt']===skill.files?.['LICENSE.txt'];
+        return unchanged ? {status:'current',observedCommit:commit} : {status:'available',candidate};
+      } catch(error) {
+        signal?.throwIfAborted();
+        return {status:'unavailable',message:error instanceof GitHubReadError?error.message:'GitHub request could not be completed',
+          ...(cooldown>now()?{retryAt:new Date(cooldown).toISOString()}:{})};
+      }
+    },
     async findSkills({ topics, minStars = DEFAULT_MIN_STARS, signal } = {}) {
       signal?.throwIfAborted();
       const deadline = now() + LOOKUP_BUDGET_MS;
@@ -312,12 +375,11 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Da
           if (tree.truncated) warnings.push(`GitHub returned an incomplete Git tree for ${repo.full_name}.`);
           const skillEntries = tree.tree.filter(validSkill);
           singleSkill = skillEntries.length === 1 && !tree.truncated;
-          const licenseEntry=tree.tree.find(entry=>/^(?:licen[cs]e|copying)(?:\.(?:md|txt))?$/iu.test(entry.path??'')
-            && entry.type==='blob' && entry.mode==='100644' && SHA.test(entry.sha??'') && Number.isSafeInteger(entry.size) && entry.size<=MAX_SKILL_BYTES);
-          if(!tree.truncated && licenseEntry && shareableLicenses.has(repo.license?.spdx_id) && blobRequests<MAX_BLOBS){
+          const licenseFile=licenseEntry(tree.tree);
+          if(!tree.truncated && licenseFile && shareableLicenses.has(repo.license?.spdx_id) && blobRequests<MAX_BLOBS){
             blobRequests++;
-            const licenseBlob=await get(`${repoUrl}/git/blobs/${licenseEntry.sha}`,MAX_BLOB_RESPONSE_BYTES);
-            licenseText=readSkill(licenseBlob,licenseEntry.sha);
+            const licenseBlob=await get(`${repoUrl}/git/blobs/${licenseFile.sha}`,MAX_BLOB_RESPONSE_BYTES);
+            licenseText=readSkill(licenseBlob,licenseFile.sha);
           }
           files = skillEntries
             .map(entry => ({ entry, relevance: relevance(entry.path, specificTopics) }))
@@ -336,19 +398,7 @@ export function createGitHubSkillFinder({ fetchImpl = globalThis.fetch, now = Da
             const title = skillTitle(content, path, repo.full_name);
             if (specificTopics.length && !pathMatch && !(metadataMatch && (singleSkill || path === 'SKILL.md'))
               && !relevantContent(content, title, specificTopics)) continue;
-            const license = repo.license?.spdx_id;
-            candidates.push({
-              id: `${repo.full_name}@${commit}:${path}`,
-              repo: repo.full_name,
-              commit,
-              path,
-              title,
-              stars: repo.stargazers_count,
-              license: typeof license === 'string' && license !== 'NOASSERTION' ? license : repo.license?.name ?? null,
-              url: `${WEB_ORIGIN}/${repo.full_name}/blob/${commit}/${path.split('/').map(encodeURIComponent).join('/')}`,
-              content,
-              ...(licenseText?{redistributable:true,files:{'LICENSE.txt':licenseText}}:{}),
-            });
+            candidates.push(skillCandidate(repo,commit,path,content,licenseText));
           } catch (error) {
             if (reportFailure(`skill read for ${repo.full_name}`, error)) return results();
           }

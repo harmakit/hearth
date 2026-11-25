@@ -23,6 +23,7 @@ test('moving an opted-in studio into its folder preserves original IDs and resto
   first=createStudioService({dbPath:join(root,'profile.sqlite')});
   const studio=first.createStudio({root:source,name:'Port me'});
   const task=first.createTask({studioId:studio.id,title:'Keep' ,prompt:'Keep all records'});
+  const conversation=first.postStudioMessage({studioId:studio.id,taskId:task.id,kind:'comment',text:'Portable history'});
   await first.migrateStudioStorage({studioId:studio.id,root:source});
   assert.equal(first.snapshot().studios[0].root,source);
   await first.close();
@@ -33,6 +34,9 @@ test('moving an opted-in studio into its folder preserves original IDs and resto
   second=createStudioService({dbPath:join(root,'new-profile.sqlite')});
   await second.openStudioStorage({root:copy,studioId:studio.id});
   assert.equal(second.snapshot().tasks.find(entry=>entry.id===task.id).studioId,studio.id);
+  const context=second.conversationView({studioId:studio.id,conversationId:conversation.conversationId});
+  assert.equal(context.context[0].text,'Portable history');
+  assert.equal(second.conversationPage({studioId:studio.id,conversationId:conversation.conversationId}).rows[0].id,conversation.id);
   assert.equal(second.snapshot().studios[0].root,copy);
   assert.equal(second.snapshot().studios[0].manualPaused,true);
   await assert.rejects(second.openStudioStorage({root:source,studioId:studio.id}),/другой папк/u);

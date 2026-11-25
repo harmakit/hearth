@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
+import { isReportFilePath } from '../renderer/report-link.mjs';
 
 const oidPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const idPattern = /^[0-9a-f]{64}$/;
@@ -86,6 +87,19 @@ export async function git(repository, args, options) {
     return key.endsWith('.required') ? `${key}=false` : `${key}=`;
   });
   return runGit(repository, args, options, config);
+}
+
+export async function readGitReportFile({ repository, revision, path }) {
+  if (!oidPattern.test(revision ?? '') || !isReportFilePath(path)) throw new Error('Файл отчёта недоступен.');
+  const entry = await git(repository, ['--literal-pathspecs', 'ls-tree', '-z', revision, '--', path]);
+  const match = /^100(?:644|755) blob ([a-f0-9]{40}|[a-f0-9]{64})\t([^\0]+)\0$/u.exec(entry);
+  if (!match || match[2] !== path) return null;
+  const oid = match[1];
+  const maxBytes = 16 * 1024 * 1024;
+  const size = Number(await git(repository, ['cat-file', '-s', oid]));
+  if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes) throw new Error('Файл отчёта превышает 16 МБ.');
+  const bytes = await git(repository, ['cat-file', 'blob', oid], { encoding: 'buffer', maxBuffer: maxBytes });
+  return { bytes, oid };
 }
 
 function recordId(studioId, taskId) {

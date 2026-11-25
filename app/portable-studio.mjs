@@ -3,7 +3,7 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const settingsKeys=['id','name','brief','language','languageMode','projectLanguage','director','allowed','allowedMode',
-  'approveSprints','skillMinStars','schedule','debtPolicy','groomingPolicy','wipLimit','staffing','sprintReview','projectGit'];
+  'approveSprints','skillMinStars','schedule','debtPolicy','groomingPolicy','wipLimit','staffing','sprintReview','projectGit','weeklyQuotaThreshold','codeGraphMode'];
 const field=(record,keys)=>Object.fromEntries(keys.filter(key=>record[key]!==undefined).map(key=>[key,record[key]]));
 const skillName=record=>'skill-'+createHash('sha256').update(record.id).digest('hex').slice(0,14);
 export const nativeRoleName=agent=>agent?'role-'+createHash('sha256').update(agent.id).digest('hex').slice(0,14):'director';

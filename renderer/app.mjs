@@ -4,17 +4,18 @@ import { agentActivity, actorState, buildRooms, languageChoices, pendingStudioPl
 import { paintRooms } from './room-art.mjs';
 import {localeNames, textFor,tokenCount} from './locale.mjs';
 import {createInspectorHistory, membersOfEpic} from './inspector.mjs';
-import { studioActivityStatus, taskFacts } from './owner-facts.mjs';
+import { currentStudioTasks, studioActivityStatus, taskFacts } from './owner-facts.mjs';
 import { publishedPaths, renderWork, registerRows } from './work-view.mjs';
 import { installDialogSize } from './dialog-size.mjs';
 import { installInspectorResize } from './inspector-size.mjs';
 import { catalogEfforts, fixedModelChoices, modelKey } from './model-policy.mjs';
 import { createModelCatalogEditor } from './model-catalog-editor.mjs';
 import { renderWorkspaceHome } from './workspace-view.mjs';
+import { quotaThresholdText,quotaObservationText,quotaPauseText } from './quota-view.mjs';
 import { initialWorkspaceView,renderToday,todayItems } from './today-view.mjs';
 import { pulseFeedback } from './motion.mjs';
 import { createOnboardingHints, selectOnboardingHint } from './onboarding-hints.mjs';
-import { progressMark,stageMark } from './presentation.mjs';
+import { conversationContextHeading,conversationHistorySlice,progressMark,reconciliationDecisionCopy,renderReconciliationDecisions,renderRecordedChecks,renderReportMarkdown,renderWebResearch,stageMark } from './presentation.mjs';
 import { taskRecovery } from './task-recovery.mjs';
 import { readStudioDraft,writeStudioDraft,clearStudioDraft } from './studio-draft.mjs';
 import { coachTitle, parseSkillTopics, pendingDependencies, renderSkillLibrary, renderSkillPreview, renderTrainingDetails, roleReadiness, skillMinStars, skillStarLabel } from './coach-view.mjs';
@@ -127,6 +128,7 @@ let boardAllSprints=false;
 let advancedOpen = false;
 let catalogEditor;
 let skillSearch = { topics: '', preview: {} };
+const checkingSkillVersions = new Set();
 const debtAssessments = new Map();
 const legacyPreviews = new Map();
 const studioRows = key => (state[key] ?? []).filter(item => String(item.studioId) === studioId);
@@ -247,12 +249,7 @@ async function refresh() {
     } else if (dialog.open && directorDialog) {
       refreshDirectorReply();
     } else if (dialog.open && dialogConversation) {
-      const thread = studioRows('conversations').find(row => !row.inboxId && (row.agentId ?? null) === dialogConversation.agentId &&
-        (row.taskId ?? null) === dialogConversation.taskId);
-      const agent = studio().agents?.find(row => row.id === dialogConversation.agentId);
-      const region = $('[data-message-history]');
-      const markup = messageHistoryMarkup(thread, agent);
-      if (region && region.innerHTML !== markup) region.innerHTML = markup;
+      void refreshConversation(dialogConversation);
     }
   } catch (error) {
     if (version === snapshotVersion) {
@@ -433,8 +430,37 @@ function skills() {
     button(copy('Версии и история'), 'data-open="library-history"', true)) +
     (materials.length ? `<label class="field"><span>${ui('findMaterial')}</span><input type="search" data-local-library></label><ul class="legacy-list" data-local-results hidden>${materials.join('')}</ul>` : '') + renderSkillLibrary({
     studio: current, tasks: tasks(), skills: rows('skills'), knowledge: rows('knowledge'), customSkills: rows('customSkills'),
-    knowledgeEvents: rows('knowledgeEvents'), ...skillSearch,
+    knowledgeEvents: rows('knowledgeEvents'), skillChecks:rows('skillChecks'),checkingVersions:checkingSkillVersions.has(current.id), ...skillSearch,
   });
+}
+
+async function checkRegisteredSkills() {
+  const id=studioId;
+  if(checkingSkillVersions.has(id))return;
+  checkingSkillVersions.add(id);
+  render();
+  try {
+    await bridge.request('checkSkillVersions',{studioId:id,force:true});
+    await refresh();
+  } catch(error) {
+    if(studioId===id)notice(copySystem(error.message),true);
+  } finally {
+    checkingSkillVersions.delete(id);
+    if(studioId===id)render();
+  }
+}
+
+function applyRegisteredSkill(skillId,commit) {
+  const current=studio();
+  const skill=studioRows('skills').find(row=>row.id===skillId);
+  const check=studioRows('skillChecks').find(row=>row.id===skillId);
+  if(!skill || check?.candidate?.commit!==commit)return notice(copy('Версия навыка изменилась или больше недоступна.'),true);
+  dialogTo(copy('Применить обновление навыка'),
+    plain(skill.title)+plain(skill.commit+' → '+commit)+plain(copy('Текущие запуски завершатся со старой версией. Затем роли подключат новую; предыдущая версия останется в истории.')),
+    copy('Применить обновление'),async()=>{
+      const result=await bridge.request('decideSkillVersion',{studioId:current.id,skillId,commit,decision:'apply'});
+      notice(copy(result.status==='approved'?'Обновление применится после завершения активных запусков.':'Версия навыка обновлена.'));
+    });
 }
 
 function updateSkillPreview(search, preview) {
@@ -602,14 +628,13 @@ function overview() {
   const open = entries().filter(item => item.status === 'open');
   const blocking = item=>Boolean(item.blockedTaskIds?.length || item.taskId || item.kind==='plan');
   const decision = open.toSorted((a,b)=>Number(blocking(b))-Number(blocking(a)) || String(a.createdAt??'9999').localeCompare(String(b.createdAt??'9999')))[0];
-  const currentWork = all.filter(task => task.status !== 'cancelled' &&
-    (task.status !== 'completed' || (task.workflowManaged && task.stage !== 'done')));
+  const currentWork = currentStudioTasks(all);
   const failedTask=(decision?.kind==='error'&&all.find(task=>task.id===decision.taskId&&task.status==='failed'))
     ||(!decision&&all.find(task=>task.status==='failed'));
   const failure=failedTask?taskRecoveryBlock(failedTask):'';
   const last = all.find(task => task.status === 'completed' && task.kind!=='train' && !task.packageMembers && (!task.stage || task.stage === 'done'));
   const rooms = buildRooms({ ...current, agents: activeRoster(current) });
-  const workCount = all.filter(task => ['running', 'queued'].includes(task.status)).length;
+  const workCount = currentWork.filter(task => ['running', 'queued', 'scheduled'].includes(task.status)).length;
   const activeAttempts = current.activeAttempts ?? all.filter(task => task.status === 'running').length;
   const needsAttention = all.some(task => task.status === 'failed') || open.some(item => item.kind === 'error' || item.kind === 'reconcile');
   const displayStatus = studioActivityStatus(current, activeAttempts, needsAttention);
@@ -618,11 +643,10 @@ function overview() {
   const activePlan = plans().findLast(plan => plan.status === 'approved');
   const sprint = studioRows('sprints').findLast(s=>s.status==='active');
   const sprintTasks = sprint ? all.filter(t=>t.stage!=='replaced'&&(t.sprintId===sprint.id||sprint.taskIds?.includes(t.id))) : [];
-  const initial = plans().some(plan => plan.kind === 'initial' && plan.status === 'approved');
   const canInitialize = current.lifecycle === 'draft';
   const provider=providerState[current.director?.runtime];
   const unavailable=canInitialize&&provider&&(provider.enabled===false||provider.available===false||provider.authenticated===false);
-  const running = !canInitialize && !current.projectDetached && (['active', 'planning'].includes(current.lifecycle) || (current.lifecycle === 'idle' && initial) || workCount > 0 || current.scheduleWaiting);
+  const running = !canInitialize && !current.projectDetached && (['active', 'planning'].includes(current.lifecycle) || workCount > 0 || current.scheduleWaiting);
   const manuallyPaused = current.manualPaused || current.lifecycle === 'paused';
   const stop = (activeAttempts > 0 || workCount > 0) && current.activity !== 'Студия остановлена' ? button(copy('Прервать работу'),
     `data-run-action="stop" title="${safe(copy('Прервать текущие шаги и приостановить очередь.'))}"`, true) : '';
@@ -639,9 +663,10 @@ function overview() {
   return heading(copy('Обзор студии'), current.name, button(copy('Связь с командой'), 'data-open="messages"', true) + (canInitialize ? '' : button(copy('Новая задача'), 'data-open="task"')) + runButtons) +
     copy`<div class="split"><div class="stack">
       ${current.lifecycle || activity || pendingPlan ? copy`<section class="panel padded stack compact">
-        <div class="row"><h2>${canInitialize ? copy('Начало работы') : copy('Студия')}</h2>${waitingForSchedule ? badge(copy('Ждёт рабочего времени'), 'warn') :
+        <div class="row"><h2>${canInitialize ? copy('Начало работы') : copy('Студия')}</h2>${current.quotaPause ? badge(copy('Пауза по недельной квоте'),'warn') : waitingForSchedule ? badge(copy('Ждёт рабочего времени'), 'warn') :
           studioStatuses[displayStatus] ? badge(...studioStatuses[displayStatus]) : ''}</div>
         ${intro}${activity ? `<p class="activity" role="status">${safe(activity)}</p>` : ''}
+        ${current.quotaPause?`<div class="inline-result stack compact" role="status"><p>${safe(quotaPauseText(current.quotaPause))}</p><div>${button(copy('Настроить порог'),`data-open="${current.quotaPause.scope==='app'?'app-quota':'studio-quota'}"`,true)}</div></div>`:''}
         ${sprint ? progressMark(sprintTasks.filter(t=>t.stage==='done').length,sprintTasks.length) : ''}
         <p class="muted">Активные попытки: ${safe(activeAttempts)} из ${safe(current.wipLimit ?? 1)}${current.nextScheduleAt ? copy` · Следующее окно: ${safe(studioDate(current.nextScheduleAt))}` : ''}</p>
         ${unavailable ? fieldHint(copy('Подключите провайдера директора, чтобы подготовить план.')):''}
@@ -656,9 +681,9 @@ function overview() {
       </article>` : '')}
       <section class="stack compact"><div class="row"><h2>Последний отчёт</h2>${button(copy('Все артефакты'), 'data-work-pane="artifacts"', true)}</div>
         ${last ? `<article class="panel report">
-          <div class="excerpt">${safe(last.summary || copy('Результат сохранён в задаче.'))}</div>
-          <div class="padded stack compact"><div class="row"><h3>${safe(last.title)}</h3>${status(last)}</div>
-          <div class="actions">${actionFor(copy('Читать отчёт'), 'task', last.id)}${last.artifactPath ? actionFor(copy('Открыть файл'), 'artifact', last.id, false) : ''}</div></div></article>`
+          <div class="padded stack compact"><div class="row"><h3>${safe(last.title)}</h3>${status(last)}</div>${renderRecordedChecks(last.gitDelivery)}
+          <div class="actions">${actionFor(copy('Читать отчёт'), 'task', last.id)}${last.artifactPath ? actionFor(copy('Открыть файл'), 'artifact', last.id, false) : ''}</div></div>
+          <div class="excerpt" data-report-task="${safe(last.id)}">${renderReportMarkdown(last.summary || copy('Результат сохранён в задаче.'))}</div></article>`
           : empty(copy('Отчётов пока нет'), copy('Здесь появится результат первой завершённой задачи.'))}</section>
     </div><aside class="stack">
       <section class="panel padded stack compact"><div class="row"><h2>Мастерская</h2>${glyph('workshop')}</div>
@@ -679,12 +704,13 @@ function taskRecoveryBlock(task) {
   const current=studio();
   const recovery=taskRecovery(task,current,studioRows('attempts'),entries());
   if(!recovery)return '';
-  const {kind,action}=recovery;
+  const {kind,action,step}=recovery;
   const reason=copySystem(recovery.reason);
   const next = {
     resume: task.training?.bootstrap ? copy('Возобновите студию, затем повторите подготовку коуча из задачи.')
       : copy('Возобновите студию, чтобы продолжить работу.'),
-    retry: kind==='training' ? copy('Повтор запустит упражнение и проверку. Зависимые задачи ждут успешной подготовки.')
+    retry: step==='director' ? copy('Директор снова выберет дальнейший шаг. Доставленная версия файлов сохранится.') :
+      kind==='training' ? copy('Повтор заново подготовит руководство, упражнение и ревью. Зависимые задачи ждут успешной подготовки.')
       : copy('Повтор запустит задачу снова. Результат появится в истории запусков.'),
     checks: copy('Откройте результаты проверок. По ним видно, какую проверку нужно исправить.'),
     connection: copy('Проверьте вход в используемый провайдер, затем повторите запуск.'),
@@ -694,7 +720,8 @@ function taskRecoveryBlock(task) {
   };
   const buttons={
     resume:()=>actionFor(copy(current.lifecycle==='error'?'Повторить шаг':'Возобновить студию'),'run-action','resume',false),
-    retry:()=>actionFor(kind==='training'&&task.training?.bootstrap?copy('Повторить подготовку коуча'):copy('Повторить запуск'),'retry-from-inbox',task.id,false),
+    retry:()=>actionFor(step==='director'?copy('Повторить решение директора'):
+      kind==='training'&&task.training?.bootstrap?copy('Повторить подготовку коуча'):copy('Повторить запуск'),'retry-from-inbox',task.id,false),
     checks:()=>actionFor(copy('Открыть результаты проверок'),'task-check-results',task.id,false),
     connection:()=>button(copy('Настройки приложения'),'data-error-settings',true),
     project:()=>actionFor(copy('Настройки студии'),'project-settings',current.id,false),
@@ -851,6 +878,7 @@ function appSettings() {
       <div class="stack compact provider-card-body">
       ${detail ? `<p class="muted">${safe(detail)}</p>` : ''}
       ${info?.models?.length ? copy`<p class="muted">Моделей в каталоге: ${info.models.length}</p>` : ''}
+      <p class="muted">${safe(quotaObservationText(info?.weeklyQuota ?? (id==='claude'?{status:'unsupported'}:undefined)))}</p>
       ${info?.authenticated && !info?.models?.length ? copy('<p class="muted">Подключение не передало каталог. Можно использовать модель по умолчанию или указать идентификатор.</p>') : ''}
       </div><div class="stack compact provider-card-actions">
       <label class="checkbox-field"><input type="checkbox" data-provider-enabled="${id}"${info?.enabled !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Разрешить запуски через ${label}</span></label>
@@ -862,6 +890,14 @@ function appSettings() {
   return heading(ui('app-settings'), ui('general')) +
     `<label class="field app-settings-locale"><span>${ui('language')}</span><select data-settings-locale>${Object.entries(localeNames).map(([id,label])=>option(id,label,state.appLocale ?? 'en')).join('')}</select></label>` +
     copy`<div class="stack settings"><section class="stack compact"><h2>Подключения</h2><div class="columns">${providers}</div></section>
+      <section class="stack compact"><h2>Недельная квота</h2><div class="panel padded stack compact">
+        ${rowAction(copy('Общий порог'),quotaThresholdText(state.quotaPolicy?.threshold),button(copy('Настроить порог'),'data-open="app-quota"',true))}
+        <p class="muted">При достижении общего порога новые автоматические запуски ждут во всех студиях.</p>
+        ${state.quotaPolicy?.pause?`<p class="activity" role="status">${safe(quotaPauseText(state.quotaPolicy.pause))}</p>`:''}
+      </div></section>
+      <section class="stack compact"><h2>CodeGraph</h2><div class="panel padded stack compact">
+        ${rowAction(copy('Локальная навигация по коду'),copy(state.codeGraphPolicy?.enabled?'Включена по умолчанию':'Выключена по умолчанию'),button(copy('Настроить'),'data-open="app-codegraph"',true))}
+      </div></section>
       <section class="stack compact"><h2>Модели приложения</h2><div class="panel padded stack compact">
         ${rowAction(copy('Политика по умолчанию'), state.modelPolicy?.configured
           ? (state.modelPolicy.allowed.length ? copy`Свой список · ${state.modelPolicy.allowed.length} моделей` : copy('Модель и усилие берутся у директора'))
@@ -885,6 +921,44 @@ function appSettings() {
     </div>`;
 }
 
+function quotaPolicyEditor(scope) {
+  const current=scope==='studio'?studio():undefined;
+  const threshold=current?current.weeklyQuotaThreshold:state.quotaPolicy?.threshold;
+  const explanation=scope==='app'
+    ? copy('Общий порог распространяется на все студии, независимо от их собственных настроек.')
+    : copy('Порог студии действует для её подключений независимо от общего порога.');
+  const providers=Object.entries(runtimeNames).map(([id,name])=>plain(name+' · '+quotaObservationText(providerState[id]?.weeklyQuota ??
+    (id==='claude'?{status:'unsupported'}:undefined)))).join('');
+  dialogTo(copy(scope==='app'?'Общий порог':'Порог студии'),
+    plain(explanation)+plain(copy('Активные запуски не прерываются. Если данных ещё нет, Hearth не считает квоту исчерпанной. Уже сработавшая пауза сохранится до нового измерения.'))+
+    input(copy('Минимальный недельный остаток, %'),'threshold',threshold??'','type="number" min="0" max="100" step="1"')+
+    fieldHint(copy('Оставьте поле пустым, чтобы отключить порог.'))+providers,
+    copy('Сохранить порог'),async({threshold:value})=>{
+      const next=value===''?null:Number(value);
+      if(next!==null && (!Number.isInteger(next)||next<0||next>100))throw new Error(copy('Укажите порог недельного остатка от 0 до 100%.'));
+      await bridge.request('updateQuotaPolicy',{scope,...(current?{studioId:current.id}:{}),threshold:next});
+    });
+}
+
+function codeGraphPolicyEditor(scope) {
+  const current=scope==='studio'?studio():undefined;
+  dialogTo('CodeGraph',plain(copy('Hearth передаёт агенту локальный контекст CodeGraph из копии текущей рабочей папки. Если инструмент не установлен или язык не поддерживается, обычная работа продолжается.'))+
+    (current?select(copy('Режим студии'),'mode',[
+      option('inherit',copy('Наследовать настройку приложения'),current.codeGraphMode??'inherit'),
+      option('on',copy('Использовать CodeGraph'),current.codeGraphMode),
+      option('off',copy('Не использовать CodeGraph'),current.codeGraphMode),
+    ].join('')):checkbox(copy('Использовать CodeGraph в подходящих проектах'),'enabled',Boolean(state.codeGraphPolicy?.enabled))),
+    copy('Сохранить'),values=>bridge.request('updateCodeGraphPolicy',{scope,...(current?{studioId:current.id,mode:values.mode}:{enabled:Boolean(values.enabled)})}));
+}
+
+function codeGraphCallText(graph) {
+  if(!graph)return '';
+  const status=copy(({used:'Использован локальный контекст',unsupported:'Нет поддерживаемого кода',unavailable:'CodeGraph недоступен',empty:'Контекст не найден',skipped:'Пропущено'})[graph.status]??'Пропущено');
+  return ['CodeGraph',status,Number.isFinite(graph.files)?copy('Файлов')+' '+graph.files:'',
+    Number.isFinite(graph.durationMs)?new Intl.NumberFormat(getCopyLocale(),{style:'unit',unit:'second',maximumFractionDigits:1}).format(graph.durationMs/1000):'',
+    graph.partial?copy('Частичный индекс'):'',graph.reason].filter(Boolean).join(' · ');
+}
+
 function settings() {
   const current = studio();
   return heading(copy('Настройки студии'), current.name) + copy`<div class="stack settings">
@@ -901,14 +975,19 @@ function settings() {
         <label class="checkbox-field"><input type="checkbox" name="approveSprints"${current.approveSprints !== false ? ' checked' : ''}${workBusy ? ' disabled' : ''}> <span>Согласовывать план спринта</span></label>
         <p class="muted">При инициализации Hearth всегда запрашивает согласование. Настройка применяется к будущим спринтам.</p>
         ${rowAction(copy('Расписание'), copy`${scheduleLabel(current.schedule)} · Запуск новых задач по часам студии`, button(copy('Настроить расписание'), 'data-open="schedule"', true))}
+        ${rowAction(copy('Порог студии'),quotaThresholdText(current.weeklyQuotaThreshold),button(copy('Настроить порог'),'data-open="studio-quota"',true))}
+        ${current.quotaPause?`<p class="activity" role="status">${safe(quotaPauseText(current.quotaPause))}</p>`:''}
         ${rowAction(copy('Одновременные запуски'), `${current.wipLimit ?? 1} · ${(current.wipLimit ?? 1) === 1 ? copy('Задачи идут по очереди') : copy('Независимые рабочие шаги могут идти параллельно')}`, button(copy('Настроить'), 'data-open="dispatch"', true))}
         ${rowAction(copy('Подготовка задач к спринту'), current.groomingPolicy?.enabled
           ? copy('Директор уточняет очередь, когда готовых задач мало и в следующем спринте есть место.')
           : copy('Автоматическая подготовка выключена. Разбор очереди можно начать из раздела «Работа».'), button(copy('Настроить'), 'data-open="grooming-settings"', true))}
       </div></section>
       <section class="stack compact"><h2>Доставка проекта</h2><div class="panel padded stack compact">
-        ${rowAction(copy('Репозиторий Git'), current.projectGit?.enabled ? current.projectGit.targetRef || copy('Управляемая целевая ветка') : copy('Git-доставка не подключена.'), button(copy('Настроить Git и проверки'), 'data-open="project-git"', true))}
+        ${rowAction(copy('Репозиторий Git'), current.projectGit?.enabled
+          ? [copy('Локальный репозиторий подключён'),current.projectGit.targetRef?.replace(/^refs\/heads\//,'')].filter(Boolean).join(' · ')
+          : copy('Git-доставка не подключена.'), button(copy('Настроить Git и проверки'), 'data-open="project-git"', true))}
         ${current.projectGit?.enabled ? rowAction(copy('Рабочие копии'), copy('Посмотрите, какие управляемые копии доступны для уборки.'), button(copy('Проверить уборку'), 'data-open="cleanup"', true)) : ''}
+        ${rowAction('CodeGraph',copy(({inherit:'Наследовать настройку приложения',on:'Использовать CodeGraph',off:'Не использовать CodeGraph'})[current.codeGraphMode??'inherit']),button(copy('Настроить'),'data-open="studio-codegraph"',true))}
       </div></section>
       <section class="stack compact"><h2>Модели студии</h2><div class="panel padded stack compact">
         <div class="row"><div><h3>Директор</h3><p class="muted">${safe(configText(current.director) || copy('Модель и усилие по умолчанию'))}</p></div>${button(copy('Настроить директора'), 'data-open="director"', true)}</div>
@@ -947,6 +1026,7 @@ function dialogTo(title, body, submitLabel, submit, { adjustable = false, focusS
   catalogEditor = undefined;
   dialogAttachments = undefined;
   dialogMeeting = undefined;
+  clearTimeout(dialogConversation?.timer);
   dialogConversation = undefined;
   directorDialog = undefined;
   opener = dialog.open ? opener : document.activeElement;
@@ -1075,7 +1155,7 @@ async function projectGitEditor() {
           await bridge.request('initializeProjectRepository', { studioId: current.id, root: repository.root });
           notice(copy('Локальный репозиторий подключён к студии.'));
         });
-    } else if (repository.state === 'nested') {
+    } else if (['nested','linked'].includes(repository.state)) {
       dialogTo(title, plain(copy('Эта папка находится внутри Git-репозитория. Чтобы подключить Git, откройте корневую папку репозитория.')));
     } else {
       projectGitSettings(current, title);
@@ -1152,6 +1232,7 @@ function renderAttachmentFields() {
   if (!list || !dialogAttachments) return;
   list.innerHTML = dialogAttachments.map((row, index) => `<li class="legacy-attachment"><span>${safe(row.name ?? row.filename ?? row.sourcePath ?? row.id)}</span>
     ${actionFor(copy('Убрать'), 'remove-attachment', index)}</li>`).join('');
+  if(dialogConversation)scheduleConversationRefresh(dialogConversation);
 }
 
 async function addAttachment(target) {
@@ -1174,18 +1255,121 @@ async function addAttachment(target) {
 const makeMessageStatuses = () => ({ queued: copy('В очереди'), received: copy('Получено'), processed: copy('Обработано') });
 let messageStatuses = makeMessageStatuses();
 onCopyLocale(() => { messageStatuses = makeMessageStatuses(); });
-function messageHistoryMarkup(thread, agent) {
-  const history = thread ? studioRows('conversationMessages').filter(row => row.conversationId === thread.id) : [];
+function messageHistoryMarkup(history, agent) {
   return history.length ? `<ul class="legacy-list legacy-history">${history.map(row => {
     const sender = row.author === 'owner' ? (row.kind === 'note' ? copy('Ваша записка') : copy('Вы')) : nameFor(agent);
     const files = studioRows('evidence').filter(file => row.attachmentIds?.includes(file.id));
     const priority = row.priorityProposal;
-    return `<li><div class="row"><strong>${safe(sender)}</strong><small class="muted">${safe(studioDate(row.createdAt))}</small></div>
+    return `<li data-conversation-message="${safe(row.id)}"><div class="row"><strong>${safe(sender)}</strong><small class="muted">${safe(studioDate(row.createdAt))}</small></div>
       ${row.status && row.author === 'owner' ? badge(messageStatuses[row.status] ?? row.status) : ''}
-      ${plain(row.text)}${row.outcome ? plain(row.outcome, 'muted') : ''}${renderEvidence(files)}
+      ${renderReportMarkdown(row.text)}${row.outcome && row.outcome!=='answered' ? plain(row.outcome, 'muted') : ''}${renderEvidence(files)}
       ${priority ? copy`<p>${safe(priority.taskTitle)} · приоритет ${safe(priority.priority)}</p>
         ${priority.appliedAt ? badge(copy('Применено')) : actionFor(copy('Применить приоритет'), 'message-priority', row.id)}` : ''}</li>`;
   }).join('')}</ul>` : '';
+}
+
+function conversationCurrent(context) {
+  return dialog.open && dialogConversation===context && studioId===context.studioId;
+}
+
+function conversationHistoryRows(context) {
+  const {historyBefore,historyCount}=context.view;
+  if(!historyCount||!context.historyStartId)return [];
+  const messages=studioRows('conversationMessages').filter(row=>row.conversationId===context.conversationId);
+  // The full snapshot still serves other screens. Use its stable persisted order
+  // only within the range explicitly opened by a page request.
+  if(messages.some(row=>row.id===context.historyStartId)&&(!historyBefore||messages.some(row=>row.id===historyBefore)))
+    return conversationHistorySlice(messages,context.historyStartId,historyBefore);
+  const excluded=new Set([...context.view.context,...context.view.queued,...context.view.following].map(row=>row.id));
+  return context.historyCache.filter(row=>!excluded.has(row.id)&&row.status!=='queued');
+}
+
+function renderConversation(context,{revealHistory=false}={}) {
+  if(!conversationCurrent(context)||!context.view)return;
+  const body=$('#dialog-body');
+  const top=body.scrollTop,rect=body.getBoundingClientRect();
+  const visible=()=>[...body.querySelectorAll('[data-conversation-message]')].filter(node=>node.getClientRects().length);
+  const inView=node=>node.getBoundingClientRect().bottom>rect.top&&node.getBoundingClientRect().top<rect.bottom;
+  const details=$('[data-conversation-history]'),summary=details.querySelector('summary');
+  const active=document.activeElement,activeRow=active.closest('[data-conversation-message]');
+  const activeData=Object.entries(active.dataset??{});
+  const fixedAnchor=revealHistory&&inView(summary)?summary:null;
+  const anchor=fixedAnchor??visible().find(inView)??(active===form.elements.text&&inView(active)?active:null);
+  const anchorId=anchor?.dataset.conversationMessage,anchorTop=anchor?.getBoundingClientRect().top;
+  const agent=studio().agents?.find(row=>row.id===context.agentId);
+  const {mode,context:messages,queued,following,historyCount}=context.view;
+  const update=(selector,markup)=>{const node=$(selector);if(node.innerHTML!==markup)node.innerHTML=markup;};
+  details.hidden=!historyCount;
+  $('[data-history-count]').textContent=String(historyCount);
+  const rows=conversationHistoryRows(context);
+  if(details.open)update('[data-conversation-page]',messageHistoryMarkup(rows,agent));
+  const older=$('[data-conversation-older]');
+  if(historyCount<=rows.length&&document.activeElement===older)details.querySelector('summary').focus({preventScroll:true});
+  older.hidden=historyCount<=rows.length;
+  older.setAttribute('aria-disabled',String(Boolean(context.loading||dialogBusy)));
+  $('[data-context-heading]').textContent=conversationContextHeading(mode);
+  update('[data-context-messages]',messageHistoryMarkup(messages,agent)||`<p class="muted">${safe(copy('Пока нет сообщений в контексте.'))}</p>`);
+  $('[data-conversation-queue]').hidden=!queued.length;
+  update('[data-queue-messages]',messageHistoryMarkup(queued,agent));
+  $('[data-conversation-following]').hidden=!following.length;
+  update('[data-following-messages]',messageHistoryMarkup(following,agent));
+  if(activeRow&&!active.isConnected){
+    const row=visible().find(node=>node.dataset.conversationMessage===activeRow.dataset.conversationMessage);
+    const control=activeData.length&&[...(row?.querySelectorAll('button,a,input')??[])].find(node=>activeData.every(([key,value])=>node.dataset[key]===value));
+    (control??(!details.hidden?summary:form.elements.text)).focus({preventScroll:true});
+  }
+  const after=anchorId?visible().find(node=>node.dataset.conversationMessage===anchorId):anchor?.isConnected&&anchor;
+  body.scrollTop=after?body.scrollTop+after.getBoundingClientRect().top-anchorTop:top;
+  if(details.open&&historyCount&&!rows.length&&!context.loading&&context.autoBefore!==context.view.historyBefore){
+    context.autoBefore=context.view.historyBefore;
+    void loadConversationHistory(context);
+  }
+}
+
+async function loadConversationHistory(context) {
+  if(!conversationCurrent(context)||!context.view||context.loading||dialogBusy)return;
+  const rows=conversationHistoryRows(context);
+  if(rows.length>=context.view.historyCount)return;
+  const before=rows[0]?.id??context.view.historyBefore;
+  const firstPage=!context.historyStartId;
+  context.loading=true;
+  renderConversation(context);
+  try{
+    const page=await bridge.request('conversationPage',{studioId:context.studioId,conversationId:context.conversationId,beforeMessageId:before});
+    if(!conversationCurrent(context))return;
+    if(page.rows.length){
+      context.historyStartId=page.rows[0].id;
+      const seen=new Set(page.rows.map(row=>row.id));
+      context.historyCache=[...page.rows,...context.historyCache.filter(row=>!seen.has(row.id))];
+    }
+  }catch(error){if(conversationCurrent(context))dialogError(error.message||copy('Не удалось загрузить данные.'));}
+  finally{
+    context.loading=false;
+    if(conversationCurrent(context))renderConversation(context,{revealHistory:firstPage});
+  }
+}
+
+async function refreshConversation(context) {
+  if(!conversationCurrent(context))return;
+  clearTimeout(context.timer);
+  const version=++context.version;
+  context.conversationId??=studioRows('conversations').find(row=>!row.inboxId&&
+    (row.agentId??null)===context.agentId&&(row.taskId??null)===context.taskId)?.id;
+  try{
+    const next=context.conversationId?await bridge.request('conversationView',{
+      studioId:context.studioId,conversationId:context.conversationId,draftText:form.elements.text.value,
+      hasDraftAttachments:Boolean(dialogAttachments?.length),
+    }):{mode:'next',context:[],queued:[],following:[],historyCount:0,historyBefore:null};
+    if(!conversationCurrent(context)||version!==context.version)return;
+    context.view=next;
+    renderConversation(context);
+  }catch(error){if(conversationCurrent(context)&&version===context.version)dialogError(error.message||copy('Не удалось загрузить данные.'));}
+}
+
+function scheduleConversationRefresh(context) {
+  clearTimeout(context.timer);
+  ++context.version;
+  context.timer=setTimeout(()=>void refreshConversation(context),80);
 }
 
 function conversationsDialog() {
@@ -1209,27 +1393,45 @@ function messageEditor({ conversation, agentId = conversation?.agentId, taskId =
   const task = tasks().find(row => String(row.id) === String(taskId));
   const thread = conversation ?? studioRows('conversations').find(row => !row.inboxId &&
     (row.agentId ?? null) === (agent?.id ?? null) && (row.taskId ?? null) === (task?.id ?? null));
-  const op = operationId();
   const selectedAttachments = [];
+  const context={studioId:current.id,agentId:agent?.id??null,taskId:task?.id??null,conversationId:thread?.id,
+    operationId:operationId(),kind,version:0,historyCache:[]};
   const submit = async ({ text }) => {
     if (!text && !selectedAttachments.length) throw new Error(copy('Напишите сообщение или приложите файл.'));
-    await bridge.request('postStudioMessage', {
-      studioId: current.id, ...(thread?.id ? { conversationId: thread.id } : {}),
+    const message=await bridge.request('postStudioMessage', {
+      studioId: current.id, ...(context.conversationId ? { conversationId: context.conversationId } : {}),
       ...(agent ? { agentId: agent.id } : {}), ...(task ? { taskId: task.id } : {}),
-      kind, text, attachmentIds: selectedAttachments.map(row => row.id), operationId: op,
+      kind:context.kind, text, attachmentIds: selectedAttachments.map(row => row.id), operationId:context.operationId,
     });
-    await refresh();
-    if (studio()?.id === current.id) {
-      messageEditor({ agentId: agent?.id, taskId: task?.id });
-      return false;
+    if(conversationCurrent(context)){
+      context.conversationId=message.conversationId;
+      context.operationId=operationId();
+      form.elements.text.value='';
+      selectedAttachments.length=0;
+      renderAttachmentFields();
+      if(context.kind==='note'){
+        context.kind='chat';
+        $('#dialog-title').textContent=copy`Беседа · ${nameFor(agent)}`;
+        form.elements.text.closest('label').querySelector('span').textContent=copy('Сообщение');
+        $('#dialog-actions button[type="submit"]').textContent=copy('Отправить');
+      }
     }
+    return false;
   };
   dialogTo(kind === 'note' ? copy('Записка директору') : copy`Беседа · ${nameFor(agent)}`, (task ? `<p>${safe(task.title)}</p>` : '') +
-    `<div data-message-history aria-live="polite">${messageHistoryMarkup(thread, agent)}</div>` +
-    textarea(kind === 'note' ? copy('Текст записки') : copy('Сообщение'), 'text') + attachmentFields(),
+    `<div data-message-history class="conversation-history">
+      <details data-conversation-history hidden><summary>${safe(copy('История'))} · <span data-history-count></span></summary>
+        <button type="button" class="action secondary" data-conversation-older>${safe(copy('Загрузить предыдущие'))}</button><div data-conversation-page></div></details>
+      <section data-conversation-context><h3 data-context-heading aria-live="polite">${safe(conversationContextHeading('next'))}</h3><div data-context-messages aria-live="polite" aria-relevant="additions text"></div></section>
+      <section data-conversation-following hidden><h3>${safe(copy('Вне текущего ответа'))}</h3><div data-following-messages></div></section>
+      <section data-conversation-queue hidden><h3>${safe(copy('В очереди'))}</h3><div data-queue-messages></div></section></div>` +
+    textarea(kind === 'note' ? copy('Текст записки') : copy('Сообщение'), 'text','','maxlength="12000"') + attachmentFields(),
     kind === 'note' ? copy('Передать записку') : copy('Отправить'), submit, { adjustable: true });
   dialogAttachments = selectedAttachments;
-  dialogConversation = { agentId: agent?.id ?? null, taskId: task?.id ?? null };
+  dialogConversation=context;
+  $('[data-conversation-history]').addEventListener('toggle',()=>{if(conversationCurrent(context))renderConversation(context);});
+  $('[data-conversation-older]').addEventListener('click',()=>void loadConversationHistory(context));
+  void refreshConversation(context);
 }
 
 function agentHistory(raw) {
@@ -1823,8 +2025,10 @@ function newStudio() {
       pathField(saved.root, {label:copy(existing?'Папка проекта':'Родительская папка')}) +
       copy`<div data-new-folder${existing?' hidden':''}>${input(copy('Имя новой папки'), 'newFolderName', saved.newFolderName, copy('maxlength="120" placeholder="Например, Рассказы"'))}
       <p class="muted">Hearth создаст пустой проект с локальной историей и отдельной веткой доставки. Аккаунт GitHub не требуется.</p></div>
-      <div data-existing-folder${existing?'':' hidden'}>${checkbox(copy('После создания студии предложить подключить Git'), 'offerGit', saved.offerGit!==false)}
-      <p class="muted">Подключение предложим, если в папке уже есть репозиторий. Существующие файлы и коммиты сохранятся.</p></div>` +
+      <div data-existing-folder${existing?'':' hidden'}>
+        <p class="muted" data-git-folder-state role="status">Hearth подключит локальный Git, сохранив существующие файлы и историю.</p>
+        <div data-existing-branch hidden>${select(copy('Целевая локальная ветка'), 'targetRef', option('', copy('Создать отдельную ветку доставки')))}</div>
+      </div>` +
       reportLanguageField(saved.language?{language:saved.language,languageMode:'studio'}:undefined) +
       languageField(copy('Язык материалов проекта'), 'projectLanguage', saved.projectLanguage||'', true)) +
     step(2, select(copy('Подключение директора'), 'runtime',
@@ -1834,14 +2038,14 @@ function newStudio() {
       input(copy('Усилие'), 'effort', saved.effort, copy('placeholder="По умолчанию"')) +
       '<div id="wizard-provider" class="stack compact" role="status"></div>' +
       copy('<p class="muted">Для запуска нужно рабочее подключение. Черновик можно сохранить в любом случае.</p>')),
-    copy('Создать студию'), async ({ brief, firstResult, runtime, model, effort, folderMode, newFolderName, offerGit, ...values }) => {
+    copy('Создать студию'), async ({ brief, firstResult, runtime, model, effort, folderMode, newFolderName, targetRef, ...values }) => {
       if (!values.root) throw new Error(copy('Выберите рабочую папку.'));
       const completeBrief = [brief, firstResult && copy`Первая задача — ${firstResult}`].filter(Boolean).join('\n\n');
       saveWizardDraft(true);
       let created;
       try {
         created = await bridge.request('createStudio', { ...values, sprintReview:'summary',
-          ...(folderMode === 'new' ? {newFolderName} : {offerGit: Boolean(offerGit)}), brief: completeBrief, director: { runtime, model, effort } });
+          ...(folderMode === 'new' ? {newFolderName} : {targetRef}), brief: completeBrief, director: { runtime, model, effort } });
       } catch (error) {
         await refresh();
         const pending=readStudioDraft(localStorage);
@@ -1851,11 +2055,6 @@ function newStudio() {
       clearStudioDraft(localStorage);
       selectStudio(created.id);
       view = 'overview';
-      if (created.gitOfferAvailable) {
-        await refresh();
-        projectGitEditor();
-        return false;
-      }
       notice(copy('Студия создана. Подготовьте план первого спринта в обзоре.'));
     });
   $('#dialog-actions').insertAdjacentHTML('afterbegin', button(copy('Назад'), 'data-wizard-back hidden', true));
@@ -1863,6 +2062,41 @@ function newStudio() {
   $('#dialog-actions').insertAdjacentHTML('beforeend', button(copy('Далее'), 'data-wizard-next'));
   if(saved.runtime)form.elements.runtime.dataset.userPicked='true';
   showWizardStep(draft?.step??0);
+  void refreshWizardRepository(saved.targetRef);
+}
+
+async function refreshWizardRepository(choice) {
+  const region=form.querySelector('[data-existing-folder]');
+  if (!region) return;
+  const message=region.querySelector('[data-git-folder-state]');
+  const branches=region.querySelector('[data-existing-branch]');
+  const field=form.elements.targetRef;
+  const root=form.elements.root.value;
+  const previous=choice ?? field.value;
+  branches.hidden=true;
+  field.value='';
+  delete region.dataset.repository;
+  message.textContent=copy('Hearth подключит локальный Git, сохранив существующие файлы и историю.');
+  if (region.hidden || !root) return;
+  try {
+    const repository=await bridge.request('inspectProjectFolder',{root});
+    if (!region.isConnected || region.hidden || form.elements.root?.value!==root) return;
+    region.dataset.repository=repository.state;
+    if (repository.state==='existing') {
+      message.textContent=copy('Репозиторий найден. Текущая ветка, индекс и файлы останутся без изменений.');
+      field.innerHTML=option('',copy('Создать отдельную ветку доставки'))+repository.branches.map(branch=>
+        branch.checkedOut ? `<option disabled value="${safe(branch.ref)}">${safe(branch.ref.replace(/^refs\/heads\//,''))} · ${safe(copy('Открыта в рабочей копии'))}</option>`
+          : option(branch.ref,branch.ref.replace(/^refs\/heads\//,''),previous)).join('');
+      branches.hidden=false;
+      saveWizardDraft();
+    } else if (repository.state==='missing') {
+      message.textContent=copy('Hearth создаст историю Git с пустым первым коммитом. Существующие файлы не будут добавлены автоматически.');
+    } else {
+      message.textContent=copy('Выберите корневую папку самостоятельного Git-репозитория, а не вложенную папку или рабочую копию.');
+    }
+  } catch (error) {
+    if(region.isConnected && !region.hidden && form.elements.root?.value===root) message.textContent=copySystem(error.message);
+  }
 }
 
 function updateWizardProvider() {
@@ -1913,6 +2147,11 @@ function moveWizard(direction) {
   }
   if (direction > 0 && index === 1 && !form.elements.root.value) {
     dialogError(copy('Выберите рабочую папку.'));
+    form.querySelector('[data-folder]').focus();
+    return;
+  }
+  if (direction > 0 && index === 1 && ['nested','linked'].includes(form.querySelector('[data-existing-folder]').dataset.repository)) {
+    dialogError(copy('Выберите корневую папку самостоятельного Git-репозитория, а не вложенную папку или рабочую копию.'));
     form.querySelector('[data-folder]').focus();
     return;
   }
@@ -2133,6 +2372,7 @@ function openTask(task, present) {
   const artifact = typeof latest.artifact === 'object' && latest.artifact
     ? JSON.stringify(latest.artifact, null, 2) : latest.artifact;
   const block = (label, value) => value ? `<section class="inline-result"><h3>${label}</h3>${plain(value)}</section>` : '';
+  const report = (label, value) => value ? `<section class="inline-result" data-report-task="${safe(latest.id)}"><h3>${label}</h3>${renderReportMarkdown(value)}</section>` : '';
   const isOpen = taskDialog?.id === latest.id;
   const expanded = isOpen ? Array.from($('#dialog-body').querySelectorAll('details[data-section][open]'), el => el.dataset.section) : [];
   const previousScroll = $('#dialog-body').scrollTop;
@@ -2180,15 +2420,15 @@ function openTask(task, present) {
       <p>${importedGitCheck.targetStillMatches ? copy('Версия целевой ветки совпадает.') : copy('Целевая ветка изменилась или недоступна.')}</p>
       ${importedGitCheck.missing?.length ? copy`<p>В репозитории недостаёт версий:</p><ul class="legacy-list">${importedGitCheck.missing.map(row =>
         `<li>${safe(row.oid ?? row.id ?? row)}</li>`).join('')}</ul>` : copy('<p>Версии результата найдены.</p>')}</section>` : '') +
-    (latest.summary && latest.summary !== artifact ? block(copy('Краткий отчёт'), latest.summary) : '') +
+    renderRecordedChecks(git) + (latest.summary && latest.summary !== artifact ? report(copy(git ? 'Отчёт исполнителя' : 'Краткий отчёт'), latest.summary) : '') +
     (latest.improvements?.length ? copy`<section class="inline-result"><h3>Найденные улучшения</h3><ul class="plan-list">
       ${latest.improvements.map(item => `<li><strong>${safe(item.title)}</strong>${plain(item.reason)}</li>`).join('')}</ul></section>` : '') +
-    block(copy('Ревью'), latest.review) + block(copy('Решение директора'), latest.directorDecision) +
-    block(copy('Результат'), artifact) +
+    report(copy('Ревью'), latest.review) + report(copy('Решение директора'), latest.directorDecision) +
+    report(copy('Результат'), artifact) +
     entries().filter(i=>i.taskId===latest.id && i.kind==='acceptance').map(i=>actionFor(inboxLabel(i)+' · '+studioDate(i.createdAt),'inbox',i.id)).join('')+
     copy`<details class="advanced"><summary>Переходы задачи</summary><div><ul class="legacy-list"></ul>${actionFor(copy('Загрузить историю переходов'), 'task-transitions', latest.id)}</div></details>` +
     (facts.messages.length ? copy`<details class="advanced" data-section="discussion"><summary>Обсуждение · ${facts.messages.length}</summary><ul class="legacy-list">${facts.messages.slice(0,limit).map(row =>
-      `<li><strong>${safe(row.author === 'owner' ? copy('Владелец') : nameFor(current.agents.find(a => a.id === row.agentId)))}</strong> · ${safe(studioDate(row.createdAt))}${plain(row.text)}</li>`).join('')}</ul>${more(facts.messages.length)}</details>` : '') +
+      `<li><strong>${safe(row.author === 'owner' ? copy('Владелец') : nameFor(current.agents.find(a => a.id === row.agentId)))}</strong> · ${safe(studioDate(row.createdAt))}${renderReportMarkdown(row.text)}</li>`).join('')}</ul>${more(facts.messages.length)}</details>` : '') +
     (facts.history.length ? copy`<details class="advanced" data-section="history"><summary>Журнал · ${facts.history.length}</summary><ul class="legacy-list">${facts.history.slice(0,limit).map(row =>
       `<li>${safe(studioDate(row.at))} · ${eventNames[row.type]}${row.detail ? ' · ' + safe(purposes[row.detail] || statuses[row.detail]?.[0] || row.detail) : ''}</li>`).join('')}</ul>${more(facts.history.length)}</details>` : '') +
     '<div data-task-delivery tabindex="-1">'+renderDelivery({
@@ -2203,7 +2443,7 @@ function openTask(task, present) {
       ${attempt.startedAt ? `<small class="muted">${safe(new Date(attempt.startedAt).toLocaleString(getCopyLocale()))}</small>` : ''}
       <p class="muted">Вход · ${attempt.usage.input ?? '—'}　Выход · ${attempt.usage.output ?? '—'}　Чтение кэша · ${attempt.usage.cacheRead ?? '—'}</p>
       <p class="muted">${attempt.elapsedMs===null ? '—' : new Intl.NumberFormat(getCopyLocale(),{style:'unit',unit:'second'}).format(Math.round(attempt.elapsedMs/1000))}</p>
-      ${(attempt.calls ?? []).map(call=>`<small>${safe([call.role,call.runtime,call.model ?? '—',call.effort ?? '—'].join(' · '))}</small>${(call.materials??[]).map(m=>
+      ${(attempt.calls ?? []).map(call=>`<small>${safe([call.role,call.runtime,call.model ?? '—',call.effort ?? '—'].join(' · '))}</small>${call.codeGraph?`<p class="muted">${safe(codeGraphCallText(call.codeGraph))}</p>`:''}${(call.materials??[]).map(m=>
         m.id ? `<button class="text-button" type="button" data-used-material="${safe(m.id)}" data-kind="${safe(m.kind)}">${safe(m.title || m.key || m.id)} · ${safe(m.version ?? '—')}</button>` : '').join(' ')}`).join('<br>')}
       ${attempt.error ? plain(attempt.error) : ''}</li>`).join('')}</ul>${more(attempts.length)}</details>` : '') +
     `<div class="actions">
@@ -2265,20 +2505,58 @@ function saveReplyDraft(item, patch) {
 }
 
 function directorOptionButtons(item) {
-  const options=(item.directorSuggestions ?? []).map(option=>
+  const options=(item.directorSuggestions ?? []).filter(option=>item.kind!=='reconcile'||option.id==='explain').map(option=>
     `<button type="button" class="action secondary" data-inbox-suggestion="${safe(option.id)}">${safe(option.label)}</button>`).join('');
-  return options+button(copy('Свой вариант'),'data-inbox-custom',true);
+  return options+(item.kind==='reconcile'?'':button(copy('Свой вариант'),'data-inbox-custom',true));
+}
+
+function directorChoiceEffect(item, text) {
+  const choice = item.directorSuggestions?.find(option => option.text===text);
+  if (!choice) return copy('Вариант заполнит сообщение. Отправьте его, чтобы директор обработал запрос.');
+  if (choice.id==='approve' && item.kind==='plan') return copy('После утверждения Hearth поставит задачи спринта в очередь с учётом зависимостей и подготовки команды.');
+  if (choice.id==='approve' && item.kind==='acceptance') {
+    if (item.review?.members?.length) return copy(item.review.delivery
+      ? 'Пакет встанет в очередь на слияние. После доставки директор завершит спринт.'
+      : 'Директор завершит спринт и определит следующий шаг. Проверенная версия сохранится в истории.');
+    return copy(item.review?.delivery
+      ? 'Проверенная версия встанет в очередь на слияние. Зависимые задачи продолжатся после доставки.'
+      : 'Результат будет принят, и студия сможет перейти к следующей доступной задаче.');
+  }
+  if (choice.id==='revise' && item.kind==='plan') return copy('Директор подготовит новую версию плана для повторной сверки.');
+  if (choice.id==='revise' && item.kind==='acceptance') return copy(item.review?.members?.length
+    ? 'Директор вернёт работу из пакета на доработку. Затем потребуется повторная приёмка выпуска.'
+    : 'Результат вернётся в работу, после доработки появится новая версия для приёмки.');
+  if (choice.id==='retry') return copy('Директор проверит, можно ли поставить шаг в очередь повторно.');
+  if (choice.id==='explain') return copy('Директор объяснит состояние. Решение останется открытым.');
+  if (choice.intent==='search') return copy('Директор выполнит новый веб-поиск. Если найдёт пригодные источники, передаст их задаче.');
+  if (choice.intent==='local') return copy('Директор передаст задаче решение продолжить по доступным материалам. Новый веб-поиск отключён для этого шага.');
+  if (item.kind==='question') return copy('Директор обработает ответ. Когда препятствие снято, задача вернётся в очередь.');
+  return copy('Вариант заполнит сообщение. Отправьте его, чтобы директор обработал запрос.');
+}
+
+function updateDirectorChoiceEffect(item) {
+  const input=form.elements.directorReply;
+  const effect=dialog.querySelector('[data-director-choice-effect]');
+  const text=directorChoiceEffect(item,input.value);
+  if (effect.textContent!==text) effect.textContent=text;
+  for (const option of dialog.querySelectorAll('[data-inbox-suggestion]')) {
+    const selected=item.directorSuggestions?.find(row=>row.id===option.dataset.inboxSuggestion)?.text===input.value;
+    option.setAttribute('aria-pressed',String(selected));
+  }
 }
 
 function renderDirectorComposer(item, text) {
-  return `<section class="director-composer stack compact">
-    <div class="director-replies" role="log"></div>
-    <div class="director-status" role="status" hidden></div>
-    <div class="director-fields stack compact">
+  const fields=`<div class="director-fields stack compact">
       <div class="actions director-options">${directorOptionButtons(item)}</div>
+      <p class="muted director-choice-effect" data-director-choice-effect aria-live="polite">${safe(copy('Вариант заполнит сообщение. Отправьте его, чтобы директор обработал запрос.'))}</p>
       <div class="director-editor">${textarea(copy('Ответ директору'),'directorReply',text,'required maxlength="12000"')}
-        <button type="submit" class="action" data-director-send>${safe(copy('Отправить'))}</button></div>
-    </div>
+        <button type="submit" class="action${item.kind==='reconcile'?' secondary':''}" data-director-send>${safe(copy('Отправить директору'))}</button></div>
+    </div>`;
+  return `<section class="director-composer stack compact">
+    <div class="director-status" role="status" hidden></div>
+    ${item.kind==='reconcile' ? `<div data-reconciliation-choices></div><details class="advanced reconciliation-question" data-reconciliation-question${text?' open':''}>
+      <summary>${safe(copy('Задать вопрос директору'))}</summary>${fields}</details>` : fields}
+    <div class="director-replies" role="log"></div>
   </section>`;
 }
 
@@ -2289,20 +2567,49 @@ function presentDirectorInbox(item, title, body, {plan, extras=''} = {}) {
     expectedMeetingVersion:item.meetingId ? studioRows('meetings').find(meeting=>meeting.id===item.meetingId)?.version : undefined,
   };
   const sentContext=JSON.stringify(captured);
-  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? ''),
-    undefined,async ({directorReply:text})=>{
-      const before=readReplyDraft(item);
-      const id=before.sentText===text && before.sentContext===sentContext && before.operationId ? before.operationId : operationId();
-      saveReplyDraft(item,{text,sentText:text,sentContext,operationId:id});
-      await bridge.request('postDirectorInboxReply',{...captured,text,operationId:id});
-      await refresh();
-      return false;
-    },{adjustable:true,focusSummary:true,inlineSubmit:true});
-  directorDialog={ item, captured, origin:todayContext, optionsKey:JSON.stringify([state.appLocale,item.directorSuggestions]) };
+  const send=async (text,{decision=false}={})=>{
+    const before=readReplyDraft(item);
+    const id=before.sentText===text && before.sentContext===sentContext && before.operationId ? before.operationId : operationId();
+    saveReplyDraft(item,{...(!decision?{text}:{}),sentText:text,sentContext,operationId:id});
+    await bridge.request('postDirectorInboxReply',{...captured,text,operationId:id});
+    await refresh();
+    return false;
+  };
+  dialogTo(title,body+renderDirectorComposer(item,draft.text ?? ''),undefined,({directorReply})=>send(directorReply),
+    {adjustable:true,focusSummary:true,inlineSubmit:true});
+  directorDialog={ item, captured, send, origin:todayContext, optionsKey:JSON.stringify([state.appLocale,item.directorSuggestions]) };
   if (plan) dialog.dataset.reviewPlan=plan.id;
   if (extras) $('#dialog-actions').insertAdjacentHTML('beforeend',extras);
   refreshDirectorReply();
   paintOnboardingHints();
+}
+
+function updateReconciliationChoices(context, busy) {
+  const region=dialog.querySelector('[data-reconciliation-choices]');
+  if (!region) return;
+  const { item }=context;
+  const key=JSON.stringify([state.appLocale,item.status,item.reconciliationState,item.directorSuggestions]);
+  if (context.reconciliationKey!==key) {
+    if (region.contains(document.activeElement)) $('#dialog-title').focus({preventScroll:true});
+    region.innerHTML=renderReconciliationDecisions(item);
+    context.reconciliationKey=key;
+    context.reconciliationChoice=undefined;
+  }
+  const question=dialog.querySelector('[data-reconciliation-question]');
+  question.hidden=item.status!=='open';
+  const panel=region.querySelector('[data-reconciliation-confirm]');
+  if (!panel) return;
+  const selected=context.reconciliationChoice;
+  for (const choice of region.querySelectorAll('[data-reconcile-choice]')) {
+    choice.setAttribute('aria-pressed',String(choice.dataset.reconcileChoice===selected));
+    choice.disabled=Boolean(busy||dialogBusy);
+  }
+  panel.hidden=!selected;
+  const check=panel.querySelector('[data-reconciliation-check]');
+  if (check) check.disabled=Boolean(busy||dialogBusy);
+  const apply=panel.querySelector('[data-reconciliation-apply]');
+  if (selected) apply.textContent=reconciliationDecisionCopy(item,selected).submit;
+  apply.disabled=Boolean(!selected||busy||dialogBusy||check&&!check.checked);
 }
 
 function refreshDirectorReply() {
@@ -2315,6 +2622,29 @@ function refreshDirectorReply() {
   const activity=dialog.querySelector('.director-status');
   const fields=dialog.querySelector('.director-fields');
   if (!region || !fields) return;
+  const summary=dialog.querySelector('[data-reconciliation-summary]');
+  if (summary) {
+    const markup=reconciliationSummary(item);
+    if (summary.innerHTML!==markup) summary.innerHTML=markup;
+  }
+  const recovery=dialog.querySelector('[data-inbox-recovery]');
+  if (recovery && !dialogBusy) {
+    const task=tasks().find(row=>row.id===item.taskId);
+    const markup=item.status==='open'&&task ? taskRecoveryBlock(task) : '';
+    if (recovery.innerHTML!==markup) recovery.innerHTML=markup;
+  }
+  const acceptanceStatus=dialog.querySelector('[data-acceptance-status]');
+  if (acceptanceStatus) {
+    const markup=item.status==='open' ? badge(copy('Приёмка результата'),'warn') : badge(copy('Решение сохранено'),'good');
+    if (acceptanceStatus.innerHTML!==markup) acceptanceStatus.innerHTML=markup;
+  }
+  const planStatus=dialog.querySelector('[data-plan-dialog-status]');
+  const plan=item.planId && planById(item.planId);
+  if (planStatus && plan) {
+    const markup=planStatusBadge(plan.status);
+    if (planStatus.innerHTML!==markup) planStatus.innerHTML=markup;
+    if (plan.status!=='pending') for (const control of dialog.querySelectorAll('[data-edit-plan-tasks],[data-edit-plan-team]')) control.hidden=true;
+  }
   const options=fields.querySelector('.director-options');
   const optionsKey=JSON.stringify([state.appLocale,item.directorSuggestions]);
   if(!dialogBusy && context.optionsKey!==optionsKey){
@@ -2324,6 +2654,8 @@ function refreshDirectorReply() {
     if(focus)form.elements.directorReply.focus({preventScroll:true});
   }
   context.item=item;
+  context.replyBusy=Boolean(busy);
+  updateReconciliationChoices(context,busy);
   const draft=readReplyDraft(item);
   if (reply && request.operationId===draft.operationId) {
     const clear=draft.text===draft.sentText && reply.outcome!=='failed' && reply.outcome!=='interrupted';
@@ -2336,7 +2668,7 @@ function refreshDirectorReply() {
   if(activity.textContent!==message)activity.textContent=message;
   const entries=history.map(({request,reply})=>({
     id:request.id,
-    markup:`<div class="muted">${safe(request.text)}</div>`+(reply ? plain(copySystem(reply.text)) : ''),
+    markup:`<div class="muted">${renderReportMarkdown(request.text)}</div>`+(reply ? renderReportMarkdown(copySystem(reply.text)) + renderWebResearch(reply.webResearch) : ''),
   }));
   const present=new Map(Array.from(region.children,element=>[element.dataset.exchange,element]));
   for(const {id,markup} of entries){
@@ -2347,11 +2679,39 @@ function refreshDirectorReply() {
   }
   for(const element of present.values())element.remove();
   fields.hidden=item.status!=='open';
+  updateDirectorChoiceEffect(item);
   if(!dialogBusy)for(const control of fields.querySelectorAll('button,textarea'))control.disabled=Boolean(busy);
   if(!dialogBusy && reply?.outcome==='applied' && item.status!=='open' && context.origin && todayContext===context.origin){
     finishTodayDecision(item.taskId,undefined,context.origin);
   }
 }
+
+form.addEventListener('click', async event=>{
+  const context=directorDialog;
+  if (!context || dialogBusy || context.replyBusy) return;
+  const choice=event.target.closest('[data-reconcile-choice]');
+  if (choice) {
+    const selected=choice.dataset.reconcileChoice;
+    const check=dialog.querySelector('[data-reconciliation-check]');
+    if (check && selected!==context.reconciliationChoice) check.checked=false;
+    context.reconciliationChoice=selected;
+    updateReconciliationChoices(context,false);
+    (check??dialog.querySelector('[data-reconciliation-apply]'))?.focus();
+    return;
+  }
+  const apply=event.target.closest('[data-reconciliation-apply]');
+  if (!apply || apply.disabled) return;
+  const option=context.item.directorSuggestions?.find(row=>row.id===context.reconciliationChoice);
+  if (!option) return;
+  dialogError();
+  setDialogBusy(true);
+  try { await context.send(option.text,{decision:true}); }
+  catch (error) { if (directorDialog===context) dialogError(error.message); }
+  finally {
+    setDialogBusy(false);
+    if (directorDialog===context) refreshDirectorReply();
+  }
+});
 
 form.addEventListener('click', event=>{
   const trigger=event.target.closest('[data-inbox-suggestion], [data-inbox-custom]');
@@ -2369,14 +2729,20 @@ form.addEventListener('click', event=>{
     input.value=suggestion.text;
     saveReplyDraft(item,{text:input.value,suggested:true});
   }
+  updateDirectorChoiceEffect(item);
   input.focus();
   input.setSelectionRange(input.value.length,input.value.length);
 });
 
 form.addEventListener('input',event=>{
+  if(dialogConversation&&event.target===form.elements.text)scheduleConversationRefresh(dialogConversation);
   if (directorDialog && event.target.name==='directorReply'){
     saveReplyDraft(directorDialog.item,{text:event.target.value,custom:event.target.value,suggested:false});
+    updateDirectorChoiceEffect(directorDialog.item);
   }
+});
+form.addEventListener('change',event=>{
+  if (directorDialog && event.target.matches('[data-reconciliation-check]')) updateReconciliationChoices(directorDialog,directorDialog.replyBusy);
 });
 
 function openInbox(item) {
@@ -2390,14 +2756,16 @@ function openInbox(item) {
   inboxScope = item.status==='open' ? actionableInboxIds().has(item.id)?'open':'waiting' : 'resolved';
   if (view !== 'inbox' && !ownerTrail.current && !todayContext) route('inbox');
   const question=item.kind==='question';
-  const body=plain(inboxDetail(item)) +
+  const task=item.kind==='error' && item.status==='open' && tasks().find(row=>row.id===item.taskId);
+  const recovery=task ? taskRecoveryBlock(task) : '';
+  const body=(recovery ? `<div data-inbox-recovery>${recovery}</div>` : renderReportMarkdown(inboxDetail(item))) +
     (question ? renderQuestionDetails(item) + renderEvidence(studioRows('evidence').filter(row => (item.attachmentIds ?? item.answerAttachmentIds ?? []).includes(row.id))) : '') +
     (item.taskId ? actionFor(copy('Открыть задачу'), 'task', item.taskId) : '') +
     (item.meetingId ? actionFor(copy('Открыть протокол'), 'meeting-detail', item.meetingId) : '');
   presentDirectorInbox(item,inboxHeading(item),body);
 }
 
-const reconciliationAttempt = item => studioRows('attempts').find(row => row.id === item.attemptId);
+const reconciliationAttempt = item => state.attempts?.find(row=>row.studioId===item.studioId && row.id===item.attemptId);
 const isPlanReconciliation = item => item.kind === 'reconcile' && reconciliationAttempt(item)?.purpose === 'plan';
 const coachBlocked = (item, task = tasks().find(row => row.id === item.taskId)) =>
   item.status === 'open' && item.kind === 'error' && task?.training?.bootstrap && task.status === 'failed' && task.failedReviews >= 3;
@@ -2408,14 +2776,20 @@ const inboxDetail = item => isPlanReconciliation(item)
   : coachBlocked(item) ? copy('Директор трижды вернул подготовку на доработку. Остальные агенты ждут готового коуча. Повторите подготовку, чтобы Hearth заново провёл упражнение и проверку.')
   : item.kind === 'reconcile' ? copy('Рабочий шаг прервался. Перед повтором проверьте файлы, если шаг мог их изменить.') : item.body;
 
+function reconciliationSummary(item) {
+  if (item.status!=='open') return '';
+  const detail=copy(item.reconciliationDetail ?? 'Запись прежнего запуска недоступна. Откройте задачу, чтобы посмотреть её историю.');
+  const error=reconciliationAttempt(item)?.error;
+  const explanation=error==='Истекло время ожидания ответа Codex.' || error==='Истекло время ожидания ответа Claude Code.'
+    ? copy('Hearth остановил эту попытку по прежнему лимиту времени.') : copySystem(error);
+  return (explanation ? `<p><strong>${safe(explanation)}</strong></p>` : '') + `<p>${safe(detail)}</p>`;
+}
+
 function openReconciliation(item) {
-  const attempt=reconciliationAttempt(item);
-  const detail=attempt?.processActive ? copy('Прежний запуск ещё завершается. Директор может объяснить, что происходит.') :
-    attempt?.processUnconfirmed || attempt?.reason==='restart' || attempt?.reason==='lease-expired'
-      ? copy('Завершение прежнего запуска пока не подтверждено. Директор проверит доступные сведения.')
-      : copy('Директор проверит состояние рабочего шага перед повтором.');
-  presentDirectorInbox(item,inboxHeading(item),plain(detail) +
-    (item.taskId ? actionFor(copy('Открыть задачу'), 'task', item.taskId) : ''));
+  const task=tasks().find(row=>row.id===item.taskId);
+  presentDirectorInbox(item,inboxHeading(item),`<div data-reconciliation-summary role="status">${reconciliationSummary(item)}</div>` +
+    (task ? `<div class="actions">${actionFor(copy('Открыть задачу'), 'task', task.id)}
+      ${task.deliveryMode==='git'?actionFor(copy('Открыть рабочую копию'), 'reconciliation-worktree', task.id):''}</div>` : ''));
 }
 
 function openAcceptance(item) {
@@ -2423,9 +2797,13 @@ function openAcceptance(item) {
   const pending = item.status === 'open';
   const review = item.review;
   const git = review ? review.delivery : task?.gitDelivery;
-  const body = `<div>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>` +
-    plain(item.body) + (review ? `<p>${safe(review.summary)}</p>${review.criteria ? plain(listText(review.criteria)) : ''}<small>${safe(review.key.slice(0,12))}</small>` : '') +
-    (review?.members ? `<section><h3>${ui('members')}</h3>${review.members.map(m=>`<div>${actionFor(m.title,'task',m.taskId)} · ${safe(m.revision)}${plain(m.summary)}</div>`).join('')}</section>` : '') +
+  const reviewedPaths=review?.artifactPaths ?? (git?.revision?.candidateOid===task?.gitDelivery?.revision?.candidateOid ? task?.gitDelivery?.artifactPaths : undefined) ?? [];
+  const body = `<div data-acceptance-status>${badge(pending ? copy('Приёмка результата') : copy('Решение сохранено'), pending ? 'warn' : 'good')}</div>` +
+    `<div${review ? ` data-report-inbox="${safe(item.id)}"` : ''}>${reviewedPaths.length ? `<section class="stack compact"><h3>${safe(copy('Файлы на приёмке'))}</h3>
+      <div class="actions">${reviewedPaths.map(path=>actionFor(path,'report-link',encodeURI(path))).join('')}</div></section>` : ''}
+      ${renderReportMarkdown(item.body)}${review?.summary && review.summary!==item.body ? renderReportMarkdown(review.summary) : ''}</div>` +
+    (review ? `${review.criteria ? renderReportMarkdown(listText(review.criteria)) : ''}<small>${safe(review.key.slice(0,12))}</small>` : '') +
+    (review?.members ? `<section data-report-inbox="${safe(item.id)}"><h3>${ui('members')}</h3>${review.members.map(m=>`<div>${actionFor(m.title,'task',m.taskId)} · ${safe(m.revision)}${renderReportMarkdown(m.summary)}</div>`).join('')}</section>` : '') +
     (review?.artifactPath ? `<div class="actions">${actionFor(copy('Открыть файл этой версии'),'review-file',item.id)}${actionFor(copy('Показать в папке'),'reveal-review-file',item.id)}${actionFor(copy('Копировать путь'),'copy-review-file',item.id)}</div>` :
       !review && task?.artifactPath ? actionFor(copy('Открыть файл'),'artifact',task.id) : '') +
     (git ? renderDelivery({ checks:git.checks, delivery:git, receipts:git.receipt ? [git.receipt] : [],
@@ -2452,6 +2830,11 @@ function autonomyHint() {
   return copy('<p class="muted">Сверку плана можно отключить в <button type="button" class="text-button" data-autonomy>Настройки → Автономность</button>. Настройка действует для будущих спринтов.</p>');
 }
 
+function planStatusBadge(status) {
+  return badge(...({draft:[copy('Готовится'),''],pending:[copy('Ждёт согласования'),'warn'],
+    approved:[copy('Подтверждён'),'good'],returned:[copy('Возвращён'),'warn']}[status]??[status,'']));
+}
+
 function planBody(plan, compare=true) {
   const previous = compare && plan.previousPlanId && planById(plan.previousPlanId);
   const oldTasks = new Map((previous?.tasks ?? []).map(t=>[t.key,t]));
@@ -2470,10 +2853,7 @@ function planBody(plan, compare=true) {
   const titles = new Map((plan.tasks ?? []).map(task => [task.key ?? task.id, task.title]));
   const entity = (label, value) => value ? `<section class="inline-result"><h3>${label}</h3><p>${safe(value.title ?? value)}</p>
     ${value.description ? plain(value.description) : ''}${value.acceptance ? plain(listText(value.acceptance)) : ''}</section>` : '';
-  return `<div class="actions">${badge(...({
-    draft: [copy('Готовится'), ''], pending: [copy('Ждёт согласования'), 'warn'],
-    approved: [copy('Подтверждён'), 'good'], returned: [copy('Возвращён'), 'warn'],
-  }[plan.status] ?? [plan.status, '']))}${plan.debtSprint ? badge(copy('Спринт улучшений')) : ''}</div>
+  return `<div class="actions"><span data-plan-dialog-status>${planStatusBadge(plan.status)}</span>${plan.debtSprint ? badge(copy('Спринт улучшений')) : ''}</div>
     ${plan.goal ? `<p>${safe(plan.goal)}</p>` : ''}
     ${plan.status==='pending' ? `<p class="muted">${ui('firstWork')} · ${safe((plan.tasks??[]).filter(t=>!t.dependsOn?.length).map(t=>t.title).join(', ') || '—')}</p>
       <p class="muted">${ui('newRoles')} · ${safe(agents.filter(a=>!studio().agents.some(r=>(r.key??r.id)===a.key)).map(nameFor).join(', ') || '—')}</p>` : ''}
@@ -2850,7 +3230,10 @@ async function pickFolder(target) {
   setDialogBusy(true);
   try {
     const root = await bridge.request('pickFolder');
-    if (root) { target.value = root; if (wizardOpen())saveWizardDraft(); }
+    if (root) {
+      target.value = root;
+      if (wizardOpen()) { await refreshWizardRepository(''); saveWizardDraft(); }
+    }
   } catch (error) {
     dialogError(error.message || copy('Не удалось выбрать папку.'));
   } finally {
@@ -2960,6 +3343,7 @@ async function openStudioFolder() {
         await refresh();
         selectStudio(opened.id);
         route('overview');
+        if(opened.gitSetupWarning) notice(copySystem(opened.gitSetupWarning),true);
       });
   }catch(error){notice(copySystem(error.message),true);}
 }
@@ -2970,9 +3354,9 @@ function portableFolderEditor(migrate){
   const explanation=migrate?'Hearth сохранит настройки, историю и рабочие копии в этой папке. Студия будет на паузе.':
     'Hearth поставит студию на паузу. Когда запусков не останется, можно скопировать всю папку вместе со скрытыми файлами.';
   dialogTo(label,plain(current.root)+plain(copy(explanation)),label,async ()=>{
-    await bridge.request(migrate?'migrateStudioFolder':'prepareStudioCopy',{studioId:current.id});
+    const result=await bridge.request(migrate?'migrateStudioFolder':'prepareStudioCopy',{studioId:current.id});
     await refresh();
-    notice(copy(migrate?'Данные студии сохранены в папке.':'Папка студии готова к копированию.'));
+    notice(result.gitSetupWarning ? copySystem(result.gitSetupWarning) : copy(migrate?'Данные студии сохранены в папке.':'Папка студии готова к копированию.'),Boolean(result.gitSetupWarning));
   });
 }
 
@@ -2989,6 +3373,10 @@ const commands = {
   director: directorEditor,
   'app-model-policy': () => policyEditor(),
   'studio-model-policy': () => policyEditor(studio()),
+  'app-quota': () => quotaPolicyEditor('app'),
+  'studio-quota': () => quotaPolicyEditor('studio'),
+  'app-codegraph':()=>codeGraphPolicyEditor('app'),
+  'studio-codegraph':()=>codeGraphPolicyEditor('studio'),
   'skill-settings': skillSettingsEditor,
   'debt-policy': debtPolicyEditor,
   agent: () => agentEditor(),
@@ -3108,10 +3496,22 @@ content.addEventListener('input', event => {
 });
 
 document.addEventListener('click', event => {
+  const reportLink = event.target.closest('[data-report-link]');
+  if (reportLink) {
+    event.preventDefault();
+    const taskId=reportLink.closest('[data-report-task]')?.dataset.reportTask ?? dialogConversation?.taskId ?? directorDialog?.item.taskId;
+    const inboxId=reportLink.closest('[data-report-inbox]')?.dataset.reportInbox;
+    void bridge.request('openReportLink', { studioId, taskId, inboxId, destination: reportLink.dataset.reportLink })
+      .catch(error => dialog.open ? dialogError(error.message) : notice(error.message, true));
+    return;
+  }
   const target = event.target.closest('button');
   if (!target) return;
   const data = target.dataset;
-  if(data.historyMore) {
+  if (data.reconciliationWorktree) {
+    void bridge.request('openTaskWorktree',{studioId,taskId:data.reconciliationWorktree})
+      .catch(error=>dialog.open?dialogError(error.message):notice(error.message,true));
+  } else if(data.historyMore) {
     const key=JSON.stringify([studioId,data.historyMore]);
     historyLimits.set(key,(historyLimits.get(key) ?? 20)+30);
     if(dialog.open && taskDialog)openTask(taskDialog);else if(ownerTrail.current)paintInspector(false);
@@ -3120,6 +3520,9 @@ document.addEventListener('click', event => {
     const latest=original?.status==='pending' ? original : plans().findLast(p=>p.status==='pending');
     if(latest)openPlan(latest);
   } else if(data.usedMaterial && ['skills','knowledge','customSkills'].includes(data.kind))inspectObject(data.kind,data.usedMaterial);
+  else if(data.checkSkillVersions!==undefined) void checkRegisteredSkills();
+  else if(data.skillApply) applyRegisteredSkill(data.skillApply,data.skillVersion);
+  else if(data.skillDecline) void workCommand('decideSkillVersion',{studioId,skillId:data.skillDecline,commit:data.skillVersion,decision:'decline'},copy('Текущая версия сохранена.'));
   else if (data.copyId!==undefined) void bridge.request('copyTaskId',{studioId,taskId:data.copyId})
     .then(()=>notice(copy('ID задачи скопирован.'))).catch(e=>notice(e.message,true));
   else if(data.taskCheckResults!==undefined) {
@@ -3299,6 +3702,7 @@ form.addEventListener('submit', async event => {
   } finally {
     setDialogBusy(false);
     if (directorDialog) refreshDirectorReply();
+    if(dialogConversation)renderConversation(dialogConversation);
   }
 });
 
@@ -3309,6 +3713,7 @@ form.addEventListener('change', ({ target }) => {
     form.querySelector('[data-existing-folder]').hidden = isNew;
     form.querySelector('.folder-field label span').textContent = isNew ? copy('Родительская папка') : copy('Папка проекта');
     form.elements.root.value = '';
+    void refreshWizardRepository('');
   }
   if (target.name === 'chooseParticipants') {
     for (const region of form.querySelectorAll('[data-manual-participants], [data-manual-prerequisites]')) {
@@ -3420,6 +3825,8 @@ dialog.addEventListener('close', () => {
   closeTodayContext();
   taskDialog = undefined;
   directorDialog = undefined;
+  clearTimeout(dialogConversation?.timer);
+  dialogConversation=undefined;
   catalogEditor = undefined;
   if (opener?.isConnected) opener.focus();
   else content.focus();

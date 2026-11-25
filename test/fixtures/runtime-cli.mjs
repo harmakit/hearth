@@ -3,14 +3,17 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const [runtime, mode, tracePath, ...args] = process.argv.slice(2);
 const sessionId = '12345678-1234-1234-1234-123456789abc';
 const turnId = 'fixture-turn';
 const readingProfile = 'hearth-studio-read-only';
 const profile = JSON.parse(args.find(arg => arg.startsWith('default_permissions='))?.split('=').at(-1) ?? 'null');
-const writing = ['write', 'wrong-write-profile', 'no-write-sandbox', 'scoped-background'].includes(mode);
-const scopedRead = mode === 'scoped-read';
+const writing = ['write', 'wrong-write-profile', 'no-write-sandbox', 'scoped-background', 'web-write', 'image-write', 'image-order'].includes(mode);
+const scopedRead = ['scoped-read','web-read'].includes(mode);
+const webFixture = mode.startsWith('web');
+const webDisabled = mode === 'local-only';
 const native = ['native-contract','native-skill-missing'].includes(mode);
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 
@@ -45,7 +48,11 @@ if (args[0] === '--version') {
     assert.ok(args.includes('--safe-mode'));
     assert.ok(args.includes('--restricted'));
     assert.ok(args.includes('--strict-mcp-config'));
-    assert.equal(args[args.indexOf('--tools') + 1], writing ? 'Read,Glob,Grep,Edit,Write' : scopedRead ? 'Read,Glob,Grep' : '');
+    const fileTools = writing ? ['Read','Glob','Grep','Edit','Write'] : scopedRead ? ['Read','Glob','Grep'] : [];
+    const webTools = webDisabled ? [] : ['WebSearch','WebFetch'];
+    const tools = [...fileTools,...webTools];
+    assert.equal(args[args.indexOf('--tools') + 1],tools.join(','));
+    assert.deepEqual(JSON.parse(args[args.indexOf('--settings')+1]).permissions.allow, webTools);
     assert.equal(args.includes('--no-session-persistence'), writing || scopedRead);
     assert.equal(args[args.indexOf('--permission-mode') + 1], writing ? 'acceptEdits' : 'dontAsk');
     if (writing || scopedRead) assert.equal(args[args.indexOf('--permission-prompts') + 1], 'none');
@@ -54,7 +61,23 @@ if (args[0] === '--version') {
     for await (const chunk of process.stdin) prompt += chunk;
     assert.equal(prompt, 'Test prompt');
     if (mode === 'slow-termination') process.on('SIGTERM', () => setTimeout(() => process.exit(0), 220));
-    send({ type: 'system', subtype: 'init', session_id: sessionId });
+    send({ type: 'system', subtype: 'init', session_id: sessionId,
+      tools:webFixture ? tools.filter(name=>mode!=='web-blocked' || name!=='WebSearch') : undefined });
+    if (mode === 'slow-answer') await delay(350);
+    if (webFixture && mode!=='web-blocked') {
+      send({type:'assistant',message:{content:[
+        {type:'tool_use',name:'WebSearch',id:'search',input:{query:'archive'}},
+        {type:'tool_use',name:'WebFetch',id:'read',input:{url:'https://archive.example/record'}},
+        {type:'tool_use',name:'WebFetch',id:'failed',input:{url:'https://archive.example/missing'}},
+        {type:'tool_use',name:'WebFetch',id:'redirect',input:{url:'https://archive.example/redirect'}},
+      ]}});
+      send({type:'user',message:{content:[
+        ...(mode==='web-unfinished'?[]:[{type:'tool_result',tool_use_id:'search',content:'Links: [{"url":"https://archive.example/index"}]'}]),
+        {type:'tool_result',tool_use_id:'read',content:'The archive records the date.'},
+        {type:'tool_result',tool_use_id:'failed',content:'Request failed with status code 404',is_error:true},
+        {type:'tool_result',tool_use_id:'redirect',content:'Redirected to https://elsewhere.example/record. Please make a new WebFetch request.'},
+      ]}});
+    }
     if (mode === 'timeout' || mode === 'slow-termination') setInterval(() => {}, 500);
     else if (mode === 'malformed') process.stdout.write('invalid JSONL\n');
     else if (mode === 'truncated') process.exitCode = 1;
@@ -83,6 +106,7 @@ if (args[0] === '--version') {
   }
 } else {
   assert.equal(args[0], 'app-server');
+  assert.ok(args.includes(webDisabled ? 'web_search="disabled"' : 'web_search="live"'));
   if (mode === 'configured-mcp') {
     assert.ok(args.includes('mcp_servers.some-mcp.enabled=false'));
     assert.ok(args.includes('mcp_servers.some-mcp.command="/usr/bin/false"'));
@@ -120,6 +144,14 @@ if (args[0] === '--version') {
         reply({ account: { type: 'chatgpt', email: 'should-not-escape@example.org' }, requiresOpenaiAuth: true });
       } else if (method === 'model/list') {
         reply({ data: [{ model: 'fixture-model', displayName: 'Fixture model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }] });
+      } else if (method === 'account/rateLimits/read') {
+        reply({rateLimits:{limitId:'codex',primary:{windowDurationMins:300,usedPercent:90,resetsAt:2000000000},
+          secondary:{windowDurationMins:10080,usedPercent:27,resetsAt:2000100000}}});
+      } else if (method === 'config/read') {
+        reply({config:webFixture ? {web_search:mode==='web-blocked'?'disabled':'live'} : {}});
+      } else if (method === 'modelProvider/capabilities/read') {
+        if (webFixture && mode!=='web-older') reply({webSearch:mode!=='web-blocked'});
+        else send({id,error:{code:-32601,message:'Unknown method'}});
       } else if (method === 'thread/start') {
         if(native)assert.equal(params.developerInstructions,'Check each date.');
         assert.equal(params.ephemeral, true);
@@ -146,12 +178,35 @@ if (args[0] === '--version') {
         assert.equal(params.effort, 'high');
         assert.equal(params.permissions, profile);
         reply({ turn: { id: turnId, status: 'inProgress' } });
+        if(mode==='quota-notification')send({method:'account/rateLimits/updated',params:{rateLimits:{
+          limitId:'codex',primary:{windowDurationMins:10080,usedPercent:95,resetsAt:2000100000}
+        }}});
+        if (mode === 'slow-answer') await delay(350);
         if (mode === 'interrupt' || mode === 'timeout') continue;
         event('item/completed', { turnId: 'foreign-turn', item: { type: 'agentMessage', text: 'foreign', phase: 'final_answer' } });
+        if (mode==='web') {
+          event('item/completed', {turnId,item:{type:'webSearch',query:'archive',action:{type:'search'}}});
+          event('item/completed', {turnId,item:{type:'webSearch',query:'',action:{type:'openPage',url:'https://archive.example/record'}}});
+          event('item/completed', {turnId,item:{type:'webSearch',query:'',action:{type:'findInPage',url:'https://archive.example/record'}}});
+          event('item/completed', {turnId:'foreign-turn',item:{type:'webSearch',query:'',action:{type:'openPage',url:'https://archive.example/foreign'}}});
+        }
         event('item/completed', { turnId, item: { type: 'agentMessage', text: 'commentary', phase: 'commentary' } });
+        if (mode === 'image-write' || mode === 'image-order') {
+          const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aLmgAAAAASUVORK5CYII=';
+          const item={type:'imageGeneration',id:'fixture-image',status:'completed',result:png};
+          event('item/completed',{turnId:'unrelated',item});
+          if (mode === 'image-order') {
+            const second={...item,id:'fixture-image-2',result:Buffer.concat([Buffer.from(png,'base64'),Buffer.from('second')]).toString('base64')};
+            event('item/started',{turnId,item:{...item,status:'inProgress'}});
+            event('item/started',{turnId,item:{...second,status:'inProgress'}});
+            event('item/completed',{turnId,item:second});
+            event('item/completed',{turnId,item});
+          } else event('item/completed',{turnId,item});
+        }
         if (mode === 'failure') event('turn/completed', { turn: { id: turnId, status: 'failed', error: { message: 'fixture failure' } } });
         else {
-          if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: native?'{"summary":"contract"}':'Codex answer', phase: 'final_answer' } });
+          const answer=mode==='image-order'?'{"summary":"Artwork","imageSlots":[3,2]}':native?'{"summary":"contract"}':'Codex answer';
+          if (mode !== 'blank') event('item/completed', { turnId, item: { type: 'agentMessage', text: answer, phase: 'final_answer' } });
           if (mode === 'usage') {
             const total = { inputTokens: 30, outputTokens: 5, cachedInputTokens: 7, cacheWriteInputTokens: 3 };
             event('thread/tokenUsage/updated', { turnId, tokenUsage: { total: { inputTokens: 10 }, last: { inputTokens: 5 } } });

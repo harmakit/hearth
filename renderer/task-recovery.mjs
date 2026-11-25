@@ -12,7 +12,9 @@ export function taskRecovery(task, studio, attempts = [], inbox = []) {
   if (attempt?.action==='authenticate') return {kind:'connection',reason,action:'connection'};
   if (task.gitDelivery?.status==='checks-blocked') return {kind:'checks',reason,action:'checks'};
   if (studio.manualPaused||studio.lifecycle==='paused') return {kind,reason,action:'resume'};
-  if (!task.workflowManaged||studio.wipLimit>1||task.training?.bootstrap) return {kind,reason,action:'retry'};
+  if (!task.workflowManaged||studio.wipLimit>1||task.training?.bootstrap) return {
+    kind,reason,action:'retry',...(attempt?.purpose==='director'&&task.gitDelivery?.status==='merged'?{step:'director'}:{}),
+  };
   if (studio.lifecycle==='error') return {kind,reason,action:'resume'};
   return {kind,reason,action:'message'};
 }

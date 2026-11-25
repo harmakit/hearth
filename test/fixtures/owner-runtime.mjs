@@ -7,7 +7,15 @@ const [provider, ...args] = process.argv.slice(2);
 const threadId = 'c0b00000-1000-4000-a000-1000aaa00001';
 const send = message => console.log(JSON.stringify(message));
 const fixtureSandbox = cwd => ['-p', `(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath ${JSON.stringify(cwd)}))`];
+const archiveSource = 'https://www.nationalarchives.gov.uk/education/resources/partition-of-india/';
+const failedSource = 'https://www.nationalarchives.gov.uk/hearth-qa-missing';
+const researchPrompt = prompt => prompt.startsWith('Interpret the owner’s visible reply') && prompt.includes('QA-WEB-HISTORICAL');
 function response(prompt) {
+  if (researchPrompt(prompt)) return {
+    action:'answer',text:'Поиск завершён',researchIntent:'search',webResearch:{sources:[
+      {url:archiveSource,status:'found',note:null},{url:failedSource,status:'failed',note:'HTTP 404'},
+    ],unverified:['Дата свидетельства']},
+  };
   if (prompt.startsWith('Interpret the owner’s visible reply')) {
     const context=JSON.parse(prompt.split('\n\n').at(-1));
     const text=context.ownerReply.toLowerCase();
@@ -64,6 +72,11 @@ function response(prompt) {
     return prompt.includes('Подтверждаю QA T-17') ? { summary:'Codex: QA T-17 подтверждён.', artifact:'# QA ответ\n' }
       : { summary:'Codex: черновик.', question:{body:'Подтвердить QA T-17?',choices:[{label:'Подтвердить',answer:'Подтверждаю QA T-17'}]} };
   }
+  if (prompt.startsWith('Work on') && prompt.includes('QA-WEB-HISTORICAL')) {
+    return prompt.includes('"sourceResearch"') && prompt.includes(archiveSource)
+      ? {summary:'Источники переданы исполнителю.',artifact:'# Сверка источников\n'}
+      : {summary:'Публичный исторический источник не открылся.',question:{kind:'owner',body:'Не открывается исторический источник QA-WEB-HISTORICAL. Как продолжить?',choices:[]}};
+  }
   if (prompt.startsWith('Review')) return prompt.includes('QA-COACH-REJECT')
     ? {pass:false,summary:'QA: приведите доказательство применимости навыка.'} : {pass:true, summary:'Независимая проверка пройдена.' };
   if (prompt.startsWith('Work on') && prompt.includes('QA-CHAPTER-FILE')) return { summary:'Глава готова.', artifact:'# Глава', artifactPath:'reports/chapter.md' };
@@ -73,6 +86,10 @@ function response(prompt) {
     const child = spawnSync('/usr/bin/sandbox-exec', [...fixtureSandbox(process.cwd()), '/bin/sh', '-c', 'printf "# QA deliverable\\n" > delivery.md']);
     if (child.status !== 0) throw Error('Fixture sandbox write failed: ' + (child.stderr || child.error || ''));
     return { summary:'QA файл доставлен.' };
+  }
+  if (prompt.startsWith('Reply to the owner')) {
+    const context=JSON.parse(prompt.split('\n\n').at(-1));
+    return {text:'QA ответ: '+context.recent[context.requestIndex].text,outcome:'answered'};
   }
   if (/decide the studio|director|retrospective/i.test(prompt.split('\n')[0])) return { action:'finish',summary:'QA завершено.' };
   return { summary:`${provider === 'claude' ? 'Claude' : 'Codex'}: проверочный текст готов.`, artifact:'# QA текст\n' };
@@ -98,6 +115,8 @@ else if (args[0] === 'app-server') {
     if (method === 'initialize') reply({});
     if (method === 'account/read') reply({ account:{ type:'chatgpt' } });
     if (method === 'model/list') reply({ data:[{ model:'fixture',displayName:'Тестовая модель',supportedReasoningEfforts:[{ reasoningEffort:'low' }] }] });
+    if (method === 'config/read') reply({config:{web_search:args.includes('web_search="disabled"')?'disabled':'live'}});
+    if (method === 'modelProvider/capabilities/read') reply({webSearch:true});
     if (method === 'thread/start' || method === 'thread/resume') reply({
       thread:{ id:threadId,cwd:params.cwd,ephemeral:params.ephemeral === true },
       model:params.model || 'fixture',cwd:params.cwd,approvalPolicy:'never',activePermissionProfile:{ id:params.permissions },runtimeWorkspaceRoots:params.runtimeWorkspaceRoots,
@@ -108,6 +127,13 @@ else if (args[0] === 'app-server') {
       reply({ turn:{ id:turnId } });
       const finish = () => {
         const text = JSON.stringify(response(prompt));
+        if (researchPrompt(prompt)) {
+          if (params.permissions!=='hearth-studio-read-only' || !args.includes('web_search="live"')) throw new Error('The director needs read-only web access.');
+          for (const action of [{type:'search',query:'Partition of India primary sources'},{type:'openPage',url:failedSource}]) {
+            const results=action.type==='search' ? [{url:archiveSource}] : undefined;
+            send({method:'item/completed',params:{threadId,turnId,item:{type:'webSearch',query:action.query ?? '',action,results}}});
+          }
+        }
         send({ method:'item/completed',params:{ threadId,turnId,item:{ type:'agentMessage',phase:'final_answer',text } } });
         send({ method:'turn/completed',params:{ threadId,turn:{ id:turnId,status:'completed' } } });
       };
@@ -120,6 +146,8 @@ else if (args[0] === 'app-server') {
         writeFileSync(cancelledTask, String(process.pid));
         pendingPlan = setTimeout(finish, 30_000);
       } else if (prompt.includes('QA-STOP-PLAN')) pendingPlan = setTimeout(finish,2500);
+      else if (prompt.startsWith('Reply to the owner') && prompt.includes('QA-CONVERSATION-LIVE')) pendingPlan=setTimeout(finish,3500);
+      else if (researchPrompt(prompt)) setTimeout(finish,700);
       else finish();
     }
     if (method === 'turn/interrupt') {

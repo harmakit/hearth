@@ -55,6 +55,14 @@
 .today-outcome { border-inline-start:2px solid var(--green); background:var(--surface); padding:8px 10px; }
 .today-outcome p { color:var(--muted); margin-bottom:5px; }
 .legacy-history > li,.skill-library article.panel,.settings > section > .panel { border-radius:0; border:0; border-block-start:1px solid var(--line); background:transparent; padding-inline:3px; }
+.conversation-history { overflow-anchor:none; display:grid; gap:14px; }
+.conversation-history summary { cursor:pointer; color:var(--muted); font-weight:600; padding-block:5px; }
+.conversation-history details[open] > summary { margin-bottom:8px; }
+.conversation-history [data-conversation-context] { border-inline-start:2px solid var(--accent); padding-inline-start:10px; }
+.conversation-history h3 { margin:0 0 8px; }
+.conversation-history [data-conversation-context] h3 { color:var(--accent); }
+.conversation-history [data-conversation-older] { margin-bottom:8px; }
+.conversation-history [data-conversation-queue],.conversation-history [data-conversation-following] { border-inline-start:2px solid var(--line); padding-inline-start:10px; }
 .app-settings-locale { margin-block:0 16px; }
 .settings .columns { gap:12px; }
 .provider-card { display:grid; grid-template-rows:auto 1fr auto; align-content:start; gap:10px; padding:12px 14px; }

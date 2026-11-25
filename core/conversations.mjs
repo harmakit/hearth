@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
-const historyLimit = 24;
+export const historyLimit = 24;
 const historyTextLimit = 24_000;
 
 function identifier(value, label, required = false) {
@@ -14,6 +14,31 @@ function messageText(value) {
   if (value == null) return '';
   if (typeof value !== 'string' || value.length > 12_000) throw new Error('Недопустимый текст сообщения.');
   return value.trim();
+}
+
+export function selectConversationContext(messages, { draftText, hasDraftAttachments, requestMessageId } = {}) {
+  const draft = messageText(draftText);
+  const reserved = draft || hasDraftAttachments ? 1 : 0;
+  const recent = messages.slice(-(historyLimit - reserved));
+  let remaining = historyTextLimit - draft.length;
+  const bounded = [];
+  for (const message of recent.reverse()) {
+    remaining -= message.text.length;
+    if (remaining < 0) break;
+    bounded.push(message);
+  }
+  bounded.reverse();
+  // A queued owner request can precede replies and task comments saved while it
+  // waited. It must never disappear from the request it is asking us to answer.
+  const request=requestMessageId&&messages.find(row=>row.id===requestMessageId);
+  if(request&&!bounded.some(row=>row.id===request.id)){
+    const surrounding=selectConversationContext(messages.filter(row=>row.id!==request.id),{
+      draftText:request.text,hasDraftAttachments:true,
+    });
+    const ids=new Set([request.id,...surrounding.map(row=>row.id)]);
+    return messages.filter(row=>ids.has(row.id));
+  }
+  return bounded;
 }
 
 function attachments(value = []) {
@@ -113,20 +138,14 @@ export function createConversations({
     return message;
   }
 
-  function conversationHistory({ studioId, conversationId, agentId = null, taskId = null }) {
+  function conversationHistory({ studioId, conversationId, agentId = null, taskId = null, requestMessageId }) {
     const conversation = conversationId
       ? read('conversations', conversationId, 'Беседа')
       : list('conversations').find((row) => row.studioId === studioId && row.agentId === agentId && row.taskId === taskId && !row.inboxId);
     if (!conversation || conversation.studioId !== studioId) return [];
-    const recent = list('conversationMessages').filter((row) => row.conversationId === conversation.id).slice(-historyLimit);
-    let remaining = historyTextLimit;
-    const bounded = [];
-    for (const message of recent.reverse()) {
-      remaining -= message.text.length;
-      if (remaining < 0) break;
-      bounded.push(message);
-    }
-    return bounded.reverse();
+    const messages = list('conversationMessages').filter(row=>row.conversationId===conversation.id && row.studioId===studioId &&
+      (!requestMessageId || row.status!=='queued' || row.id===requestMessageId));
+    return selectConversationContext(messages,{requestMessageId});
   }
 
   function pendingMessages(studioId) {
@@ -147,13 +166,13 @@ export function createConversations({
     return received ? changed(message) : message;
   }
 
-  function replyToMessage({ messageId, attemptId, text: rawText, attachmentIds: rawAttachments, outcome }) {
+  function replyToMessage({ messageId, attemptId, text: rawText, attachmentIds: rawAttachments, outcome, webResearch }, { withinTransaction = false } = {}) {
     identifier(attemptId, 'попытка', true);
     const text = messageText(rawText);
     const attachmentIds = attachments(rawAttachments);
     const processedOutcome = identifier(outcome ?? 'answered', 'результат', true);
     if (!text && !attachmentIds.length) throw new Error('Укажите результат обработки сообщения.');
-    const { reply, created } = transaction(() => {
+    const write = () => {
       const message = read('conversationMessages', messageId, 'Сообщение');
       if (message.author !== 'owner' || message.attemptId !== attemptId || message.status === 'queued') {
         throw new Error('Эта попытка не получала сообщение.');
@@ -165,13 +184,15 @@ export function createConversations({
         id: randomUUID(), studioId: message.studioId, conversationId: conversation.id,
         author: conversation.agentId ? 'agent' : 'director', kind: 'reply', status: 'processed',
         text, attachmentIds, replyTo: messageId, attemptId, outcome: processedOutcome, createdAt,
+        ...(webResearch ? { webResearch } : {}),
       });
       update('conversationMessages', {
         ...message, status: 'processed', replyId: reply.id, outcome: processedOutcome, processedAt: createdAt,
       });
       return { reply, created: true };
-    });
-    return created ? changed(reply) : reply;
+    };
+    const { reply, created } = withinTransaction ? write() : transaction(write);
+    return created && !withinTransaction ? changed(reply) : reply;
   }
 
   return { postStudioMessage, conversationHistory, pendingMessages, receiveMessage, replyToMessage };

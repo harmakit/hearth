@@ -9,6 +9,12 @@ test('previously hidden coach failure remains recoverable from the task after re
   assert.equal(taskRecovery({...task,status:'running'},{id:'s'}),null);
 });
 
+test('a director failure after merging identifies the exact step that can be retried',()=>{
+  const task={id:'work',studioId:'s',status:'failed',workflowManaged:true,gitDelivery:{status:'merged'}};
+  const attempts=[{id:'attempt',studioId:'s',taskId:'work',status:'failed',purpose:'director',error:'Bad decision'}];
+  assert.deepEqual(taskRecovery(task,{id:'s',wipLimit:5},attempts),{kind:'task',reason:'Bad decision',action:'retry',step:'director'});
+});
+
 test('auth failures and Git check failures show different next steps', ()=>{
   const task={id:'work',studioId:'s',status:'failed',workflowManaged:true};
   assert.equal(taskRecovery(task,{id:'s',wipLimit:5},[{id:'old',studioId:'s',taskId:'work',status:'failed',action:'authenticate'}]).action,'connection');

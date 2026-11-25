@@ -74,3 +74,18 @@ test('library groups approved notes and original skill versions by role with sou
   assert.match(html, /Картография[^]*?Версия 2[^]*?Вторая версия[^]*?Версия 1[^]*?Первая версия/);
   assert.doesNotMatch(html, /<img|Прежний библиотекарь|Не виден/);
 });
+
+test('registered update shows a pinned version, candidate and distinct owner actions',()=>{
+  const pinned={id:'skill',repo:'world/maps',path:'SKILL.md',title:'Maps',commit:'a'.repeat(40),license:'MIT'};
+  const historical={...pinned,id:'prior',commit:'b'.repeat(40)};
+  const candidate={...pinned,commit:'c'.repeat(40),content:'New <unsafe> instructions'};
+  const render=status=>renderSkillLibrary({studio:{agents:[trainee]},skills:[pinned,historical],
+    skillChecks:[{id:pinned.id,status,candidate}]});
+  const available=render('available');
+  assert.match(available,/Доступно обновление[^]*?a{40}[^]*?Доступная версия[^]*?c{40}/);
+  assert.match(available,/New &lt;unsafe&gt; instructions/);
+  assert.match(available,/data-skill-apply="skill"[^]*?data-skill-decline="skill"/);
+  assert.match(available,/История версий[^]*?data-skill-id="prior"/);
+  assert.doesNotMatch(render('approved'),/data-skill-apply/);
+  assert.match(render('approved'),/Активные продолжают со старой/);
+});

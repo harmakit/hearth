@@ -3,13 +3,16 @@ import { lstat, readFile, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { capture, jsonLines, launch, providerError, stop } from './process.mjs';
 import { isolationError, verifyWriteRoots } from './scope.mjs';
+import { recordWebLinks, recordWebPage } from './web.mjs';
+import { imageDirectoryPattern, stageCodexImages } from './codex-images.mjs';
+import { codexWeeklyQuota } from '../core/quota.mjs';
 
 const readProfile = 'hearth-studio-read-only';
 const appServerArgs = [
   'app-server', '--listen', 'stdio://',
   '--disable', 'hooks', '--disable', 'plugins', '--disable', 'apps', '--disable', 'computer_use',
   '--disable', 'multi_agent', '--disable', 'multi_agent_v2', '--disable', 'skill_mcp_dependency_install',
-  '-c', 'notify=[]', '-c', 'web_search="disabled"',
+  '-c', 'notify=[]',
   '-c', 'shell_environment_policy.inherit="none"',
 ];
 
@@ -31,7 +34,7 @@ async function linkedGitDirectory(root) {
   }
 }
 
-async function codexConfiguration(binary, scope) {
+async function codexConfiguration(binary, scope, webEnabled = true, allowImages = false) {
   // The macOS sandbox helper re-execs the app-server binary. Executing a
   // Homebrew symlink there can fail even if both paths are readable.
   const command = await realpath(binary.command);
@@ -51,7 +54,7 @@ async function codexConfiguration(binary, scope) {
     const gitdir = await linkedGitDirectory(scope.root);
     if (gitdir) filesystem.push(`${JSON.stringify(gitdir)}="read"`);
   }
-  const config = ['-c', `default_permissions="${profile}"`];
+  const config = ['-c', `default_permissions="${profile}"`, '-c', `web_search="${webEnabled ? 'live' : 'disabled'}"`];
   if (writing) {
     if (process.platform !== 'darwin' || pathUsesGlob.test(scope.scratch)) {
       throw isolationError('Codex не может изолировать запись в эту рабочую копию. Проверьте систему и путь временной области.');
@@ -59,7 +62,7 @@ async function codexConfiguration(binary, scope) {
     verifyWriteRoots(scope);
     filesystem.push(`${JSON.stringify(scope.scratch)}={"."="write","**/.[gG][iI][tT]"="deny","**/.[gG][iI][tT]/**"="deny"}`);
     config.push('-c', `shell_environment_policy.set={TMPDIR=${JSON.stringify(scope.scratch)}}`);
-    config.push('--disable', 'code_mode', '--disable', 'image_generation', '--disable', 'remote_plugin', '--disable', 'shell_snapshot');
+    config.push('--disable', 'code_mode', allowImages ? '--enable' : '--disable', 'image_generation', '--disable', 'remote_plugin', '--disable', 'shell_snapshot');
   }
   config.push('-c', `permissions.${profile}={filesystem={${filesystem.join(',')}},network={enabled=false}}`);
   return { executable: { ...binary, command }, config, profile };
@@ -79,6 +82,7 @@ async function withServer({ executable, config }, options, operate, extraArgs = 
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(startupTimer);
       clearTimeout(interruptionTimer);
       options.signal?.removeEventListener('abort', abort);
       for (const waiter of pending.values()) waiter.reject(error ?? new Error('Подключение Codex закрыто.'));
@@ -122,10 +126,13 @@ async function withServer({ executable, config }, options, operate, extraArgs = 
       interrupt(error);
     }
 
-    const timer = setTimeout(() => {
+    const timer = options.timeoutMs == null ? undefined : setTimeout(() => {
       interrupt(new Error('Истекло время ожидания ответа Codex.'));
       finish(new Error('Истекло время ожидания ответа Codex.'));
     }, options.timeoutMs);
+    const startupTimer = options.startupTimeoutMs == null ? undefined : setTimeout(() => {
+      finish(new Error('Codex не подтвердил запуск. Проверьте подключение и повторите попытку.'));
+    }, options.startupTimeoutMs);
     child.on('error', finish);
     child.stdin.on('error', () => finish(new Error('Поток команд Codex закрыт.')));
     child.on('close', code => finish(new Error(`Codex App Server завершился до ответа (код ${code ?? 'сигнал'}).`)));
@@ -134,6 +141,7 @@ async function withServer({ executable, config }, options, operate, extraArgs = 
 
     const server = {
       rpc,
+      ready() { clearTimeout(startupTimer); },
       onNotify(listener) { notify = listener; },
       onInterrupt(listener) { interrupt = listener; },
     };
@@ -182,9 +190,11 @@ async function disableMcpServers(binary, options) {
 
 export async function inspectCodex(binary, options) {
   return withServer(await codexConfiguration(binary), options, async ({ rpc }) => {
-    const [account, catalog] = await Promise.allSettled([
+    const [account, catalog, web, quota] = await Promise.allSettled([
       rpc('account/read', { refreshToken: false }),
       rpc('model/list', { includeHidden: false }),
+      codexWebCapabilities(rpc),
+      rpc('account/rateLimits/read', {}),
     ]);
     const result = {};
     if (account.status === 'fulfilled' && account.value.account !== undefined) {
@@ -201,14 +211,31 @@ export async function inspectCodex(binary, options) {
     if (account.status === 'rejected' || catalog.status === 'rejected') {
       result.detail = 'Codex вернул неполные данные об аккаунте или моделях.';
     }
+    if (web.status === 'fulfilled' && web.value) result.webCapabilities = web.value;
+    result.weeklyQuota=codexWeeklyQuota(quota.status==='fulfilled'?quota.value:undefined);
     return result;
   });
 }
 
-export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope: execution, nativeRole, outputSchema, ...options }) {
-  const settings = await codexConfiguration(binary, execution);
+async function codexWebCapabilities(rpc, cwd) {
+  const [configuration, provider] = await Promise.allSettled([
+    rpc('config/read', { includeLayers: false, cwd }),
+    rpc('modelProvider/capabilities/read', {}),
+  ]);
+  const mode = configuration.value?.config?.web_search;
+  const supported = provider.value?.webSearch;
+  if (mode === 'disabled' || supported === false) return { search: 'unavailable', read: 'unavailable' };
+  if (supported === true) return { search: 'available', read: mode === 'live' ? 'available' : 'unknown' };
+}
+
+export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope: execution, nativeRole, outputSchema, webEnabled, imageOutputDirectory, inputImages = [], ...options }) {
+  const allowImages = imageOutputDirectory !== undefined;
+  if (allowImages && (execution.access !== 'worktree-write' || !imageDirectoryPattern.test(imageOutputDirectory))) {
+    throw isolationError('Для сохранения изображений нужна проверенная рабочая копия задачи.');
+  }
+  const settings = await codexConfiguration(binary, execution, webEnabled, allowImages);
   const { profile } = settings;
-  const probeOptions = { cwd, ...options, timeoutMs: Math.min(options.timeoutMs, 8000) };
+  const probeOptions = { cwd, ...options, timeoutMs: Math.min(options.timeoutMs ?? 8000, 8000) };
   if (execution.access === 'worktree-write') {
     const { code } = await capture(settings.executable, [
       'sandbox', '-P', profile, '-C', cwd, '--include-managed-config', ...settings.config, '/usr/bin/true',
@@ -217,8 +244,10 @@ export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope
   }
   const mcpOverrides = await disableMcpServers(binary, probeOptions);
   let usage;
+  let imageThreadId;
+  const images = new Map();
   try {
-    return await withServer(settings, { cwd, ...options, cleanupGroup: Boolean(execution.scratch) }, async server => {
+    const result = await withServer(settings, { cwd, ...options, cleanupGroup: Boolean(execution.scratch) }, async server => {
       const { rpc } = server;
       const { signal } = options;
       if (signal?.aborted) throw new DOMException('Запуск Codex отменён.', 'AbortError');
@@ -249,10 +278,26 @@ export async function runCodex(binary, { cwd, model, effort, prompt, emit, scope
         }
       }
       return runTurn(server, {
-        ...scope, threadId, effort, prompt, signal, emit,skills,outputSchema,
+        ...scope, threadId, effort, prompt, signal, emit,skills,outputSchema,inputImages,
+        webCapabilities: await codexWebCapabilities(rpc, cwd),
         onUsage(measured) { usage = measured; },
+        onImage: allowImages ? (item, completed) => {
+          imageThreadId = threadId;
+          if (images.has(item.id) || images.size < 8) {
+            if (completed) images.set(item.id, item);
+            else if (!images.has(item.id)) images.set(item.id, null);
+          }
+        } : undefined,
       });
     }, mcpOverrides);
+    const generated = [...images.values()].filter(Boolean);
+    if (generated.length) {
+      let slots;
+      try { slots = JSON.parse(result.text)?.imageSlots; } catch { /* Legacy runtimes do not return an image number array. */ }
+      result.generatedImages = await stageCodexImages({ items: generated, slots, threadId: imageThreadId,
+        root: cwd, outputDirectory: imageOutputDirectory, options });
+    }
+    return result;
   } finally {
     if (usage) emit('usage', { usage });
   }
@@ -270,7 +315,7 @@ function codexUsage(total) {
   return Object.keys(usage).length ? usage : undefined;
 }
 
-function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit, onUsage, skills, outputSchema, ...scope }) {
+function runTurn({ rpc, ready, onNotify, onInterrupt }, { prompt, effort, signal, emit, onUsage, onImage, skills, outputSchema, inputImages, webCapabilities, ...scope }) {
   return new Promise((resolve, reject) => {
     const { threadId } = scope;
     let turnId;
@@ -278,6 +323,9 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
     let finalText = '';
     let legacyText = '';
     const beforeTurn = [];
+    const pages = new Map();
+    const links = new Set();
+    let searched = false;
 
     function handle({ method, params }) {
       if (params.threadId !== threadId || (params.turnId ?? params.turn?.id) !== turnId) return;
@@ -287,6 +335,18 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
         return;
       }
       const item = params.item;
+      if (item?.type === 'imageGeneration') {
+        if (method === 'item/started') onImage?.(item, false);
+        if (method === 'item/completed' && !item.failure && item.status === 'completed') onImage?.(item, true);
+      }
+      if (method === 'item/completed' && item?.type === 'webSearch') {
+        const { action } = item;
+        if (action?.type === 'search' || !action && typeof item.query === 'string' && item.query.trim()) {
+          searched = true;
+          recordWebLinks(links,item.results);
+        }
+        if (action?.type === 'openPage' || action?.type === 'findInPage') recordWebPage(pages, action.url, 'attempted');
+      }
       if (method === 'item/completed' && item?.type === 'agentMessage' && typeof item.text === 'string') {
         if (item.phase === 'final_answer') finalText = item.text;
         else if (item.phase == null) legacyText = item.text;
@@ -295,11 +355,26 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
       if (cancelled) reject(cancelled);
       else if (params.turn.status === 'interrupted') reject(new DOMException('Codex прервал выполнение.', 'AbortError'));
       else if (params.turn.status !== 'completed') reject(providerError(params.turn.error?.message, 'Codex завершил задачу с ошибкой.'));
-      else resolve({ text: finalText || legacyText });
+      else {
+        const result = { text: finalText || legacyText };
+        if (searched || pages.size || webCapabilities) {
+          const capabilities = { search: 'unknown', read: 'unknown', ...webCapabilities };
+          if (searched) capabilities.search = 'available';
+          if (pages.size) capabilities.read = 'available';
+          const search = searched ? 'used' : { available: 'not-used', unavailable: 'unavailable', unknown: 'unknown' }[capabilities.search];
+          result.web = { capabilities, search, pages: [...pages.values()], links: [...links] };
+        }
+        resolve(result);
+      }
     }
 
     onNotify(message => {
-      if (!['item/completed', 'turn/completed', 'thread/tokenUsage/updated'].includes(message.method)) return;
+      if(message.method==='account/rateLimits/updated'){
+        const quota=codexWeeklyQuota({rateLimits:message.params?.rateLimits});
+        if(quota.status==='known')emit('weekly-quota',{weeklyQuota:quota});
+        return;
+      }
+      if (!['item/started', 'item/completed', 'turn/completed', 'thread/tokenUsage/updated'].includes(message.method)) return;
       if (turnId) handle(message);
       else if (message.params?.threadId === threadId) beforeTurn.push(message);
     });
@@ -311,11 +386,13 @@ function runTurn({ rpc, onNotify, onInterrupt }, { prompt, effort, signal, emit,
       reject(new DOMException('Запуск Codex отменён.', 'AbortError'));
       return;
     }
-    const input=[{ type:'text', text:prompt, text_elements:[] },...skills.map(skill=>({type:'skill',...skill}))];
+    const input=[{ type:'text', text:prompt, text_elements:[] }, ...inputImages.map(path=>({type:'localImage',path})),
+      ...skills.map(skill=>({type:'skill',...skill}))];
     rpc('turn/start', { ...scope, effort, input, outputSchema })
       .then(result => {
         turnId = result.turn?.id;
         if (!turnId) throw new Error('Codex не вернул идентификатор запуска.');
+        ready();
         if (cancelled) rpc('turn/interrupt', { threadId, turnId }).catch(() => reject(cancelled));
         else emit('started');
         for (const message of beforeTurn) handle(message);

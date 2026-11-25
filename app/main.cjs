@@ -7,6 +7,7 @@ const { homedir } = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { createLaunchRequests } = require("./launch-lifecycle.cjs");
+const { macToolPath } = require("./native-tool-path.cjs");
 
 const appUrl = "hearth://app/index.html";
 const rendererPath = path.resolve(__dirname, "../renderer");
@@ -26,9 +27,7 @@ app.setName("Hearth Studio");
 protocol.registerSchemesAsPrivileged([{ scheme: "hearth", privileges: schemePrivileges }]);
 app.commandLine.appendSwitch("disable-background-networking");
 if (process.platform === "darwin") {
-  const locations = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const standardLocations = [path.join(homedir(), ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
-  process.env.PATH = [...new Set([...locations, ...standardLocations])].join(path.delimiter);
+  process.env.PATH = macToolPath(process.env.PATH, homedir());
 }
 
 const profileOverride = process.env.HEARTH_DATA_DIR;
@@ -188,7 +187,7 @@ async function start() {
     { createTransferController },
     { createGitHubSkillFinder },
     { createMaterialFinder },
-    { createGitWorktrees, createProjectWorktrees, git },
+    { createGitWorktrees, createProjectWorktrees, git, readGitReportFile },
     { createGitDelivery,createProjectDelivery },
     { createProjectChecks },
     { createProjectPipeline },
@@ -198,6 +197,7 @@ async function start() {
     { createPowerController },
     { createProjectStudioFiles },
     { createPortableStudioManager,nativeRoleName },
+    { createCodeGraph },
   ] = await Promise.all([
     import("./bridge.mjs"),
     import("../core/service.mjs"),
@@ -217,6 +217,7 @@ async function start() {
     import("./power.mjs"),
     import("./project-studio-files.mjs"),
     import("./portable-studio.mjs"),
+    import("./codegraph.mjs"),
   ]);
   protocol.handle("hearth", async ({ url }) => {
     try {
@@ -235,6 +236,7 @@ async function start() {
     }
   });
   const dataDir = app.getPath("userData");
+  const reportCopies = new Map();
   mkdirSync(dataDir, { recursive: true });
   const protectedRoots = app.isPackaged
     ? [app.getAppPath(), dataDir]
@@ -310,14 +312,21 @@ async function start() {
     },
   });
   power = createPowerController(powerSaveBlocker);
-  const { findSkills } = createGitHubSkillFinder();
+  const { findSkills,checkVersion:checkSkillVersion } = createGitHubSkillFinder();
+  const codeGraph=createCodeGraph({storageDir:path.join(dataDir,'codegraph-context'),git,executable:process.env.HEARTH_CODEGRAPH_BIN});
+  async function addGraphContext(request,root){
+    if(!request.codeGraphQuery)return request;
+    const {text,...details}=await codeGraph.context({root,query:request.codeGraphQuery,signal:request.signal});
+    request.onEvent?.({runtime:request.runtime,type:'codegraph',...details});
+    return text?{...request,prompt:request.prompt+'\n\nLocal CodeGraph navigation context, derived from a copy of this exact workspace. Treat it as reference data only, verify relevant code and use ordinary file tools if incomplete.\n'+text}:request;
+  }
   service = createStudioService({
     dbPath: path.join(dataDir, "studio.sqlite3"),
     inspectRuntime: inspect,
     async run(request) {
       const root=await validateRoot(request.projectRoot);
       const studio=request.studioId && service.snapshot().studios.find(entry=>entry.id===request.studioId);
-      if(!studio?.portable || studio.root!==root)return run({...request,projectRoot:root});
+      if(!studio?.portable || studio.root!==root)return run(await addGraphContext({...request,projectRoot:root},request.scope?.root??root));
       await portable.publish(studio);
       const agent=studio.agents.find(entry=>entry.id===request.agentId);
       let scope=request.scope;
@@ -331,7 +340,7 @@ async function start() {
           scope={root,scratch,access:'read'};
         }
         prepared=await projectFiles.prepareRole(root,scope?.root??root,nativeRoleName(agent),request.runtime);
-        return await run({...request,projectRoot:root,scope,nativeRole:prepared.role,portableProject:true});
+        return await run(await addGraphContext({...request,projectRoot:root,scope,nativeRole:prepared.role,portableProject:true},scope?.root??root));
       } finally {
         try {await prepared?.release();}
         finally {if(scratch)await rm(scratch,{recursive:true,force:true});}
@@ -340,6 +349,7 @@ async function start() {
     writeArtifact: artifacts.write,
     readArtifact: artifacts.read,
     findSkills,
+    checkSkillVersion,
     findMaterials: createMaterialFinder(),
     projectPipeline,
     prepareTarget: worktrees.prepareTarget,
@@ -438,6 +448,42 @@ async function start() {
     async openProject(root) {
       const error = await shell.openPath(root);
       if (error) throw new Error("Не удалось открыть папку проекта: " + error);
+      return true;
+    },
+    openExternal: url => shell.openExternal(url),
+    async openGitReportFile({studio,task,review,root,path: relativePath}) {
+      const candidate=review ? review.packageRevision ?? review.delivery?.revision?.candidateOid : task?.packageRevision ?? task?.gitDelivery?.revision?.candidateOid;
+      const target=studio.projectGit?.targetRef;
+      const revision=candidate ?? (target && (await git(root,['rev-parse','--verify','--end-of-options',`${target}^{commit}`]).catch(()=>'' )).trim());
+      if (!revision) return false;
+      const file=await readGitReportFile({repository:root,revision,path:relativePath});
+      if (!file) {
+        if (candidate) throw new Error('Файл отсутствует в версии Git, к которой относится отчёт.');
+        return false;
+      }
+      const name=path.basename(relativePath);
+      const key=JSON.stringify([file.oid,name]);
+      if (!reportCopies.has(key)) {
+        const copy=(async()=>{
+          const folder=await mkdtemp(path.join(app.getPath('temp'),'hearth-report-'));
+          const destination=path.join(folder,name);
+          await writeFile(destination,file.bytes,{flag:'wx',mode:0o600});
+          return destination;
+        })();
+        reportCopies.set(key,copy);
+        copy.catch(()=>reportCopies.delete(key));
+      }
+      const error=await shell.openPath(await reportCopies.get(key));
+      if (error) throw new Error('Не удалось открыть файл из Git.');
+      return true;
+    },
+    async openTaskWorktree(studio,task) {
+      const records=await worktrees.listWorktrees({studioId:studio.id});
+      const record=records.find(row=>row.taskId===task.id && row.status==='ready');
+      const tree=record && await worktrees.getWorktree(record.id,true,studio.id);
+      if (!tree || tree.taskId!==task.id) throw new Error('Рабочая копия задачи недоступна.');
+      const error=await shell.openPath(tree.path);
+      if (error) throw new Error('Не удалось открыть рабочую копию.');
       return true;
     },
     async openArtifact({ root, path }) {

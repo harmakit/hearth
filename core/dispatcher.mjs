@@ -113,20 +113,21 @@ export function createDispatcher({ list, insert, update, transaction, now = () =
 
   function running(attemptId, at) {
     const attempt = attempts().find(({ id, status }) => id === attemptId && status === 'running');
-    if (!attempt || date(attempt.expiresAt) <= at) return;
+    if (!attempt || (at && date(attempt.expiresAt) <= at)) return;
     const job = findJob(attempt.jobId);
     if (job?.status !== 'running' || job.attemptId !== attemptId) return;
     return { attempt, job };
   }
 
-  function renewAttempt({ attemptId, observedAt, processId }) {
+  function renewAttempt({ attemptId, observedAt, processId, heartbeat = false }) {
     return transaction(() => {
       const timestamp = now();
       const observed = observedAt === undefined ? timestamp : date(observedAt);
-      const current = running(attemptId, timestamp);
+      const current = running(attemptId, heartbeat ? null : timestamp);
       if (!current || observed < date(current.attempt.observedAt) || observed > timestamp || Number.isNaN(observed.getTime())) return;
       return update(attemptTable, {
-        ...current.attempt, observedAt: observed.toISOString(), expiresAt: new Date(observed.getTime() + current.attempt.leaseMs).toISOString(),
+        ...current.attempt, expiresAt: new Date(observed.getTime() + current.attempt.leaseMs).toISOString(),
+        ...(!heartbeat ? { observedAt: observed.toISOString() } : {}),
         ...(Number.isSafeInteger(processId) && processId > 0 ? { processId } : {}),
       });
     });

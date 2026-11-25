@@ -40,13 +40,18 @@ test('Git work goes through scoped implementation, checks, exact review, owner a
       const training = trainingReply(request);
       if (training) return training;
       calls.push(request.scope?.access ?? request.purpose);
+      if(request.purpose==='task'){
+        assert.match(request.prompt,/Do not ask the owner to run Git status or a configured check/);
+        assert.match(request.prompt,/"command":"node"/);
+      }
+      if(request.purpose==='review')assert.match(request.prompt,/actual results instead of demanding another run/);
       const results = { plan, task: { summary: 'Правка' }, review: { pass: true, summary: 'Проверено' }, director: { action: 'finish' } };
       return { text: JSON.stringify(results[request.purpose]) };
     },
   });
   t.after(() => { cleanupRelease.resolve(); return service.close(); });
   const { id: studioId } = service.createStudio({ name: 'Git', root: '/test', groomingPolicy: { enabled: false } });
-  await service.configureProject({ studioId, enabled: true, targetRef: 'delivery', profile: { id: 'project', checks: [] } });
+  await service.configureProject({ studioId, enabled: true, targetRef: 'delivery', profile: { id: 'project', checks: [{id:'tests',command:'node',args:['--test'],required:true}] } });
   service.initializeStudio({ studioId });
   const draft = await until(service, state => state.plans[0]);
   service.decidePlan({ planId: draft.id, decision: 'approve' });
@@ -103,4 +108,121 @@ test('a held sprint stages both reviewed changes and requires one pinned release
   service.answerInbox({inboxId:item.id,decision:'approve',expectedResult:item.review.key,operationId:'accept-package'});
   await until(service,state=>state.sprints[0].status==='completed');
   assert.equal(merged.filter(r=>r==='refs/heads/delivery').length,1);
+});
+
+test('a moving delivery target starts a fresh review without an obsolete error or owner approval', async t => {
+  let evaluations = 0;
+  let merges = 0;
+  const service = createStudioService({
+    dbPath: ':memory:',
+    prepareTarget: async () => ({ targetRef: 'refs/heads/delivery' }),
+    projectPipeline: {
+      workScope: async () => ({ worktreeId: 'tree', scope: { root: '/task', access: 'worktree-write' }, release: async () => {} }),
+      evaluate: async () => {
+        const candidate = String(++evaluations);
+        return { worktreeId: 'tree', revision: { candidateOid: candidate, digest: candidate }, status: 'review', checks: [], evidence: [] };
+      },
+      reviewScope: async () => ({ scope: { root: '/candidate', access: 'read' }, release: async () => {} }),
+      merge: async ({ task }) => {
+        if (++merges === 1) throw Object.assign(new Error('The delivery target has changed'), { code: 'TARGET_CHANGED' });
+        assert.equal(task.gitDelivery.receipt.revision.candidateOid, '2');
+        return { status: 'merged', targetOid: '2' };
+      },
+    },
+    run: async request => {
+      const training = trainingReply(request);
+      if (training) return training;
+      return { text: JSON.stringify({ plan, task: { summary: 'Ready' }, review: { pass: true, summary: 'Checked' }, director: { action: 'finish' } }[request.purpose]) };
+    },
+  });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({ name: 'Changing Git target', root: '/test', wipLimit: 1, groomingPolicy: { enabled: false } });
+  await service.configureProject({ studioId, enabled: true, targetRef: 'delivery' });
+  service.initializeStudio({ studioId });
+  const draft = await until(service, state => state.plans[0]);
+  service.decidePlan({ planId: draft.id, decision: 'approve' });
+  const first = await until(service, state => state.inbox.find(item => item.kind === 'acceptance' && item.status === 'open'));
+  service.answerInbox({ studioId, inboxId: first.id, decision: 'approve', expectedResult: first.review.key, operationId: 'first-approval' });
+  const second = await until(service, state => state.inbox.find(item => item.kind === 'acceptance' && item.status === 'open' && item.id !== first.id));
+  assert.equal(second.review.delivery.revision.candidateOid, '2');
+  assert.equal(merges, 1);
+  assert.equal(service.snapshot().inbox.some(item => item.kind === 'error' && item.status === 'open'), false);
+  service.answerInbox({ studioId, inboxId: second.id, decision: 'approve', expectedResult: second.review.key, operationId: 'second-approval' });
+  await until(service, state => state.sprints[0].status === 'completed');
+  assert.equal(merges, 2);
+});
+
+test('summary sprint acceptance reviews the integrated Git snapshot and exposes its files', async t => {
+  const targetOid = 'a'.repeat(40);
+  let assembled;
+  const service = createStudioService({ dbPath: ':memory:', prepareTarget: async () => ({ targetRef: 'refs/heads/delivery' }),
+    projectPipeline: {
+      workScope: async () => ({ worktreeId: 'tree', scope: { root: '/work', access: 'worktree-write' }, release: async () => {} }),
+      evaluate: async () => ({ worktreeId: 'tree', revision: {candidateOid:targetOid}, artifactPaths: ['character.md'], status: 'review', checks: [], evidence: [] }),
+      reviewScope: async () => ({ scope: {root:'/candidate',access:'read'}, release: async () => {} }),
+      merge: async () => ({status:'merged',targetOid}),
+      packageReviewScope: async ({members,referencePaths}) => {
+        assembled = members;
+        assert.deepEqual(referencePaths, ['character.md']);
+        return {scope:{root:'/delivered',access:'read'},context:{revision:{candidateOid:targetOid},referenceFiles:[{path:'character.md',text:'# Character'}]},release:async()=>{}};
+      },
+    },
+    run: async request => {
+      const training=trainingReply(request); if(training)return training;
+      if(request.purpose==='plan')return {text:JSON.stringify({...plan,tasks:[{...plan.tasks[0],requiresAcceptance:false}]})};
+      if(request.purpose==='review' && request.prompt.includes('sprint package')) {
+        assert.equal(request.scope.root,'/delivered');
+        assert.match(request.prompt,/character\.md/);
+      }
+      return {text:JSON.stringify({task:{summary:'Created'},review:{pass:true,summary:'Checked'},director:{action:'finish'}}[request.purpose])};
+    },
+  });
+  t.after(()=>service.close());
+  const {id: studioId}=service.createStudio({name:'Summary review',root:'/project',sprintReview:'summary',groomingPolicy:{enabled:false}});
+  await service.configureProject({studioId,enabled:true,targetRef:'delivery'});
+  service.initializeStudio({studioId});
+  const draft=await until(service,state=>state.plans[0]);
+  service.decidePlan({planId:draft.id,decision:'approve'});
+  const item=await until(service,state=>state.inbox.find(row=>row.kind==='acceptance' && row.review?.members));
+  assert.equal(assembled.length,1);
+  assert.deepEqual(item.review.members[0].artifactPaths,['character.md']);
+  assert.equal(item.review.packageRevision,targetOid);
+  assert.deepEqual(item.review.artifactPaths,['character.md']);
+  service.answerInbox({inboxId:item.id,decision:'approve',expectedResult:item.review.key,operationId:'accept-summary'});
+  await until(service,state=>state.sprints[0].status==='completed');
+});
+
+test('a final Git task receives transitive delivered files and the approved sprint task bindings', async t => {
+  const captures=[];
+  let director=0;
+  const first={...plan.tasks[0],key:'first',requiresAcceptance:false};
+  const second={...first,key:'second',dependsOn:['first']};
+  const third={...first,key:'final',dependsOn:['second']};
+  const service=createStudioService({dbPath:':memory:',prepareTarget:async()=>({targetRef:'refs/heads/delivery'}),
+    projectPipeline:{
+      workScope:async({task})=>({worktreeId:task.id,scope:{root:'/'+task.key,access:'worktree-write'},release:async()=>{}}),
+      workspaceContents:async(root,paths)=>{captures.push({root,paths});return {files:paths.map(path=>({path,text:'Delivered'})),imagePaths:[]};},
+      evaluate:async({task})=>({worktreeId:task.id,revision:{candidateOid:task.id},artifactPaths:[task.key+'.md'],status:'review',checks:[],evidence:[]}),
+      reviewScope:async()=>({scope:{root:'/candidate',access:'read'},release:async()=>{}}),
+      merge:async({task})=>({status:'merged',targetOid:task.id}),
+    },
+    run:async request=>{
+      const training=trainingReply(request);if(training)return training;
+      if(request.purpose==='plan')return {text:JSON.stringify({...plan,tasks:[first,second,third]})};
+      if(request.purpose==='task' && request.scope.root==='/final'){
+        assert.match(request.prompt,/approved sprint task bindings/i);
+        assert.match(request.prompt,/"key":"second"/);
+      }
+      if(request.purpose==='director')return {text:JSON.stringify({action:++director===3?'finish':'next'})};
+      return {text:JSON.stringify({task:{summary:'Ready'},review:{pass:true,summary:'Verified'}}[request.purpose])};
+    },
+  });
+  t.after(()=>service.close());
+  const s=service.createStudio({name:'References',root:'/project',wipLimit:1,groomingPolicy:{enabled:false}});
+  await service.configureProject({studioId:s.id,enabled:true,targetRef:'delivery'});
+  service.initializeStudio({studioId:s.id});
+  const draft=await until(service,state=>state.plans[0]);
+  service.decidePlan({planId:draft.id,decision:'approve'});
+  const capture=await until(service,()=>captures.find(row=>row.root==='/final'));
+  assert.deepEqual(capture.paths,['second.md','first.md']);
 });

@@ -19,7 +19,7 @@ const stages = ['backlog', 'ready', 'in_progress', 'review', 'qa', 'done', 'bloc
 const statuses = ['queued', 'scheduled', 'running', 'waiting', 'completed', 'failed', 'interrupted'];
 
 const fields = {
-  studio: ['name', 'brief', 'language', 'projectLanguage', 'allowedMode','sprintReview','languageMode'],
+  studio: ['name', 'brief', 'language', 'projectLanguage', 'allowedMode','sprintReview','languageMode','codeGraphMode'],
   agent: ['key', 'name', 'description', 'role', 'roleTitle', 'mode', 'runtime', 'model', 'effort', 'systemRole'],
   director: ['runtime', 'model', 'effort'],
   tasks: ['key', 'title', 'prompt', 'summary', 'artifact', 'error', 'review', 'directorDecision', 'createdAt', 'updatedAt', 'legacyId', 'legacyStatus', 'legacyBranch', 'kind', 'type', 'debtCategory'],
@@ -29,7 +29,7 @@ const fields = {
   stories: ['title', 'goal', 'description', 'status', 'createdAt', 'updatedAt', 'legacyId'],
   sprints: ['title', 'goal', 'description', 'summary', 'status', 'createdAt', 'updatedAt', 'closedAt', 'legacyId'],
   meetings: ['title', 'summary', 'body', 'description', 'status', 'kind', 'decision', 'createdAt', 'updatedAt', 'legacyId', 'agenda', 'ownerReason'],
-  skills: ['repo', 'commit', 'path', 'title', 'license', 'url', 'content'],
+  skills: ['repo', 'commit', 'path', 'title', 'license', 'url', 'content','createdAt'],
   phases: ['title', 'goal', 'status', 'createdAt', 'updatedAt'],
   prerequisites: ['consumerType', 'skillRef', 'reason', 'criterion', 'createdAt'],
   meeting_actions: ['kind', 'title', 'prompt', 'criteria', 'createdAt'],
@@ -461,6 +461,7 @@ function copyPayload(source, { mode, toBundle, root, name }) {
     }),
     approveSprints: input.approveSprints !== false,
     ...(Number.isSafeInteger(input.skillMinStars) && input.skillMinStars >= 0 ? { skillMinStars: input.skillMinStars } : {}),
+    ...(Number.isInteger(input.weeklyQuotaThreshold) && input.weeklyQuotaThreshold>=0 && input.weeklyQuotaThreshold<=100 ? {weeklyQuotaThreshold:input.weeklyQuotaThreshold} : {}),
     lifecycle: mode === 'template' ? 'draft' : 'paused',
   };
   if (input.debtPolicy !== undefined) {
@@ -496,7 +497,20 @@ function copyPayload(source, { mode, toBundle, root, name }) {
           ...(replacesId !== undefined && { replacesId: replacesId === null ? null : link(kind, replacesId) ?? null }) };
       }
       const copy = { ...copyFields(record, fields[kind], kind === 'skills' ? value => value : text), ...identity };
-      if (kind === 'skills') copy.stars = record.stars;
+      if (kind === 'skills') {
+        copy.stars = record.stars;
+        if(record.redistributable===true && typeof record.files?.['LICENSE.txt']==='string'){
+          copy.redistributable=true;
+          copy.files={'LICENSE.txt':record.files['LICENSE.txt']};
+        }
+        if(record.versionApprovals!==undefined){
+          copy.versionApprovals=list(record.versionApprovals,'одобрения версий навыка').map(value=>{
+            const approval=object(value,'одобрение версии');
+            return {fromSkillId:link('skills',approval.fromSkillId),agentIds:list(approval.agentIds,'роли обновления')
+              .map(id=>link('agents',id)).filter(Boolean),approvedAt:text(approval.approvedAt)};
+          });
+        }
+      }
       for (const [key, target] of Object.entries(links)) {
         const value = record[key];
         if (value === undefined) continue;

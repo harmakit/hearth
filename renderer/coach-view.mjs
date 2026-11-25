@@ -161,15 +161,47 @@ export function renderSkillPreview(preview) {
     ${candidates.length ? `<ul class="skill-candidates">${candidates.map(candidate => `<li><strong>${safe(candidate.title || candidate.path)}</strong>${skillSource(candidate)}</li>`).join('')}</ul>` : ''}`;
 }
 
-export function renderSkillLibrary({ studio, skills = [], tasks = [], knowledge = [], customSkills = [], knowledgeEvents = [], topics = '', preview = {} } = {}) {
+function versionStatus(check) {
+  return copy(({current:'Актуальная версия',available:'Доступно обновление',declined:'Обновление отложено',
+    approved:'Ожидает завершения запусков',unavailable:'Проверка недоступна',applied:'Заменён новой версией',
+    superseded:'Предыдущая версия'})[check?.status] ?? 'Ещё не проверен');
+}
+
+function registeredSkill(skill,studio,check,active) {
+  const roles=(studio?.agents??[]).filter(agent=>agent.skillIds?.includes(skill.id)).map(agentName);
+  const candidate=check?.candidate;
+  const actions=candidate && active && check.status!=='approved'
+    ? copy`<div class="actions"><button type="button" class="action secondary" data-skill-apply="${safe(skill.id)}" data-skill-version="${safe(candidate.commit)}">Применить обновление</button>
+        <button type="button" class="action secondary" data-skill-decline="${safe(skill.id)}" data-skill-version="${safe(candidate.commit)}">Оставить текущую версию</button></div>` : '';
+  return copy`<details class="panel padded work-fold" data-skill-id="${safe(skill.id)}" data-library-detail="imported-${safe(skill.id)}">
+    <summary><strong>${safe(skill.title || skill.path)}</strong> · ${safe(active?versionStatus(check):copy('Предыдущая версия'))}</summary>
+    ${skillSource(skill)}
+    <p>Роли · ${safe(roles.join(', ') || copy('Пока нет'))}</p>
+    ${check?.checkedAt ? copy`<p class="muted">Проверено · ${safe(new Date(check.checkedAt).toLocaleString(getCopyLocale()))}</p>` : ''}
+    ${check?.status==='unavailable' ? copy`<p class="muted">Закреплённая версия остаётся доступной без сети.</p>
+      <p class="muted">${safe(check.message || '')}${check.retryAt ? copy` · Следующая проверка после ${safe(new Date(check.retryAt).toLocaleString(getCopyLocale()))}` : ''}</p>` : ''}
+    ${candidate && active ? copy`<details class="advanced" data-library-detail="skill-update-${safe(skill.id)}">
+      <summary>Доступная версия · ${safe(candidate.commit.slice(0,12))}</summary>
+      ${skillSource(candidate)}<p class="long-text">${safe(candidate.content)}</p>${actions}
+      ${check.status==='approved' ? copy`<p class="muted">Новые запуски начнутся после применения версии. Активные продолжают со старой.</p>
+        <button type="button" class="action secondary" data-skill-decline="${safe(skill.id)}" data-skill-version="${safe(candidate.commit)}">Отложить обновление</button>` : ''}
+    </details>` : ''}
+  </details>`;
+}
+
+export function renderSkillLibrary({ studio, skills = [], tasks = [], knowledge = [], customSkills = [], knowledgeEvents = [], skillChecks = [], checkingVersions = false, topics = '', preview = {} } = {}) {
   const busy = preview.status === 'pending';
+  const ids=new Set((studio?.agents??[]).filter(agent=>agent.rosterStatus!=='retired').flatMap(agent=>agent.skillIds??[]));
+  const checks=new Map(skillChecks.map(row=>[row.id,row]));
+  const current=skills.filter(skill=>ids.has(skill.id)), history=skills.filter(skill=>!ids.has(skill.id));
   return copy`<div class="stack skill-library">
     ${roleKnowledge({ studio, tasks, knowledge, customSkills, knowledgeEvents })}
-    <section class="stack compact"><h2>Утверждённые навыки</h2>
-      ${skills.length ? skills.map(skill => copy`<details class="panel padded work-fold" data-skill-id="${safe(skill.id)}" data-library-detail="imported-${safe(skill.id)}">
-        <summary><strong>${safe(skill.title || skill.path)}</strong></summary>${skillSource(skill)}
-        <p>Роли · ${safe((studio?.agents ?? []).filter(agent => agent.skillIds?.includes(skill.id)).map(agentName).join(', ') || copy('Пока нет'))}</p>
-      </details>`).join('') : copy('<p class="panel padded muted">Утверждённых навыков пока нет. Они появляются после ревью обучения.</p>')}
+    <section class="stack compact"><div class="row"><h2>Утверждённые навыки</h2>
+      ${current.length ? `<button type="button" class="action secondary" data-check-skill-versions ${checkingVersions?'disabled':''}>${safe(copy(checkingVersions?'Проверяем версии…':'Проверить обновления'))}</button>` : ''}</div>
+      ${current.length ? current.map(skill=>registeredSkill(skill,studio,checks.get(skill.id),true)).join('') :
+        copy('<p class="panel padded muted">Утверждённых навыков пока нет. Они появляются после ревью обучения.</p>')}
+      ${history.length ? copy`<details class="panel padded stack compact" data-library-detail="skill-version-history"><summary>История версий · ${history.length}</summary>
+        ${history.map(skill=>registeredSkill(skill,studio,checks.get(skill.id),false)).join('')}</details>` : ''}
     </section>
     <section class="panel padded stack compact"><div class="row"><div><h2>Поиск на GitHub</h2>
       <p class="muted">Минимум звёзд · ${skillStarLabel(studio)}</p></div>

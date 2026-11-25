@@ -502,6 +502,116 @@ test('durable task transitions are scoped and paginated after restart', async t 
   assert.equal(prior.rows[0].toStatus, 'running');
   assert.throws(()=>read({studioId:other.id}), /студии/);
 });
+
+test('a conversation records the real active message context and does not consume a later queued request',async t=>{
+  const gate=Promise.withResolvers();
+  const calls=[];
+  const service=createStudioService({dbPath:database(t),run:async request=>{
+    assert.equal(request.purpose,'conversation');
+    calls.push(JSON.parse(request.prompt.split('\n\n').at(-1)));
+    if(calls.length===1)await gate.promise;
+    return {text:JSON.stringify({text:calls.length===1?'Reply one':'Reply two',outcome:'answered'})};
+  }});
+  t.after(()=>{gate.resolve();return service.close();});
+  const current=studio(service);
+  const first=service.postStudioMessage({studioId:current.id,text:'First request'});
+  const second=service.postStudioMessage({studioId:current.id,conversationId:first.conversationId,text:'Second request'});
+  await until(()=>calls,rows=>rows.length===1);
+  assert.deepEqual(calls[0].recent,[{author:'owner',text:'First request'}]);
+  const active=service.snapshot().attempts.find(row=>row.purpose==='conversation'&&row.status==='running');
+  assert.deepEqual(active.contextMessageIds,[first.id]);
+  const third=service.postStudioMessage({studioId:current.id,conversationId:first.conversationId,text:'Third request'});
+  assert.deepEqual(service.snapshot().attempts.find(row=>row.id===active.id).contextMessageIds,[first.id]);
+  const activeView=service.conversationView({studioId:current.id,conversationId:first.conversationId,draftText:'x'.repeat(12_000)});
+  assert.equal(activeView.mode,'running');
+  assert.deepEqual(activeView.context.map(row=>row.id),[first.id]);
+  assert.deepEqual(activeView.queued.map(row=>row.id),[second.id,third.id]);
+  gate.resolve();
+  await until(service.snapshot,state=>state.conversationMessages.some(row=>row.replyTo===third.id));
+  assert.ok(calls[1].recent.some(row=>row.text==='Second request'));
+  assert.ok(calls[1].recent.some(row=>row.text==='Reply one'));
+  assert.ok(!calls[1].recent.some(row=>row.text==='Third request'));
+  const attempt=service.snapshot().attempts.find(row=>row.purpose==='conversation'&&row.contextMessageIds?.includes(second.id));
+  assert.ok(attempt);
+  assert.equal(service.conversationView({studioId:current.id,conversationId:first.conversationId}).mode,'next');
+});
+
+test('conversation history pages keep their cursors across new messages and reopening the database',async t=>{
+  const dbPath=database(t);
+  const run=async()=>({text:'{"text":"Reply","outcome":"answered"}'});
+  let service=createStudioService({dbPath,run});
+  t.after(()=>service.close());
+  const current=studio(service);
+  const other=studio(service,'Other');
+  const work=task(service,current.id);
+  const otherWork=task(service,other.id);
+  const entries=Array.from({length:65},(_,index)=>service.postStudioMessage({studioId:current.id,taskId:work.id,kind:'comment',text:`Message ${index}`}));
+  const foreign=service.postStudioMessage({studioId:other.id,taskId:otherWork.id,kind:'comment',text:'Other conversation'});
+  const scope={studioId:current.id,conversationId:entries[0].conversationId};
+  await service.close();
+  const db=new DatabaseSync(dbPath);
+  db.prepare("UPDATE conversationMessages SET data=json_set(data,'$.createdAt',?)").run('2026-11-24T00:00:00.000Z');
+  db.close();
+  service=createStudioService({dbPath,run});
+  const view=service.conversationView(scope);
+  assert.equal(view.mode,'next');
+  assert.equal(view.historyCount,41);
+  assert.deepEqual(view.context.map(row=>row.text),entries.slice(41).map(row=>row.text));
+  assert.equal(view.historyBefore,entries[41].id);
+  const page=service.conversationPage({...scope,beforeMessageId:view.historyBefore});
+  assert.deepEqual(page.rows.map(row=>row.id),entries.slice(21,41).map(row=>row.id));
+  service.postStudioMessage({studioId:current.id,taskId:work.id,kind:'comment',text:'New entry'});
+  const older=service.conversationPage({...scope,beforeMessageId:page.nextBefore});
+  assert.deepEqual(older.rows.map(row=>row.id),entries.slice(1,21).map(row=>row.id));
+  const oldest=service.conversationPage({...scope,beforeMessageId:older.nextBefore});
+  assert.deepEqual(oldest.rows.map(row=>row.id),[entries[0].id]);
+  assert.equal(oldest.nextBefore,null);
+  assert.throws(()=>service.conversationPage({...scope,beforeMessageId:foreign.id}),/бесед|истори/iu);
+  assert.throws(()=>service.conversationPage({...scope,limit:0}),/истори/iu);
+  assert.throws(()=>service.conversationView({...scope,studioId:other.id}),/студии/iu);
+});
+
+test('conversation preview reserves the first waiting request instead of a newer draft',async t=>{
+  const service=createStudioService({dbPath:database(t),run:async()=>({text:'{"text":"Reply","outcome":"answered"}'})});
+  t.after(()=>service.close());
+  const current=studio(service);
+  const work=task(service,current.id);
+  service.setStudioRunning({studioId:current.id,action:'pause'});
+  const prior=service.postStudioMessage({studioId:current.id,taskId:work.id,kind:'comment',text:'x'.repeat(12_000)});
+  const first=service.postStudioMessage({studioId:current.id,taskId:work.id,text:'y'.repeat(12_000)});
+  const second=service.postStudioMessage({studioId:current.id,taskId:work.id,text:'z'});
+  const view=service.conversationView({studioId:current.id,conversationId:first.conversationId,draftText:'another draft'});
+  assert.equal(view.mode,'queued');
+  assert.deepEqual(view.context.map(row=>row.id),[prior.id,first.id]);
+  assert.deepEqual(view.queued.map(row=>row.id),[second.id]);
+  assert.equal(view.historyCount,0);
+});
+
+test('a queued request cannot disappear when later task comments fill its context',async t=>{
+  const started=Promise.withResolvers();
+  const finish=Promise.withResolvers();
+  const service=createStudioService({dbPath:database(t),run:async request=>{
+    started.resolve(JSON.parse(request.prompt.split('\n\n').at(-1)));
+    await finish.promise;
+    return {text:'{"text":"Reply","outcome":"answered"}'};
+  }});
+  t.after(()=>{finish.resolve();return service.close();});
+  const current=studio(service),work=task(service,current.id);
+  service.setStudioRunning({studioId:current.id,action:'pause'});
+  const first=service.postStudioMessage({studioId:current.id,taskId:work.id,text:'Do not lose this request'});
+  const comments=Array.from({length:25},(_,i)=>service.postStudioMessage({studioId:current.id,taskId:work.id,kind:'comment',text:`Comment ${i}`}));
+  const scope={studioId:current.id,conversationId:first.conversationId};
+  const view=service.conversationView(scope);
+  assert.equal(view.context.length,24);
+  assert.deepEqual(view.context.map(row=>row.id),[first.id,...comments.slice(-23).map(row=>row.id)]);
+  assert.deepEqual(view.following.map(row=>row.id),comments.slice(0,2).map(row=>row.id));
+  assert.deepEqual(view.queued,[]);
+  service.setStudioRunning({studioId:current.id,action:'resume'});
+  const call=await started.promise;
+  assert.equal(call.recent[call.requestIndex].text,first.text);
+  assert.deepEqual(service.conversationView(scope).context.map(row=>row.id),view.context.map(row=>row.id));
+  finish.resolve();
+});
 test('task entry preserves criteria and rejects dependencies from another studio', async t=>{
   const service=createStudioService({dbPath:database(t)});
   t.after(()=>service.close());

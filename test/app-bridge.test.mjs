@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { createCommandRouter } from "../app/bridge.mjs";
 import { createGitWorktrees, git } from "../app/git-worktrees.mjs";
 import { createStudioService } from "../core/service.mjs";
+import * as gitReport from "../app/git-worktrees.mjs";
 
 const temp = fileURLToPath(new URL("../.tmp", import.meta.url));
 
@@ -41,6 +42,21 @@ function router(service, options = {}) {
   return createCommandRouter({ service, ...options });
 }
 
+test('conversation context and history commands are available only for the selected studio',async t=>{
+  const service=createStudioService({dbPath:':memory:'});
+  t.after(()=>service.close());
+  const studio=service.createStudio({root:temp,name:'Conversation QA'});
+  const task=service.createTask({studioId:studio.id,title:'History',prompt:'Review'});
+  const message=service.postStudioMessage({studioId:studio.id,taskId:task.id,kind:'comment',text:'Saved history'});
+  const dispatch=router(service);
+  const input={studioId:studio.id,conversationId:message.conversationId};
+  const view=await dispatch('conversationView',input);
+  assert.deepEqual(view.context.map(row=>row.id),[message.id]);
+  const page=await dispatch('conversationPage',input);
+  assert.deepEqual(page.rows.map(row=>row.id),[message.id]);
+  await assert.rejects(dispatch('conversationView',{...input,studioId:'unrelated'}),/студии/iu);
+});
+
 test("routes explicit service commands and hides lifecycle internals", async () => {
   let closed = false;
   const dispatch = router({
@@ -56,9 +72,40 @@ test("routes explicit service commands and hides lifecycle internals", async () 
   assert.equal(closed, false);
 });
 
+test('report links can open a web URL or a safe path in the resolved studio', async () => {
+  const calls = [];
+  const dispatch = router({ snapshot: () => ({ studios: [{ id: 'live', root: temp }] }) }, {
+    openExternal: url => calls.push(url),
+    openArtifact: file => calls.push(file),
+  });
+  await dispatch('openReportLink', { destination: 'https://example.org/a?b=2' });
+  await dispatch('openReportLink', { studioId: 'live', destination: './docs/family%20tree.md#chapter' });
+  assert.deepEqual(calls, ['https://example.org/a?b=2', { root: temp, path: 'docs/family tree.md' }]);
+  for (const destination of ['javascript:alert(1)', 'file:///tmp/record.md', '%2e%2e/record.md', '.hearth/state/a.txt', '//example.org/a.md', 'https://hidden@example.org/a']) {
+    await assert.rejects(dispatch('openReportLink', { studioId: 'live', destination }), /ссылк/iu);
+  }
+  await assert.rejects(dispatch('openReportLink', { studioId: 'other', destination: 'family.md' }), /студи/iu);
+  assert.equal(calls.length, 2);
+});
+
+test('a Git report resolves the reviewed blob even when the checkout has a newer file', async t => {
+  const root=await mkdtemp(join(await realpath(tmpdir()),'hearth-report-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await git(root,['init','--initial-branch=main']);
+  await writeFile(join(root,'family notes.md'),'Reviewed text\n');
+  await symlink('family notes.md',join(root,'alias.md'));
+  await git(root,['add','--','family notes.md','alias.md']);
+  await git(root,['-c','user.name=QA','-c','user.email=qa@hearth.invalid','commit','-qm','Reviewed']);
+  const revision=(await git(root,['rev-parse','HEAD'])).trim();
+  await writeFile(join(root,'family notes.md'),'New work in progress\n');
+  const file=await gitReport.readGitReportFile({repository:root,revision,path:'family notes.md'});
+  assert.equal(file.bytes.toString(),'Reviewed text\n');
+  assert.equal(await gitReport.readGitReportFile({repository:root,revision,path:'alias.md'}),null);
+  await assert.rejects(gitReport.readGitReportFile({repository:root,revision,path:'../family notes.md'}),/файл/iu);
+});
+
 test("checks canonical project roots before studio writes and still allows inspection", async (t) => {
-  await mkdir(temp, { recursive: true });
-  const root = await mkdtemp(join(temp, "bridge-"));
+  const root = await mkdtemp(join(await realpath(tmpdir()), "bridge-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const blocked = join(root, "protected");
   const same = join(root, "symlink");

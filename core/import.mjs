@@ -231,6 +231,19 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
         if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(row.repo) || !/^[a-f0-9]{40}$/i.test(row.commit)
           || !Number.isSafeInteger(row.stars) || row.stars < 0 || typeof row.content !== 'string' || row.content.length > 256_000
           || row.url !== `https://github.com/${row.repo}/blob/${row.commit}/${path}`) throw new Error('Некорректная закреплённая версия навыка.');
+        if(row.redistributable===true){
+          if(!['MIT','BSD-2-Clause','BSD-3-Clause','ISC','Apache-2.0','CC0-1.0','Unlicense'].includes(row.license) ||
+            typeof row.files?.['LICENSE.txt']!=='string' || !row.files['LICENSE.txt'].trim() || row.files['LICENSE.txt'].length>256_000 ||
+            Object.keys(row.files).some(key=>key!=='LICENSE.txt')) throw new Error('Некорректная лицензия закреплённого навыка.');
+        }
+        if(row.versionApprovals!==undefined)row.versionApprovals=array(row.versionApprovals,'одобрения версий навыка',100).map(value=>{
+          const approval=object(value,'одобрение версии навыка');
+          const agentIds=array(approval.agentIds,'роли обновления',100).map(id);
+          if(!agentIds.length || new Set(agentIds).size!==agentIds.length || !Number.isFinite(Date.parse(approval.approvedAt))) {
+            throw new Error('Некорректное одобрение версии навыка.');
+          }
+          return {fromSkillId:id(approval.fromSkillId),agentIds,approvedAt:approval.approvedAt};
+        });
       }
       if (table === 'inbox') {
         row.createdAt ??= date;
@@ -312,6 +325,7 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     }
     linked.add(record.id);
   }
+  const approvedSkillsByAgent = new Map(agents.map(agent=>[agent.id,new Set()]));
   for (const task of normalized.tasks) {
     if (task.kind !== 'train') continue;
     const bootstrap = task.training.bootstrap === true;
@@ -320,10 +334,30 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
       throw new Error('Некорректный маршрут обучения при импорте.');
     }
     if (task.stage === 'done') {
-      for (const id of task.training.skillIds ?? []) linkedSkills.add(id);
+      for (const id of task.training.skillIds ?? []) {
+        linkedSkills.add(id);
+        approvedSkillsByAgent.get(task.training.targetAgentId)?.add(id);
+      }
       if (task.training.knowledgeId !== undefined) linkMaterial(knowledgeById.get(task.training.knowledgeId), task, linkedKnowledge);
       for (const id of task.training.customSkillIds ?? []) linkMaterial(customSkillsById.get(id), task, linkedCustomSkills);
     }
+  }
+  const skillsById=new Map(normalized.skills.map(skill=>[skill.id,skill]));
+  let updates=normalized.skills.flatMap(skill=>(skill.versionApprovals??[]).map(approval=>({skill,approval})));
+  for(const {skill,approval} of updates){
+    const from=skillsById.get(approval.fromSkillId);
+    if(!from || from.repo.toLowerCase()!==skill.repo.toLowerCase() || from.path!==skill.path || from.commit===skill.commit ||
+      approval.agentIds.some(id=>!approvedSkillsByAgent.has(id)))throw new Error('Некорректная связь обновления навыка.');
+  }
+  while(updates.length){
+    const ready=updates.filter(({approval})=>approval.agentIds.every(agentId=>approvedSkillsByAgent.get(agentId).has(approval.fromSkillId)));
+    if(!ready.length)throw new Error('В импорте отсутствует подтверждение предыдущей версии навыка.');
+    const applied=new Set(ready);
+    for(const {skill,approval} of ready){
+      linkedSkills.add(skill.id);
+      for(const agentId of approval.agentIds)approvedSkillsByAgent.get(agentId).add(skill.id);
+    }
+    updates=updates.filter(entry=>!applied.has(entry));
   }
   if (normalized.skills.some(({ id }) => !linkedSkills.has(id))) throw new Error('В импорте отсутствует подтверждение закреплённой версии навыка.');
   if (linkedKnowledge.size !== normalized.knowledge.length || linkedCustomSkills.size !== normalized.customSkills.length) {
@@ -337,7 +371,7 @@ export function normalizeImport(payload, studioSettings, agentSettings) {
     }
     agent.trainingStatus = task.stage === 'done' ? 'ready' : 'pending';
     const approvals = normalized.tasks.filter((candidate) => candidate.kind === 'train' && candidate.stage === 'done' && candidate.training.targetAgentId === agent.id);
-    const approvedIds = new Set(approvals.flatMap(({ training }) => training.skillIds ?? []));
+    const approvedIds = approvedSkillsByAgent.get(agent.id);
     if (agent.skillIds.some((skillId) => !approvedIds.has(skillId))) throw new Error('В импорте отсутствует подтверждение выбранного навыка.');
     const lastApproved = approvals.at(-1);
     if (lastApproved) agent.trainingGuide = lastApproved.training.guide;

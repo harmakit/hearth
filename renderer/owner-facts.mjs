@@ -1,8 +1,15 @@
 export function studioActivityStatus(studio, activeAttempts, needsAttention) {
   if (studio.manualPaused || studio.lifecycle === 'paused') return 'paused';
   if (activeAttempts > 0 && ['active', 'idle'].includes(studio.lifecycle)) return 'active';
+  if (studio.quotaPause && !activeAttempts && !needsAttention && studio.lifecycle!=='error')return 'paused';
   if (['active', 'idle'].includes(studio.lifecycle)) return needsAttention ? 'error' : 'idle';
   return studio.lifecycle;
+}
+
+export function currentStudioTasks(tasks) {
+  return tasks.filter(task => task.status !== 'cancelled' && task.stage !== 'replaced' &&
+    (task.status !== 'completed' || (task.workflowManaged && task.stage !== 'done')) &&
+    (task.stage !== 'backlog' || task.sprintId || task.kind === 'train' || task.status !== 'queued'));
 }
 
 // Derive the inspector from the same published snapshot as the board.

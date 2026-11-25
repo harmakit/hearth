@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { taskFacts } from '../renderer/owner-facts.mjs';
+import { currentStudioTasks, taskFacts } from '../renderer/owner-facts.mjs';
 
 test('task details scope attempts, dependencies and provider measurements to the owning studio', () => {
   const task = { id: 't', studioId: 'a', dependencies: ['before'] };
@@ -22,6 +22,18 @@ test('task details scope attempts, dependencies and provider measurements to the
   assert.deepEqual(facts.after.map(t => t.id), ['after']);
   assert.equal(taskFacts(snapshot, 'b', 't'), null);
   assert.equal(taskFacts(snapshot, 'a', 'before').usage.total, null);
+});
+
+test('the overview omits unscheduled backlog cards and retains work queued inside a sprint', () => {
+  const tasks = [
+    {id:'future',status:'queued',stage:'backlog'},
+    {id:'sprint-dependency',status:'queued',stage:'backlog',sprintId:'sprint'},
+    {id:'requested',status:'scheduled',stage:'backlog'},
+    {id:'lesson',status:'queued',stage:'backlog',kind:'train'},
+    {id:'replaced',status:'queued',stage:'replaced'},
+    {id:'finished',status:'completed',stage:'done'},
+  ];
+  assert.deepEqual(currentStudioTasks(tasks).map(task=>task.id), ['sprint-dependency','requested','lesson']);
 });
 
 test('task history links only messages of this task and retains known timestamps for old attempts', () => {

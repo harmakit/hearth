@@ -112,6 +112,49 @@ test('automatic sprint training still requires an exercise and review when GitHu
   assert.equal(result.tasks.find(task => task.key === 'report').stage, 'done');
 });
 
+test('follow-up training inside an approved sprint uses a reviewed local guide if skill discovery fails', async t => {
+  const warning = 'GitHub tree response is too large';
+  const plan = structuredClone(filePlan);
+  plan.tasks.push({ ...plan.tasks[0], key: 'follow-up', title: 'Follow up', dependsOn: ['report'], artifactPath: 'reports/second.md' });
+  const writes = [];
+  const service = createStudioService({
+    dbPath: ':memory:',
+    findSkills: async () => ({ candidates: [], warnings: [warning] }),
+    writeArtifact: async ({ path }) => (writes.push(path), { path }),
+    run: async request => {
+      if (request.purpose === 'plan') return json(plan);
+      if (request.purpose === 'training-exercise' && request.prompt.includes('Improve the second report')) {
+        assert.match(request.prompt, /complete the concrete example/);
+      }
+      if (request.purpose === 'review' && request.prompt.includes('Improve the second report')) {
+        assert.match(request.prompt, /readiness check/);
+        assert.match(request.prompt, /written rehearsal does not require production files or images/);
+      }
+      if (request.purpose === 'director' && writes.length === 1) {
+        return json({ action: 'train', taskKey: 'follow-up', objective: 'Improve the second report', topics: ['editing'] });
+      }
+      if (request.purpose === 'task' && !request.prompt.startsWith('Prepare a studio agent')) {
+        const context = JSON.parse(request.prompt.split('\n\n').at(-1));
+        if (context.title === 'Follow up') return json({ summary: 'Follow-up written', artifact: '# Follow-up', artifactPath: 'reports/second.md' });
+      }
+      return fileSprintReply(request);
+    },
+  });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({ root: '/project', name: 'Follow-up skill lookup failure', wipLimit: 1, sprintReview: 'off' });
+  service.initializeStudio({ studioId });
+  const pending = await until(service.snapshot, view => view.plans[0]?.status === 'pending');
+  service.decidePlan({ planId: pending.plans[0].id, decision: 'approve' });
+  const result = await until(service.snapshot, view => view.sprints[0]?.status === 'completed' || view.training.some(task => task.status === 'failed'));
+  const training = result.training.find(task => task.training.scoped);
+  assert.equal(training.stage, 'done');
+  assert.equal(training.training.searchOutcome, 'error');
+  assert.deepEqual(training.training.warnings, [warning]);
+  assert.deepEqual(training.training.selectedSkillIds, []);
+  assert.ok(training.training.exercise && training.review);
+  assert.deepEqual(writes, ['reports/first.md', 'reports/second.md']);
+});
+
 test('a technical blocker goes to the director and the task retries with a recovery plan before asking the owner', async t => {
   let attempts=0;
   let triaged=0;
@@ -269,7 +312,8 @@ test('a manual hire is gated by coach bootstrap, trainee exercise, and Director 
     },
     run: async ({ prompt, purpose }) => {
       calls.push({ prompt, purpose });
-      if (prompt.startsWith('Prepare a studio agent')) return json({ summary: 'Prepared', selectedSkillIds: prompt.includes(candidate.id) ? [candidate.id] : [], guide: 'Review the introduction and write an outline.' });
+      if (prompt.startsWith('Prepare a studio agent')) return json({ summary: 'Prepared', selectedSkillIds: prompt.includes(candidate.id) ? [candidate.id] : [],
+        guide: 'Review the introduction and write an outline.', ...(prompt.includes(candidate.id) ? { exerciseTask: 'Use the fictional QA packet in rehearsal.' } : {}) });
       if (purpose === 'training-exercise') return json({ summary: 'Practiced with one heading and two sections.' });
       if (prompt.startsWith('Review the studio agent')) {
         if (prompt.includes(candidate.id)) {
@@ -298,6 +342,8 @@ test('a manual hire is gated by coach bootstrap, trainee exercise, and Director 
   assert.equal(calls.some(({ prompt }) => prompt.startsWith('Work on')), false);
   review.resolve();
   const snapshot = await until(() => service.snapshot(), ({ tasks }) => tasks.find(({ id }) => id === work.id).stage === 'done');
+  assert.ok(calls.some(({purpose,prompt})=>purpose==='training-exercise' && prompt.includes('Use the fictional QA packet in rehearsal.')));
+  assert.doesNotMatch(calls.find(({prompt})=>prompt.startsWith('Work on')).prompt,/fictional QA packet/u);
   assert.equal(snapshot.training.every(({ stage }) => stage === 'done'), true);
   const bootstrap = snapshot.training.find(({ training }) => training.bootstrap);
   assert.equal(bootstrap.training.exercise, 'Practiced with one heading and two sections.');
@@ -339,6 +385,83 @@ test('a manual hire is gated by coach bootstrap, trainee exercise, and Director 
   assert.equal(freshStudio.agents.length, 2);
   assert.equal(freshStudio.agents.every(({ trainingStatus, skillIds }) => trainingStatus === 'pending' && skillIds.length === 0), true);
   assert.equal(service.snapshot().training.filter(({ studioId }) => studioId === freshStudio.id).length, 2);
+});
+
+test('registered skills are checked, declined, retained offline and switched only after active attempts finish',async t=>{
+  const nextCommit='2'.repeat(40);
+  const old={...candidate,redistributable:true,files:{'LICENSE.txt':'MIT fixture license'}};
+  const newer={...old,id:'new-candidate',commit:nextCommit,url:`https://github.com/publisher/tool/blob/${nextCommit}/tool/SKILL.md`,content:'Updated instructions for outlining.'};
+  const hold=Promise.withResolvers();
+  const started=Promise.withResolvers();
+  const production=[];
+  let offline=false,checks=0;
+  let clock=new Date();
+  const dbPath=database(t);
+  const options={dbPath,now:()=>clock,
+    findSkills:async()=>({candidates:[old],warnings:[]}),
+    checkSkillVersion:async skill=>{
+      checks++;
+      if(offline)return {status:'unavailable',message:'No network'};
+      return skill.commit===nextCommit?{status:'current',observedCommit:nextCommit}:{status:'available',candidate:newer};
+    },
+    run:async({prompt,purpose})=>{
+      if(prompt.startsWith('Prepare a studio agent'))return json({summary:'Prepared',selectedSkillIds:prompt.includes(old.id)?[old.id]:[],guide:'Write an outline.'});
+      if(purpose==='training-exercise')return json({summary:'Practiced an outline.'});
+      if(prompt.startsWith('Review the studio agent'))return json({pass:true,summary:'Evidence verified'});
+      production.push(prompt);
+      if(production.length===1){started.resolve();await hold.promise;}
+      return json({summary:'Done'});
+    },
+  };
+  let service=createStudioService(options);
+  t.after(()=>{hold.resolve();return service.close();});
+  const studio=service.createStudio({root:'/project',name:'Skill updates',wipLimit:2,groomingPolicy:{enabled:false}});
+  const hire=service.addAgent({studioId:studio.id,role:'editor',name:'Writer',trainingTopics:['outline']});
+  const first=service.createTask({studioId:studio.id,agentId:hire.id,title:'First',prompt:'Work on first'});
+  service.startTask({taskId:first.id});
+  await started.promise;
+  const pinned=service.snapshot().skills[0];
+  const input={studioId:studio.id,skillId:pinned.id,commit:nextCommit};
+  await service.checkSkillVersions({studioId:studio.id,force:true});
+  assert.equal(service.snapshot().skillChecks.find(row=>row.id===pinned.id).status,'available');
+  service.decideSkillVersion({...input,decision:'decline'});
+  assert.equal(service.snapshot().skills.length,1);
+  offline=true;
+  await service.checkSkillVersions({studioId:studio.id,force:true});
+  assert.equal(service.snapshot().skillChecks.find(row=>row.id===pinned.id).status,'unavailable');
+  assert.equal(service.snapshot().skills[0].content,old.content);
+  offline=false;
+  await service.checkSkillVersions({studioId:studio.id,force:true});
+  assert.equal(service.snapshot().skillChecks.find(row=>row.id===pinned.id).status,'declined');
+  service.decideSkillVersion({...input,decision:'apply'});
+  assert.equal(service.snapshot().skillChecks.find(row=>row.id===pinned.id).status,'approved');
+  const second=service.createTask({studioId:studio.id,agentId:hire.id,title:'Second',prompt:'Work on second'});
+  service.startTask({taskId:second.id});
+  await delay(10);
+  assert.equal(production.length,1);
+  assert.match(production[0],/Pinned instructions for outlining/);
+  hold.resolve();
+  const state=await until(service.snapshot,s=>s.tasks.find(row=>row.id===second.id).stage==='done');
+  const newSkill=state.skills.find(skill=>skill.commit===nextCommit);
+  assert.equal(state.skills.find(skill=>skill.id===pinned.id).content,old.content);
+  assert.deepEqual(state.studios[0].agents.find(agent=>agent.id===hire.id).skillIds,[newSkill.id]);
+  assert.match(production[1],/Updated instructions for outlining/);
+  assert.doesNotMatch(production[1],/Pinned instructions for outlining/);
+  assert.equal(newSkill.versionApprovals[0].fromSkillId,pinned.id);
+  const bundle=makeStudioBundle(state,{studioId:studio.id,mode:'snapshot'});
+  const copied=service.importStudio(prepareBundleImport(bundle,{root:'/copy'}));
+  const copiedSkill=service.snapshot().skills.find(skill=>skill.studioId===copied.id&&skill.commit===nextCommit);
+  assert.deepEqual(copied.agents.find(agent=>agent.name==='Writer').skillIds,[copiedSkill.id]);
+  assert.equal(copiedSkill.files['LICENSE.txt'],old.files['LICENSE.txt']);
+  const malformed=structuredClone(bundle);
+  delete malformed.skills.find(skill=>skill.commit===nextCommit).versionApprovals;
+  assert.throws(()=>service.importStudio(prepareBundleImport(malformed,{root:'/broken'})),/подтверждение.*навыка/iu);
+  await service.close();
+  const previousChecks=checks;
+  clock=new Date(clock.getTime()+25*60*60*1000);
+  service=createStudioService(options);
+  await until(()=>checks,number=>number>previousChecks);
+  await until(service.snapshot,s=>s.skillChecks.some(row=>row.id===newSkill.id && row.status==='current'));
 });
 
 test('a director trains and hires in the same sprint, preserving prior dependencies and separate review', async (t) => {

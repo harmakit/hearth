@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRuntimes } from '../runtimes/index.mjs';
+import { stageCodexImages } from '../runtimes/codex-images.mjs';
 import { runtimePath, runtimeCandidates } from '../runtimes/executable.mjs';
 import { scopedCommand } from '../runtimes/scope.mjs';
 
@@ -121,7 +122,7 @@ test('explicit scope validation fails closed for unsupported access and unsafe s
   await assert.rejects(adapter().run({ ...request, projectRoot: scope.root, scope }), /исходн.*папк/i);
 });
 
-test('legacy Claude stays text-only and explicit review access uses read tools', async t => {
+test('legacy Claude has no file tools and explicit review access uses read tools', async t => {
   const scope = { ...await workScope(t), access: 'read' };
   const runtimes = adapter('scoped-read', {
     isolateCommand(command, args, { access, env }) {
@@ -193,6 +194,50 @@ test('Codex uses an ephemeral thread and returns only the active turn answer', a
   assert.ok(events.some(event => event.type === 'completed'));
 });
 
+test('Codex enables native web and records search and page attempts only from the active turn', async () => {
+  const runtimes = adapter('web');
+  assert.deepEqual((await runtimes.inspect({runtime:'codex'})).webCapabilities, {search:'available',read:'available'});
+  const {web} = await runtimes.run(request);
+  assert.equal(web.search, 'used');
+  assert.deepEqual(web.pages, [{url:'https://archive.example/record',status:'attempted'}]);
+  const blocked = adapter('web-blocked');
+  assert.deepEqual((await blocked.inspect({runtime:'codex'})).webCapabilities, {search:'unavailable',read:'unavailable'});
+  const answer = await blocked.run(request);
+  assert.equal(answer.text, 'Codex answer');
+  assert.equal(answer.web.search, 'unavailable');
+  const older = adapter('web-older');
+  assert.notEqual((await older.inspect({runtime:'codex'})).webCapabilities?.search,'available');
+  assert.notEqual((await older.run(request)).web?.search,'not-used');
+});
+
+test('Claude enables native search with each file scope and pairs fetch results with their URLs', async t => {
+  const working = await workScope(t);
+  const isolateCommand = (command, args, {env}) => ({command,args,env});
+  for (const [mode, scope] of [['web',undefined],['web-read',{...working,access:'read'}],['web-write',working]]) {
+    const {web} = await adapter(mode,{isolateCommand}).run({...request,runtime:'claude',scope});
+    assert.deepEqual(web.capabilities, {search:'available',read:'available'});
+    assert.equal(web.search, 'used');
+    assert.deepEqual(web.links, ['https://archive.example/index']);
+    assert.deepEqual(web.pages, [
+      {url:'https://archive.example/record',status:'read'},
+      {url:'https://archive.example/missing',status:'failed',reason:'HTTP 404'},
+      {url:'https://archive.example/redirect',status:'attempted'},
+    ]);
+  }
+  const {web} = await adapter('web-blocked').run({...request,runtime:'claude'});
+  assert.deepEqual(web.capabilities, {search:'unavailable',read:'available'});
+  assert.equal(web.search, 'unavailable');
+  const unfinished = await adapter('web-unfinished').run({...request,runtime:'claude'});
+  assert.equal(unfinished.web.search, 'attempted');
+});
+
+test('local continuation can omit web tools without changing the file scope', async () => {
+  for (const runtime of ['codex','claude']) {
+    const result = await adapter('local-only').run({...request,runtime,webEnabled:false});
+    assert.match(result.text,/answer$/);
+  }
+});
+
 test('Codex sends no prompt and does not retry if ephemeral mode is unconfirmed', async t => {
   const scratch = join(projectRoot, '.tmp');
   await mkdir(scratch, { recursive: true });
@@ -213,7 +258,7 @@ test('Codex rejects a previously persisted native session handle', async () => {
   await assert.rejects(adapter().run({ ...request, sessionId }), /сохранённ.*сесси/i);
 });
 
-test('Claude receives the prompt on stdin and resumes explicitly with tools disabled', async () => {
+test('Claude receives the prompt on stdin and resumes explicitly without file tools', async () => {
   const runtimes = adapter();
   const result = await runtimes.run({ ...request, runtime: 'claude' });
   assert.equal(result.text, 'Claude answer');
@@ -241,7 +286,8 @@ test('inspect reports local availability, authentication and the native Codex ca
   const runtimes = adapter();
   assert.deepEqual(await runtimes.inspect({ runtime: 'codex' }), {
     runtime: 'codex', available: true, version: '0.169.0', authenticated: true,
-    models: [{ id: 'fixture-model', name: 'Fixture model', efforts: ['high'] }]
+    models: [{ id: 'fixture-model', name: 'Fixture model', efforts: ['high'] }],
+    weeklyQuota:{status:'known',remainingPercent:73,resetAt:new Date(2000100000*1000).toISOString()},
   });
   assert.deepEqual(await runtimes.inspect({ runtime: 'claude' }), {
     runtime: 'claude', available: true, version: '2.1.326', authenticated: false
@@ -253,6 +299,14 @@ test('inspect reports local availability, authentication and the native Codex ca
   assert.match(old.detail, /0\.169\.0/);
 });
 
+test('a Codex weekly account notification reaches the scheduler without waiting for turn completion',async()=>{
+  const events=[];
+  await adapter('quota-notification').run({...request,onEvent:event=>events.push(event)});
+  const quota=events.find(event=>event.type==='weekly-quota');
+  assert.equal(quota.weeklyQuota.remainingPercent,5);
+  assert.ok(events.indexOf(quota)<events.findIndex(event=>event.type==='completed'));
+});
+
 test('invalid controls, empty final answers, and terminal errors surface as failures', async () => {
   await assert.rejects(adapter().run({ ...request, runtime: 'claude', effort: 'ultra' }), /усили/i);
   await assert.rejects(adapter('wrong-sandbox').run(request), /изол|профил/i);
@@ -261,6 +315,49 @@ test('invalid controls, empty final answers, and terminal errors surface as fail
     await assert.rejects(adapter('failure').run({ ...request, runtime }), /fixture failure/);
     await assert.rejects(adapter('timeout', { timeoutMs: 500 }).run({ ...request, runtime }), /время/i);
   }
+});
+
+test('normal provider work may outlast the former four-minute deadline', async t => {
+  const schedule = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => schedule(callback, ms === 240_000 ? 120 : ms, ...args));
+  for (const runtime of ['codex', 'claude']) {
+    const result = await adapter('slow-answer', { timeoutMs: undefined }).run({ ...request, runtime });
+    assert.match(result.text, /answer$/u);
+  }
+});
+
+test('approved artwork in a Git task imports only images generated by its own Codex turn', {skip:process.platform!=='darwin'}, async t => {
+  const scope=await workScope(t);
+  const result=await adapter('image-write').run({ ...request, scope,
+    imageOutputDirectory:'generated-images/qa-artwork' });
+  assert.deepEqual(result.generatedImages,['generated-images/qa-artwork/image-01.png']);
+  const bytes=await readFile(join(scope.root,result.generatedImages[0]));
+  assert.equal(bytes.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+});
+
+test('a portrait revision replaces only the requested slot without publishing earlier drafts twice', async t => {
+  const scope = await workScope(t);
+  const outputDirectory = 'generated-images/qa-artwork';
+  const folder = join(scope.root, outputDirectory);
+  await mkdir(folder, { recursive: true });
+  await writeFile(join(folder, 'image-01.png'), 'first portrait');
+  await writeFile(join(folder, 'image-03.png'), 'earlier portrait');
+  await writeFile(join(folder, 'image-03-cafebabe12345678.png'), 'previous draft');
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aLmgAAAAASUVORK5CYII=', 'base64');
+  const input = { root: scope.root, outputDirectory, options: { env: {} }, items: [{ result: bytes.toString('base64') }] };
+  await assert.rejects(stageCodexImages({ ...input, slots: [7, 7] }), /номер/u);
+  assert.deepEqual(await stageCodexImages({ ...input, slots: [3] }), [`${outputDirectory}/image-03.png`]);
+  assert.deepEqual((await readdir(folder)).sort(), ['image-01.png', 'image-03.png']);
+  assert.equal(await readFile(join(folder, 'image-01.png'), 'utf8'), 'first portrait');
+  assert.deepEqual(await readFile(join(folder, 'image-03.png')), bytes);
+});
+
+test('parallel image calls are assigned their declared slots in invocation order', {skip:process.platform!=='darwin'}, async t => {
+  const scope = await workScope(t);
+  const result = await adapter('image-order').run({ ...request, scope, imageOutputDirectory: 'generated-images/qa-artwork' });
+  assert.deepEqual(result.generatedImages, ['generated-images/qa-artwork/image-03.png', 'generated-images/qa-artwork/image-02.png']);
+  assert.notEqual((await readFile(join(scope.root, result.generatedImages[0]))).subarray(-6).toString(), 'second');
+  assert.equal((await readFile(join(scope.root, result.generatedImages[1]))).subarray(-6).toString(), 'second');
 });
 
 test('Codex sends turn/interrupt on cancellation and reports AbortError', async () => {

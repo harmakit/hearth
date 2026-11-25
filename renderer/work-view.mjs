@@ -276,7 +276,7 @@ function artifactsView(tasks, plans, evidence, studio, sprints) {
   const attrs=(key,at)=>`data-file-key="${safe(key.filter(Boolean).join(' '))}" data-file-date="${safe(at?.slice(0,10))}"`;
   const fileButtons=(id,path,isPlan)=>['revealArtifact','copyArtifactPath'].map((cmd,i)=>
     `<button type="button" class="text-button" data-file-action="${cmd}" data-file-source="${isPlan?'plan':'task'}" data-file-id="${safe(id)}" data-file-path="${safe(path)}">${uiCopy(i ? 'Копировать путь' : 'Показать в папке')}</button>`).join(' ');
-  const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary);
+  const taskResults = tasks.filter(task => task.artifactPath || task.artifact || task.summary || task.gitDelivery?.artifactPaths?.length);
   const planResults = plans.map(plan => ({ plan, paths: [...new Set(publishedPaths(plan))] }))
     .filter(({ paths }) => paths.length);
   if (!taskResults.length && !planResults.length && !evidence.length) {
@@ -288,11 +288,12 @@ function artifactsView(tasks, plans, evidence, studio, sprints) {
     ${evidence.map(e=>`<div ${attrs([e.sourcePath,e.kind,...info(tasks.find(t=>t.id===e.taskId))],e.recordedAt)}>${renderEvidence([e])}</div>`).join('')}
     ${taskResults.length ? uiCopy`<section class="work-record">
       <h2>Результаты задач</h2>
-      <ul class="work-links">${taskResults.map(task => `<li ${attrs([...info(task),task.artifactPath,...(task.artifactVersions??[])],task.updatedAt)}>
+      <ul class="work-links">${taskResults.map(task => `<li data-report-task="${safe(task.id)}" ${attrs([...info(task),task.artifactPath,...(task.artifactVersions??[]),...(task.gitDelivery?.artifactPaths??[])],task.updatedAt)}>
         ${taskLink(task, false)} <small>${safe(info(task).slice(2).join(" · "))} ${safe(task.updatedAt?.slice(0,10))}</small>
         ${task.artifactPath ? `<button type="button" class="text-button work-file-link" data-artifact="${safe(task.id)}">${safe(task.artifactPath)}</button>` : uiCopy('<span class="work-muted">Отчёт</span>')}
         ${task.artifactPath ? fileButtons(task.id,task.artifactPath,false) : ''}
         ${(task.artifactVersions??[]).filter(p=>p!==task.artifactPath).map(p=>`<div><button type="button" class="text-button" data-file-action="openArtifact" data-file-source="task" data-file-id="${safe(task.id)}" data-file-path="${safe(p)}">${safe(p)}</button> ${fileButtons(task.id,p,false)}</div>`).join('')}
+        ${(task.gitDelivery?.artifactPaths??[]).map(path=>`<div><button type="button" class="text-button work-file-link" data-report-link="${safe(encodeURI(path))}">${safe(path)}</button></div>`).join('')}
       </li>`).join('')}</ul>
     </section>` : ''}
     ${planResults.length ? uiCopy`<section class="work-record">

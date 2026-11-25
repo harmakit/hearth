@@ -53,7 +53,22 @@ const sourcesLabel = ['Найти другие источники','Find alterna
 const alternativeLabel = ['Попробовать другой способ','Try another approach','Intentar otro método','Essayer une autre méthode','尝试其他办法'];
 
 export function continueFromInbox(text) {
-  return [...useAvailable,...findSources,...findAnotherWay].map(normalized).includes(normalized(text));
+  return [...useAvailable,...findAnotherWay].map(normalized).includes(normalized(text));
+}
+
+const sourceWords = /источник|ссылк|dns|404|\b(?:sources?|web|websites?|archives?|fuentes?)\b|来源|资料/iu;
+const localOnly = /(?:не (?:ищи(?:те)?|поищи(?:те)?|используй(?:те)? (?:веб|интернет))|только (?:по|в) материалах студии|(?:do not|don’t|don't) (?:search|browse|use the web)|only (?:in|with|from) (?:the )?studio materials|no busques en internet|ne cherche pas sur le web|不要在网上搜索)(?:\s|[.,!?:。！]|$)/iu;
+
+export function ownerSourceDirective(text) {
+  const value = normalized(text);
+  if (continueFromInbox(text) || localOnly.test(value)) return 'local';
+  if (findSources.map(normalized).includes(value)) return 'search';
+  if (/^(?:(?:пожалуйста|please)[, ]+)?(?:найди(?:те)?|поищи(?:те)?|ищи(?:те)?|search|find|look for|busca|cherche|寻找|搜索)(?:\s|(?=[\p{Script=Han}]))/iu.test(value) &&
+      (sourceWords.test(value) || /интернет|онлайн|архив|en ligne/iu.test(value))) return 'search';
+}
+
+export function ownerKeepsSourceQuestionOpen(text) {
+  return /оставь (?:этот )?вопрос открытым|не (?:закрывай (?:вопрос|входящее)|продолжай задачу)|keep (?:the |this )?question open|(?:do not|don’t|don't) (?:close the question|resume the task)|deja la pregunta abierta|laisse la question ouverte|(?:保留|先别关闭)(?:这个)?问题/iu.test(normalized(text));
 }
 
 export function inboxSuggestions(value) {
@@ -73,17 +88,80 @@ const defaults = {
   retry: ['Повтори шаг, если это безопасно.', 'Retry the step if it is safe.', 'Reintenta el paso si es seguro.', 'Relance l’étape si elle peut l’être sans risque.', '重试此步骤（如果安全）。'],
 };
 
-export function directorInboxSuggestions(item, locale, { branch, retry } = {}) {
+const reconciliationDetails = {
+  active: 'Hearth ждёт завершения прежнего запуска. После этого здесь появятся доступные действия.',
+  exit: 'Завершение прежнего процесса не подтверждено. Проверьте процесс и сохранившиеся изменения, затем выберите действие.',
+  work: 'Шаг прервался. Проверьте сохранённые изменения, затем повторите шаг или оставьте его прерванным.',
+  ready: 'Прежний запуск завершён. Можно повторить шаг или оставить его прерванным.',
+  missing: 'Запись прежнего запуска недоступна. Откройте задачу, чтобы посмотреть её историю.',
+};
+const reconciliationChecks = {
+  exit: ['Я проверил завершение прежнего процесса и сохранённые изменения.', 'I verified that the previous process exited and checked the saved changes.',
+    'Confirmé que terminó el proceso anterior y revisé los cambios guardados.', 'J’ai vérifié que le processus précédent est terminé et contrôlé les modifications enregistrées.', '我已确认先前的进程已退出，并检查了保存的更改。'],
+  work: ['Я проверил сохранённые изменения.', 'I checked the saved changes.', 'Revisé los cambios guardados.', 'J’ai contrôlé les modifications enregistrées.', '我已检查保存的更改。'],
+};
+const reconciliationActions = {
+  retry: {
+    labels:['Повторить шаг','Retry the step','Reintentar el paso','Relancer l’étape','重试步骤'],
+    checkedLabels:['Подтвердить сверку и повторить','Confirm and retry','Confirmar y reintentar','Confirmer et relancer','确认并重试'],
+    text:defaults.retry,
+  },
+  discard: {
+    labels:['Оставить шаг прерванным','Leave step interrupted','Dejar el paso interrumpido','Laisser l’étape interrompue','保持步骤中断'],
+    text:['Оставь шаг прерванным.','Leave the step interrupted.','Deja el paso interrumpido.','Laisse l’étape interrompue.','保持步骤中断。'],
+  },
+};
+
+export function reconciliationState(attempt) {
+  if (attempt?.status !== 'reconcile') return 'missing';
+  if (attempt.processActive) return 'active';
+  if (attempt.processUnconfirmed || attempt.processUnconfirmed !== false && ['restart','lease-expired'].includes(attempt.reason)) return 'exit';
+  return attempt.reason === 'stopped' && attempt.processUnconfirmed === false ? 'ready' : 'work';
+}
+
+export function reconciliationDetail(state) {
+  return reconciliationDetails[state];
+}
+
+function reconciliationOptions(state, index) {
+  if (!['exit','work','ready'].includes(state)) return [];
+  const check = reconciliationChecks[state]?.[index];
+  return Object.entries(reconciliationActions).map(([id,{labels,checkedLabels,text}])=>({
+    id, label:(check && checkedLabels ? checkedLabels : labels)[index], text:check ? `${check} ${text[index]}` : text[index],
+  }));
+}
+
+export function reconciliationDecision(state, text) {
+  const value=normalized(text);
+  for (let index=0; index<locales.length; index++) {
+    const option=reconciliationOptions(state,index).find(option=>normalized(option.text)===value);
+    if (option) return {decision:option.id,confirmProcessExited:state==='exit'};
+  }
+  if (state==='exit' && explicitExitAndRetry(text)) return {decision:'retry',confirmProcessExited:true};
+}
+
+export function isDirectorExplanation(text) {
+  return defaults.explain.map(normalized).includes(normalized(text));
+}
+
+export function directorInboxSuggestions(item, locale, { branch, retry, reconciliation, webSearch = 'unknown', taskSummary } = {}) {
   const index=Math.max(0,locales.indexOf(locale));
+  if (item.kind==='reconcile') return [...reconciliationOptions(reconciliation,index),
+    {id:'explain',label:defaults.explain[index],text:defaults.explain[index]}];
   const out=[];
-  const append=(id, text, label=text)=>{if(text && !out.some(option=>option.text===text))out.push({id,label,text});};
+  const append=(id, text, label=text)=>{
+    if(text && !out.some(option=>option.text===text)) {
+      const intent=item.kind==='question' ? ownerSourceDirective(text) : undefined;
+      out.push({id,label,text,...(intent?{intent}:{})});
+    }
+  };
   const key=item.kind==='acceptance' && branch ? 'merge' : item.kind;
   if (approval[key]) append('approve', key==='merge'?approval.merge[index]+branch:approval[key][index]);
   const revision = {plan:'planRevision',acceptance:'reviewRevision',roster:'rejectRoster'}[item.kind];
   if (revision) append('revise', defaults[revision][index]);
   if (retry) append('retry', defaults.retry[index]);
   if (item.kind==='question' && (item.classification==='technical' || !(item.choices?.length || item.options?.length))) {
-    const sources=/источник|справк|dns|sources?|fuentes?|来源|资料/iu.test(item.body ?? '');
+    const sources = webSearch === 'available' && sourceWords.test(`${item.title ?? ''} ${item.body ?? ''} ${taskSummary ?? ''}`);
     append('alternative',sources?findSources[index]:findAnotherWay[index],sources?sourcesLabel[index]:alternativeLabel[index]);
     append('continue',useAvailable[index],continueLabel[index]);
   }
@@ -91,9 +169,8 @@ export function directorInboxSuggestions(item, locale, { branch, retry } = {}) {
   for (const [i, choice] of (Array.isArray(suggested)?suggested:[]).entries()) {
     if (out.length>=2 && item.kind!=='question') break;
     const text=choice?.answer ?? choice?.text ?? choice?.label;
-    if (typeof text==='string' && text.trim() && !out.some(option=>option.text===text)) out.push({
-      id:'suggested-'+i,label:choice.label || text,text,
-    });
+    if (webSearch !== 'available' && (ownerSourceDirective(text) === 'search' || sourcesLabel.map(normalized).includes(normalized(choice?.label)))) continue;
+    if (typeof text==='string' && text.trim()) append('suggested-'+i,text,choice.label || text);
     if(out.length===3) return out;
   }
   append('explain',defaults.explain[index]);

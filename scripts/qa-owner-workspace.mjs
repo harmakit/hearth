@@ -59,7 +59,7 @@ async function launch() {
   };
   try {
     const endpoint = await eventually(async () => {
-      if (child.exitCode !== null || child.signalCode) throw new Error('Electron exited: ' + diagnostic);
+      if (child.exitCode !== null || child.signalCode) throw new Error(`Electron exited (${child.signalCode ?? child.exitCode}): ${diagnostic}`);
       for (const base of [profile, join(profile,'chromium')]) {
         const port = parseInt(await readFile(join(base, 'DevToolsActivePort'), 'utf8').catch(() => ''), 10);
         if (!port) continue;
@@ -128,6 +128,20 @@ const shot=name=>desktop.screenshot(name);
 const choose=async(sel,value)=>{await desktop.set(sel,value);};
 async function sendDirector(option, edited) {
   const before=(await snap()).conversationMessages.filter(row=>row.directorInbox).length;
+  if (await desktop.evaluate(id=>Boolean(document.querySelector(`[data-reconcile-choice="${id}"]`)),option)) {
+    await desktop.click(`[data-reconcile-choice="${option}"]`);
+    assert.equal((await snap()).conversationMessages.filter(row=>row.directorInbox).length,before,'Selecting a decision does not apply it');
+    const check=await desktop.evaluate(()=>Boolean(document.querySelector('[data-reconciliation-check]')));
+    if (check) {
+      assert.ok(await desktop.evaluate(()=>document.querySelector('[data-reconciliation-apply]').disabled));
+      await desktop.click('[data-reconciliation-check]');
+    }
+    await desktop.click('[data-reconciliation-apply]');
+    return;
+  }
+  if (await desktop.evaluate(()=>document.querySelector('[data-reconciliation-question]')?.open===false)) {
+    await desktop.evaluate(()=>document.querySelector('[data-reconciliation-question] summary').click());
+  }
   await desktop.click(`[data-inbox-suggestion="${option}"]`);
   assert.ok(await desktop.evaluate(()=>document.activeElement.name==='directorReply' && document.activeElement.value.trim()));
   assert.equal((await snap()).conversationMessages.filter(row=>row.directorInbox).length,before,'Option only fills the editor');
@@ -313,7 +327,133 @@ async function checkInspectorMotion(taskId) {
   console.log('PASS inspector fades on first opening and retains focus through live snapshots');
 }
 
-try {
+async function checkWebSources() {
+  await appLocale('ru');
+  const project = join(run,'guys inc');
+  await mkdir(project);
+  const source=process.env.HEARTH_QA_WEB_PROJECT;
+  if (source) {
+    for (const folder of ['research','characters']) await cp(join(source,folder),join(project,folder),{recursive:true,verbatimSymlinks:true});
+  }
+  const studio=await desktop.request('createStudio',{root:project,name:'guys inc · QA'});
+  await until(state=>state.providers?.codex?.webCapabilities?.search==='available','Codex web capability');
+  const task=await desktop.request('createTask',{studioId:studio.id,title:'Сверка исторических источников',prompt:'QA-WEB-HISTORICAL. Сверь исторический источник о разделе Индии.'});
+  await desktop.request('startTask',{taskId:task.id});
+  const item=await until(state=>state.inbox.find(row=>row.taskId===task.id&&row.status==='open'),'Historical source question');
+  const open=async (resolved=false)=>{
+    await desktop.click('[data-view=workspace]');
+    await desktop.click(`[data-enter-studio="${studio.id}"]`);
+    await desktop.click('[data-view=inbox]');
+    if(resolved)await desktop.click('[data-scope=resolved]');
+    await desktop.click(`[data-inbox="${item.id}"]`);
+  };
+  await open();
+  await desktop.click('[data-inbox-suggestion=alternative]');
+  const draft=await desktop.evaluate(()=>document.activeElement.value);
+  assert.match(draft,/Найди другие источники/);
+  assert.equal((await snap()).attempts.filter(row=>row.purpose==='director-inbox').length,0);
+  await desktop.request('updateProviderPreference',{runtime:'codex',enabled:false});
+  await eventually(()=>desktop.evaluate(()=>!document.querySelector('.director-options').textContent.includes('Найти другие источники')),'Unavailable search option removed');
+  assert.deepEqual(await desktop.evaluate(()=>[document.activeElement.name,document.activeElement.value]),['directorReply',draft]);
+  await desktop.click('[data-director-send]');
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('.director-replies').textContent.includes('Веб-поиск недоступен')),'Unavailable status in history');
+  await desktop.request('updateProviderPreference',{runtime:'codex',enabled:true});
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('.director-options').textContent.includes('Найти другие источники')),'Search option restored');
+  const edited='Поищи в интернете другие источники и отдельно отметь, что ещё нужно проверить.';
+  await sendDirector('alternative',edited);
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('.director-status').textContent.includes('Директор обрабатывает ответ')),'Search active');
+  await until(state=>state.tasks.find(row=>row.id===task.id&&row.status==='completed'),'Executor consumed the search report');
+  const checkHistory=async()=>{
+    const state=await snap();
+    assert.equal(state.attempts.filter(row=>row.purpose==='director-inbox').flatMap(row=>row.calls??[]).length,1);
+    const report=state.conversationMessages.find(row=>row.webResearch?.status==='completed');
+    assert.ok(report);
+    assert.equal(state.conversationMessages.find(row=>row.id===report.replyTo).text,edited);
+    const history=await desktop.evaluate(()=>document.querySelector('.director-replies').textContent);
+    for(const value of ['Веб-поиск недоступен','Ссылка найдена','Страница не открылась','HTTP 404','Дата свидетельства']) assert.ok(history.includes(value),value);
+  };
+  await checkHistory();
+  assert.deepEqual(desktop.errors,[]);
+  await desktop.close();
+  desktop=await launch();
+  await open(true);
+  await checkHistory();
+  console.log('PASS web search, visible edited reply, page failure and persisted sources on a temporary project');
+}
+
+async function checkConversationContext() {
+  await appLocale('ru');
+  const project=join(run,'conversation-project');
+  await mkdir(project);
+  const studio=await desktop.request('createStudio',{root:project,name:'Беседа QA'});
+  const task=await desktop.request('createTask',{studioId:studio.id,title:'История по задаче',prompt:'QA контекст'});
+  const rows=[];
+  for(let i=1;i<=65;i++)rows.push(await desktop.request('postStudioMessage',{
+    studioId:studio.id,taskId:task.id,kind:'comment',text:`QA message ${i}. `+'a'.repeat(i>=64?6980:250),
+  }));
+  const scope={studioId:studio.id,conversationId:rows[0].conversationId};
+  const open=async()=>{
+    await desktop.click('[data-view="workspace"]');
+    await desktop.click(`[data-enter-studio="${studio.id}"]`);
+    await desktop.click('[data-view="overview"]');
+    await desktop.click('[data-open="messages"]');
+    await desktop.click(`[data-conversation="${scope.conversationId}"]`);
+  };
+  const ids=selector=>desktop.evaluate(s=>[...document.querySelectorAll(s+' [data-conversation-message]')].map(node=>node.dataset.conversationMessage),selector);
+  const waitContext=async(label,draftText='')=>{
+    const expected=await desktop.request('conversationView',{...scope,draftText});
+    await eventually(async()=>JSON.stringify(await ids('[data-context-messages]'))===JSON.stringify(expected.context.map(row=>row.id)),label);
+    return expected;
+  };
+  await open();
+  const initial=await waitContext('Initial context');
+  assert.equal(initial.context.length,24);
+  assert.equal(initial.historyCount,41);
+  assert.ok(await desktop.evaluate(()=>!document.querySelector('[data-conversation-history]').open));
+  assert.equal((await ids('[data-conversation-page]')).length,0);
+  await desktop.set('[name=text]','x'.repeat(12000));
+  const long=await waitContext('Draft reduces context','x'.repeat(12000));
+  assert.ok(long.context.length<initial.context.length);
+  await desktop.set('[name=text]','');
+  await waitContext('Draft cleared');
+  await desktop.evaluate(()=>{const summary=document.querySelector('[data-conversation-history] summary');summary.focus();});
+  await desktop.rpc('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+  await desktop.rpc('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+  await eventually(async()=>(await ids('[data-conversation-page]')).length===20,'First history page');
+  await desktop.click('[data-conversation-older]');
+  await eventually(async()=>(await ids('[data-conversation-page]')).length===40,'Second history page');
+  await desktop.click('[data-conversation-older]');
+  await eventually(async()=>(await ids('[data-conversation-page]')).length===41,'Third history page');
+  assert.deepEqual(await ids('[data-conversation-page]'),rows.slice(0,41).map(row=>row.id));
+  await desktop.set('[name=text]','QA-CONVERSATION-LIVE');
+  await desktop.click('#dialog-actions button[type=submit]');
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('[data-context-heading]').textContent==='Контекст текущего ответа'),'Active reply context');
+  await desktop.set('[name=text]','Сохранить этот черновик');
+  const anchor=rows[25].id;
+  const before=await desktop.evaluate(id=>{
+    const editor=document.querySelector('[name=text]');editor.focus();
+    const node=[...document.querySelectorAll('[data-conversation-message]')].find(row=>row.dataset.conversationMessage===id);
+    node.scrollIntoView({block:'start'});
+    return node.getBoundingClientRect().top;
+  },anchor);
+  await until(state=>state.conversationMessages.some(row=>row.author==='director'&&row.text.includes('QA-CONVERSATION-LIVE')),'Reply arrives');
+  await eventually(()=>desktop.evaluate(()=>document.querySelector('[data-context-heading]').textContent==='Контекст следующего ответа'),'Context becomes future');
+  assert.deepEqual(await desktop.evaluate(()=>[document.querySelector('[data-conversation-history]').open,document.activeElement.name,document.activeElement.value]),[true,'text','Сохранить этот черновик']);
+  const after=await desktop.evaluate(id=>[...document.querySelectorAll('[data-conversation-message]')].find(row=>row.dataset.conversationMessage===id).getBoundingClientRect().top,anchor);
+  assert.ok(Math.abs(after-before)<3,`Scroll anchor moved from ${before} to ${after}`);
+  await desktop.screenshot('conversation-context');
+  assert.deepEqual(desktop.errors,[]);
+  await desktop.close();
+  desktop=await launch();
+  await open();
+  await waitContext('Persisted context after restart');
+  assert.ok(await desktop.evaluate(()=>!document.querySelector('[data-conversation-history]').open));
+  console.log('PASS conversation context, history pagination, draft, focus, scroll and restart in a temporary task conversation');
+}
+
+async function runQa() {
+  if (process.env.HEARTH_QA_CONVERSATION === '1') return checkConversationContext();
+  if (process.env.HEARTH_QA_WEB === '1') return checkWebSources();
   if(process.env.HEARTH_QA_LOCALE){
     await appLocale(process.env.HEARTH_QA_LOCALE);
     await desktop.click('[data-view="workspace"]');
@@ -415,7 +555,7 @@ try {
       await until(view => view.attempts.find(row => row.id === stopHold.attemptId && row.processActive && row.processUnconfirmed), 'Timeout recorded while provider is alive');
       process.kill(pid, 0);
       await desktop.click('[data-inbox="' + stopHold.id + '"]');
-      assert.equal(await desktop.evaluate(() => Boolean(document.querySelector('[data-inbox-suggestion=retry]'))), false);
+      assert.equal(await desktop.evaluate(() => Boolean(document.querySelector('[data-reconcile-choice=retry]'))), false);
       await assert.rejects(desktop.request('resolveReconciliation', { attemptId:stopHold.attemptId, decision:'retry', reason:'QA', confirmProcessExited:true }), /выполняется/);
       await shot('queue-still-stopping');
       process.kill(-pid, 'SIGKILL');
@@ -893,6 +1033,10 @@ try {
     assert.equal(await readFile(join(gitRecipeRoot,'.hearth','roles','director.md'),'utf8'),roleFiles);
     console.log('PASS clean Git clone opens its stored native roles and starts with fresh studio history');
   }
+}
+
+try {
+  await runQa();
 } catch(error) {
   if(desktop.child.exitCode===null) {
     console.error('Test UI state:',await desktop.evaluate(()=>({focus:document.activeElement?.outerHTML.slice(0,300),
