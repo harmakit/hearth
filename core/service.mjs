@@ -1134,7 +1134,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     pending.delete(studioId);
   }
 
-  function startTask({ taskId, confirmLegacy }) {
+  function startTask({ taskId, confirmLegacy }, retryAnswer) {
     let task = read('tasks', taskId, 'Задача');
     const ownerStudio=read('studios',task.studioId,'Студия');
     if (ownerStudio.archivedAt || ownerStudio.projectDetached) throw new Error('Студия в архиве или папка проекта отсоединена.');
@@ -1150,14 +1150,14 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     if (task.workflowManaged) {
       const studio = read('studios', task.studioId, 'Студия');
       if (task.status === 'interrupted' || (task.status === 'failed' && (studio.wipLimit > 1 || task.training?.bootstrap))) {
-        return workflow.retryTask(studio, task);
+        return workflow.retryTask(studio, task, retryAnswer);
       }
       if (task.kind === 'train' && task.status === 'queued' && !task.sprintId && !studio.workflowJob
         && !studio.manualPaused && !active.has(studio.id) && ['draft', 'idle', 'active'].includes(studio.lifecycle)) {
         return workflow.startStandaloneTraining(studio, task);
       }
       if (studio.workflowJob?.taskId !== task.id || !['paused', 'error'].includes(studio.lifecycle)) throw new Error('Директор управляет запуском этой задачи.');
-      return setStudioRunning({ studioId: studio.id, action: 'resume' });
+      return setStudioRunning({ studioId: studio.id, action: 'resume' }, retryAnswer);
     }
     if (!restartable.includes(task.status)) throw new Error('Задача сейчас недоступна для запуска.');
     if (manualParallel.has(taskId) || active.get(task.studioId)?.id === taskId ||
@@ -1535,7 +1535,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       }
       if (action==='retry' && !studio.manualPaused && studio.lifecycle!=='paused') {
         if (item.kind==='error' && task?.status==='failed') {
-          startTask({taskId:task.id});
+          startTask({taskId:task.id}, {inboxId:item.id, answer:message.text});
           return believe('applied','Повтор задачи поставлен в очередь.');
         }
         if (item.kind==='error' && !task && studio.lifecycle==='error' && studio.workflowJob &&
@@ -2230,7 +2230,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
     validateFixed,
   });
 
-  function setStudioRunning({ studioId, action, running }) {
+  function setStudioRunning({ studioId, action, running }, retryAnswer) {
     if (read('studios',studioId,'Студия').archivedAt) throw new Error('Сначала восстановите студию из архива.');
     if (read('studios',studioId,'Студия').projectDetached) throw new Error('Сначала подключите папку проекта.');
     action ??= running === true ? 'resume' : running === false ? 'pause' : undefined;
@@ -2261,7 +2261,7 @@ export function createStudioService({ dbPath, run: executeRuntime, inspectRuntim
       if (action === 'resume' && (studio.manualPaused || studio.importedPaused)) {
         update('studios', { ...studio, manualPaused: false, importedPaused: undefined });
       }
-      result = workflow.setStudioRunning({ studioId, action });
+      result = workflow.setStudioRunning({ studioId, action }, retryAnswer);
     }
     if (action === 'resume') wake(studioId);
     return result;

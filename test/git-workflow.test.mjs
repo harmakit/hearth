@@ -318,3 +318,38 @@ test('a later Git comparison uses delivered paths and still receives standalone 
     {revision:nextRevision,paths:['next.md']},{revision:nextRevision,paths:['next.md']},
   ]);
 });
+
+test('an owner-approved retry carries its error context to the implementer and reviewer', async t => {
+  const feedback='Перезапусти задачу сейчас. Проверка точного кандидата выполнена владельцем.';
+  let checks=0;
+  const attempts=[];
+  const reviews=[];
+  const service=createStudioService({dbPath:':memory:',
+    prepareTarget:async()=>({targetRef:'refs/heads/main'}),
+    projectPipeline:{
+      workScope:async()=>({worktreeId:'tree',scope:{root:'/work',access:'worktree-write'},release:async()=>{}}),
+      evaluate:async()=>({worktreeId:'tree',revision:{candidateOid:'candidate',digest:'digest'},
+        status:++checks===1?'checks-blocked':'review',checks:[],evidence:[]}),
+      reviewScope:async()=>({scope:{root:'/review',access:'read'},release:async()=>{}}),
+    },
+    run:async request=>{
+      const training=trainingReply(request);if(training)return training;
+      if(request.purpose==='task')attempts.push(request.prompt);
+      if(request.purpose==='review')reviews.push(request.prompt);
+      const answers={plan,task:{summary:'Result'},review:{pass:true,summary:'Reviewed'},
+        'director-inbox':{action:'retry',text:'Уточнения переданы.'}};
+      return {text:JSON.stringify(answers[request.purpose])};
+    }});
+  t.after(()=>service.close());
+  const {id:studioId}=service.createStudio({name:'Retry',root:'/project',wipLimit:2});
+  await service.configureProject({studioId,enabled:true,targetRef:'main'});
+  service.initializeStudio({studioId});
+  const draft=await until(service,state=>state.plans[0]);
+  service.decidePlan({planId:draft.id,decision:'approve'});
+  const failure=await until(service,state=>state.inbox.find(item=>item.kind==='error'&&item.status==='open'));
+  service.postDirectorInboxReply({studioId,inboxId:failure.id,version:1,operationId:'retry-check',text:feedback});
+  await until(service,state=>state.inbox.find(item=>item.kind==='acceptance'));
+  assert.equal(attempts.length,2);
+  assert.ok(attempts[1].includes(feedback));
+  assert.ok(reviews[0].includes(feedback));
+});

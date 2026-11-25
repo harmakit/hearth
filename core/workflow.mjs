@@ -437,7 +437,17 @@ export function createWorkflow({
     return changed(result);
   }
 
-  function setStudioRunning({ studioId, action, running }) {
+  function closeTaskError(item, retryAnswer) {
+    if (item.kind !== 'error' || item.status !== 'open') return;
+    update('inbox', { ...item, status: 'resolved', ...(retryAnswer?.inboxId === item.id ? {answer:retryAnswer.answer} : {}) });
+  }
+
+  function ownerDecisions(taskId) {
+    return taskInbox(taskId).filter(({kind, status, answer}) =>
+      (kind === 'question' || kind === 'error' && status === 'resolved') && answer);
+  }
+
+  function setStudioRunning({ studioId, action, running }, retryAnswer) {
     action ??= running === true ? 'resume' : running === false ? 'pause' : undefined;
     let studio = read('studios', studioId, 'Студия');
     if (!['pause', 'resume', 'stop'].includes(action)) throw new Error('Неизвестная команда студии.');
@@ -450,9 +460,7 @@ export function createWorkflow({
         const retry = studio.lifecycle === 'error' && job && !hasTaskHold(studioId, job.taskId) ? putJob(studio, job) : null;
         const next = dispatcher.jobs(studioId).find(({ status }) => status === 'queued');
         if (retry?.status === 'queued' && retry.taskId) {
-          for (const item of taskInbox(retry.taskId)) {
-            if (item.kind === 'error' && item.status === 'open') update('inbox', { ...item, status: 'resolved' });
-          }
+          for (const item of taskInbox(retry.taskId)) closeTaskError(item, retryAnswer);
         }
         if (retry?.status === 'queued' && !retry.taskId) {
           for (const item of list('studio_inbox')) {
@@ -582,7 +590,7 @@ export function createWorkflow({
           prompt = training.selectionPrompt(studio, task, sources);
           break;
         }
-        const decisions = taskInbox(task.id).filter(({ kind, answer }) => kind === 'question' && answer);
+        const decisions = ownerDecisions(task.id);
         localSourcesOnly = ownerSourceDirective(decisions.at(-1)?.answer) === 'local';
         const context = taskContext(studio, task, job.runAttemptId, decisions);
         prompt = runPrompt(studio, agent, task, decisions, {
@@ -603,8 +611,8 @@ export function createWorkflow({
       }
       case 'review': {
         const artifactLimit = 40_000;
-        const ownerClarifications = taskInbox(task.id)
-          .filter(({ kind, status, answer }) => kind === 'question' && status === 'resolved' && answer)
+        const ownerClarifications = ownerDecisions(task.id)
+          .filter(({status}) => status === 'resolved')
           .slice(-12)
           .map(({ title, answer }) => ({ question: title, answer }));
         prompt = lesson ? training.reviewPrompt(studio, task) : reviewPrompt(studio, {
@@ -791,7 +799,7 @@ export function createWorkflow({
     const operations = dispatcher.jobs(studio.id).filter((job) => job.taskId === task.id && job.operationId && job.status === 'completed');
     return {
       studioId: studio.id, taskId: task.id, attemptId, task,
-      decisions: decisions ?? taskInbox(task.id).filter(({ kind, answer }) => kind === 'question' && answer),
+      decisions: decisions ?? ownerDecisions(task.id),
       materials: task.materials ?? previous?.context.materials, operations,
       activeAttempts: dispatcher.activeAttempts(studio.id),
     };
@@ -1405,15 +1413,13 @@ export function createWorkflow({
       && latest.sprintId === task.sprintId && !jobs.some(job => ['queued', 'running', 'waiting', 'reconcile'].includes(job.status))) return latest;
   }
 
-  function retryTask(studio, task) {
+  function retryTask(studio, task, retryAnswer) {
     const interrupted = interruptedJob(task);
     if (!interrupted && (task.status !== 'failed' || hasTaskWork(studio, task.id))) throw new Error('Эта задача не ждёт повторного запуска.');
     if (studio.manualPaused || studio.lifecycle === 'paused') throw new Error('Сначала снимите студию с паузы.');
     const previous = interrupted ?? dispatcher.jobs(studio.id).findLast(job => job.taskId === task.id);
     const result = transaction(() => {
-      for (const item of taskInbox(task.id)) {
-        if (item.kind === 'error' && item.status === 'open') update('inbox', { ...item, status: 'resolved' });
-      }
+      for (const item of taskInbox(task.id)) closeTaskError(item, retryAnswer);
       const current = update('tasks', { ...task, status: 'queued', error: '', failedReviews: 0, updatedAt: now() });
       if (interrupted || previous?.status === 'failed') return schedule(studio, jobPayload(previous), 'Повтор рабочего шага');
       const { resumeTaskId, resumeSprint, returnLifecycle, returnActivity } = previous ?? {};
