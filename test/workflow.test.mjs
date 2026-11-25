@@ -6,7 +6,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createStudioService as createService } from '../core/service.mjs';
+import { planPrompt } from '../core/protocol.mjs';
 import { productionSnapshot, trainingReply } from './fixtures/training.mjs';
+
+test('planning avoids requiring evidence from a consumer before accepting its dependency', () => {
+  const prompt = planPrompt({agents:[],language:'en',brief:'Prepare a shared brief for two authors.'},{kind:'initial'});
+  assert.match(prompt,/Use dependsOn for handoffs/);
+  assert.match(prompt,/Do not require proof that a dependent task has started or used a result before accepting the prerequisite/);
+});
 
 function createStudioService({ run, ...settings }) {
   const service = createService({ ...settings, run: (request) => trainingReply(request) ?? run(request) });
@@ -69,6 +76,38 @@ function database(t) {
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   return join(folder, 'studio.sqlite');
 }
+
+test('a reviewer receives the owner’s saved clarification after a production question', async t => {
+  const calls = [];
+  let asked = false;
+  const service = createStudioService({ dbPath: ':memory:', run: async ({ purpose, prompt }) => {
+    calls.push({ purpose, prompt });
+    if (purpose === 'task' && !asked) {
+      asked = true;
+      return { text: JSON.stringify({ question: 'When is the handoff verified?', summary: 'The draft is ready.' }) };
+    }
+    const results = {
+      plan: { ...draft, tasks: [{ ...draft.tasks[0], artifactPath: undefined }] },
+      task: { summary: 'The outline is ready.' },
+      review: { pass: true, summary: 'The outline meets the clarified criteria.' },
+      director: { action: 'finish' },
+    };
+    return { text: JSON.stringify(results[purpose]) };
+  } });
+  t.after(() => service.close());
+  const { id: studioId } = service.createStudio({ name: 'Writer', root: '/project' });
+  service.initializeStudio({ studioId });
+  const { plans: [plan] } = await until(service.snapshot, ({ plans }) => plans.length > 0);
+  service.decidePlan({ planId: plan.id, decision: 'approve' });
+  const state = await until(service.snapshot, ({ inbox }) => inbox.some(item => item.kind === 'question' && item.status === 'open'));
+  const question = state.inbox.find(item => item.kind === 'question' && item.status === 'open');
+  const answer = 'Accept the outline now. Verify the handoff in the dependent task.';
+  service.answerInbox({ inboxId: question.id, answer });
+  await until(service.snapshot, ({ sprints }) => sprints[0]?.status === 'completed');
+  const review = calls.find(({ purpose }) => purpose === 'review').prompt;
+  assert.match(review, /Apply saved owner clarifications/);
+  assert.deepEqual(JSON.parse(review.split('\n\n').at(-1)).ownerClarifications, [{ question: question.title, answer }]);
+});
 
 test('initial plan recommends an allowed tuple but executes the owner’s saved fixed choice', async (t) => {
   const calls = [];

@@ -602,10 +602,15 @@ export function createWorkflow({
       }
       case 'review': {
         const artifactLimit = 40_000;
+        const ownerClarifications = taskInbox(task.id)
+          .filter(({ kind, status, answer }) => kind === 'question' && status === 'resolved' && answer)
+          .slice(-12)
+          .map(({ title, answer }) => ({ question: title, answer }));
         prompt = lesson ? training.reviewPrompt(studio, task) : reviewPrompt(studio, {
           ...task, artifact: task.artifact?.slice(0, artifactLimit),
           artifactWasTruncated: task.artifact?.length > artifactLimit,
           referenceArtifacts: referenceArtifacts(task),
+          ownerClarifications,
         }, agent, (usedTraining=trainingFor()));
         break;
       }
