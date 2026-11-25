@@ -395,6 +395,54 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
     return `refs/hearth/delivery-operations/${key}`;
   }
 
+  async function assertNoUntrackedCollisions(root, revision, diffArgs, signal) {
+    const added = (await run(root, ['diff', ...diffArgs, '--no-renames', '--diff-filter=A',
+      revision.targetOid, revision.candidateOid, '--'], { signal })).split('\0').filter(Boolean);
+    if (!added.length) return;
+    const ignoresCase = (await run(root, ['config', '--bool', '--get', 'core.ignoreCase'], { signal, allowExitCodes:[1] })).trim()==='true';
+    const roots = [...new Set(added.map(file=>file.split('/')[0]))];
+    const pathspecs = roots.map(name=>`:(top,literal${ignoresCase?',icase':''})${name}`);
+    // Include ignored files. Git can replace an ignored file in a checkout.
+    const untracked = (await run(root, ['ls-files','--others','--directory','-z','--',...pathspecs], { signal }))
+      .split('\0').filter(Boolean).map(file=>file.replace(/\/$/u,''));
+    const compare = file=>ignoresCase ? file.toLowerCase() : file;
+    const changed = added.map(compare);
+    if (untracked.map(compare).some(file=>changed.some(path=>path===file || path.startsWith(file+'/') || file.startsWith(path+'/')))) {
+      throw deliveryError('TARGET_PATH_CONFLICT', 'В папке проекта есть непринятые в Git файлы на пути доставки. Переместите их или сохраните в Git перед повтором.');
+    }
+  }
+
+  async function updateProjectCheckout(worktree, revision, retry, signal) {
+    const root = worktree.repository;
+    const head = await run(root, ['symbolic-ref', '--quiet', 'HEAD'], { signal, allowExitCodes: [1] });
+    if (head.trim() !== worktree.targetRef) {
+      throw deliveryError('TARGET_CHECKOUT_CHANGED', 'Открытая ветка проекта изменилась. Откройте исходную ветку и повторите слияние.');
+    }
+    for (const state of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']) {
+      const location = (await run(root, ['rev-parse', '--path-format=absolute', '--git-path', state], { signal })).replace(/\n$/, '');
+      if (await lstat(location).then(() => true, error => {
+        if (error.code === 'ENOENT') return false;
+        throw error;
+      })) throw deliveryError('TARGET_WORKTREE_DIRTY', 'Завершите текущую операцию Git в папке проекта перед слиянием.');
+    }
+    const diffArgs = ['--name-only', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '-z'];
+    const unstaged = await run(root, ['diff', ...diffArgs, '--'], { signal });
+    const staged = await run(root, ['diff', '--cached', ...diffArgs, revision.targetOid, '--'], { signal });
+    if (staged || unstaged) {
+      // After an interrupted ref transaction the checked-out index may already
+      // contain the whole approved tree. Other changes still belong to the owner.
+      if (retry && !unstaged && !await run(root, ['diff', '--cached', ...diffArgs, revision.candidateOid, '--'], { signal })) return;
+      throw deliveryError('TARGET_WORKTREE_DIRTY', 'В рабочей папке есть незакоммиченные изменения. Сохраните их в Git перед повтором слияния.');
+    }
+    await assertNoUntrackedCollisions(root, revision, diffArgs, signal);
+    try {
+      await run(root, ['read-tree', '-m', '-u', revision.targetOid, revision.candidateOid], { signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw deliveryError('TARGET_PATH_CONFLICT', 'Не удалось обновить файлы проекта. Проверьте конфликтующие файлы или блокировки Git перед повтором.', error);
+    }
+  }
+
   async function readOperation(repository, object, signal) {
     return JSON.parse(await run(repository, ['cat-file', 'blob', object], { signal }));
   }
@@ -442,13 +490,31 @@ export function createGitDelivery({ storageDir, git = defaultGit }) {
       'option no-deref',
       `update ${worktree.targetRef} ${revision.candidateOid} ${revision.targetOid}`,
       `create ${operationRef} ${markerOid}`,
-      'prepare',
-      'commit',
-      '',
-    ].join('\n');
+    ];
     try {
-      await withTargetCheckout(worktree, signal, () =>
-        run(repository, ['update-ref', '-m', 'Hearth Studio integration', '--stdin'], { signal, input: transaction }));
+      const targets = await registeredTargets(worktree, signal);
+      const command = ['update-ref', '-m', 'Hearth Studio integration', '--stdin'];
+      if (targets.length === 1 && targets[0].path === repository) {
+        // The ref transaction locks HEAD and the target before Git updates the
+        // root index and files. The delivery receipt commits with the target.
+        const intentRef = `refs/hearth/delivery-intents/${key}/${digest(operationId)}`;
+        const previous = await refOid(repository, intentRef, signal);
+        if (previous && previous !== markerOid) {
+          throw deliveryError('OPERATION_MISMATCH', 'This integration operation ID has a different receipt or revision');
+        }
+        if (!previous) {
+          await run(repository, ['update-ref', '--no-deref', intentRef, markerOid, '0'.repeat(markerOid.length)], { signal });
+        }
+        await run(repository, command, {
+          signal,
+          input: [...transaction, `delete ${intentRef} ${markerOid}`, 'prepare', ''].join('\n'),
+          beforeRefCommit: () => updateProjectCheckout(worktree, revision, Boolean(previous), signal),
+        });
+      } else {
+        await withTargetCheckout(worktree, signal, () => run(repository, command, {
+          signal, input: [...transaction, 'prepare', 'commit', ''].join('\n'),
+        }));
+      }
     } catch (error) {
       if (typeof error.code !== 'number') throw error;
       if (await recoverOperation()) return result;

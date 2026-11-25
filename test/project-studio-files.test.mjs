@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { createProjectStudioFiles } from '../app/project-studio-files.mjs';
+import { git } from '../app/git-worktrees.mjs';
 
 const skill={name:'chronology',description:'Use when checking a date.',instructions:'Check the source.',files:{'references/notes.md':'Notes.'}};
 const role={name:'researcher',description:'Investigates sources.',instructions:'Use evidence.',requiredSkills:['chronology']};
@@ -38,6 +39,18 @@ test('supports regular skill directories and preserves external edits on conflic
   await assert.rejects(files.publish(root,{...model,roles:[{...role,instructions:'next'}]}),/researcher\.toml/u);
   assert.equal(await readFile(changed,'utf8'),'owner edit');
   assert.match(await readFile(join(root,'.claude/agents/researcher.md'),'utf8'),/Use evidence/u);
+});
+
+test('keeps the tracked ignore file and index clean when attaching a Git project',async t=>{
+  const {root,files}=await setup(t,{useSymlinks:false});
+  await git(root,['init','--initial-branch=main']);
+  await writeFile(join(root,'.gitignore'),'personal.txt\n');
+  await git(root,['add','.gitignore']);
+  await git(root,['-c','user.name=QA','-c','user.email=qa@example.invalid','commit','-m','Initial']);
+  await files.publish(root,model);
+  assert.equal(await readFile(join(root,'.gitignore'),'utf8'),'personal.txt\n');
+  assert.equal(await git(root,['status','--porcelain','--untracked-files=no']),'');
+  assert.equal((await git(root,['check-ignore','.hearth/state/studio.sqlite3'])).trim(),'.hearth/state/studio.sqlite3');
 });
 
 test('cannot publish through an outside directory link',async t=>{

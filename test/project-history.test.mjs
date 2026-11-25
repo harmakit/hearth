@@ -39,6 +39,7 @@ test('the existing folder wizard connects Git by default and preserves a reposit
   assert.equal(await readFile(join(plainFolder,'draft.md'),'utf8'),'Original draft');
   const initialized = await request('createStudio',{name:'New repo',root:parent,newFolderName:'Book'});
   const root=initialized.root;
+  await git(root,['branch','other']);
   await writeFile(join(root,'staged.md'),'Staged text');
   await git(root,['add','staged.md']);
   await writeFile(join(root,'staged.md'),'Unstaged edit');
@@ -47,14 +48,14 @@ test('the existing folder wizard connects Git by default and preserves a reposit
   const head=await git(root,['rev-parse','HEAD']);
   const inspected=await request('inspectProjectFolder',{root});
   assert.equal(inspected.state,'existing');
-  assert.ok(inspected.branches.some(branch=>branch.ref===initialized.projectGit.targetRef && branch.checkedOut===false));
-  assert.ok(inspected.branches.some(branch=>branch.ref==='refs/heads/main' && branch.checkedOut===true));
+  assert.equal(inspected.defaultTargetRef,'refs/heads/main');
+  assert.ok(inspected.branches.some(branch=>branch.ref==='refs/heads/main' && branch.checkedOutElsewhere===false));
   const existing=await request('createStudio',{name:'Existing repo',root});
   assert.equal(existing.projectGit.enabled,true);
-  assert.notEqual(existing.projectGit.targetRef,initialized.projectGit.targetRef);
+  assert.equal(existing.projectGit.targetRef,'refs/heads/main');
   assert.equal(await git(root,['rev-parse',existing.projectGit.targetRef]),head);
-  const selected=await request('createStudio',{name:'Selected branch',root,targetRef:initialized.projectGit.targetRef});
-  assert.equal(selected.projectGit.targetRef,initialized.projectGit.targetRef);
+  const selected=await request('createStudio',{name:'Selected branch',root,targetRef:'refs/heads/other'});
+  assert.equal(selected.projectGit.targetRef,'refs/heads/other');
   assert.equal(await git(root,['status','--porcelain']),before);
   assert.equal(await git(root,['symbolic-ref','HEAD']),'refs/heads/main\n');
   assert.equal(await git(root,['rev-parse','HEAD']),head);
@@ -105,7 +106,8 @@ test('an existing unborn repository receives a delivery branch without committin
   await writeFile(join(root,'not-yet.md'),'Do not commit me');
   await git(root,['add','not-yet.md']);
   const staged=await git(root,['ls-files','--stage']);
-  const created=await dispatch('createStudio',{root,name:'Unborn repository'});
+  await assert.rejects(dispatch('createStudio',{root,name:'Unborn repository'}),/Выберите целевую ветку/u);
+  const created=await dispatch('createStudio',{root,name:'Unborn repository',targetRef:'hearth:managed'});
   assert.equal(created.projectGit.enabled,true);
   assert.equal(await git(root,['ls-tree','-r','--name-only',created.projectGit.targetRef]),'');
   assert.equal(await git(root,['ls-files','--stage']),staged);

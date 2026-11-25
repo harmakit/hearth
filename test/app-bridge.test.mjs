@@ -26,6 +26,7 @@ test("initializes Git in the stored studio folder without staging existing files
   await assert.rejects(dispatch("initializeProjectRepository",{studioId:studio.id,root:fixture}),/папка/i);
   const connected=await dispatch("initializeProjectRepository",{studioId:studio.id,root:project});
   assert.equal(connected.projectGit.enabled,true);
+  assert.equal(connected.projectGit.targetRef,'refs/heads/main');
   assert.equal(await git(project,["ls-files"]), "");
   assert.equal(await readFile(join(project,"draft.md"),"utf8"),"Owner draft\n");
   const latest=await git(project,["rev-parse","HEAD"]);
@@ -36,6 +37,34 @@ test("initializes Git in the stored studio folder without staging existing files
   const another=service.createStudio({name:"Nested project",root:nested});
   assert.equal((await dispatch("inspectProjectRepository",{studioId:another.id})).state,"nested");
   await assert.rejects(dispatch("initializeProjectRepository",{studioId:another.id,root:nested}),/репозиторий/i);
+});
+
+test('selects the primary Git branch for a new or attached studio and preserves explicit choices', async t => {
+  const fixture=await mkdtemp(join(await realpath(tmpdir()),'bridge-primary-git-'));
+  const trees=createGitWorktrees({storageDir:join(fixture,'trees'),validateRepository:root=>root.startsWith(fixture+'/')});
+  const service=createStudioService({dbPath:':memory:',prepareTarget:trees.prepareTarget,projectPipeline:{}});
+  t.after(async()=>{await service.close();await rm(fixture,{recursive:true,force:true});});
+  const dispatch=router(service);
+  const fresh=await dispatch('createStudio',{root:fixture,newFolderName:'fresh',name:'Fresh'});
+  assert.equal(fresh.projectGit.targetRef,'refs/heads/main');
+  assert.equal((await git(fresh.root,['branch','--format=%(refname)'])).trim(),'refs/heads/main');
+
+  const root=join(fixture,'existing');
+  await mkdir(root);
+  await git(root,['init','--initial-branch=master']);
+  await git(root,['-c','user.name=QA','-c','user.email=qa@example.invalid','commit','--allow-empty','-m','Initial']);
+  await git(root,['branch','main']);
+  await git(root,['branch','feature']);
+  const result=await dispatch('inspectProjectFolder',{root});
+  assert.equal(result.defaultTargetRef,'refs/heads/master');
+  assert.equal(result.branches.find(branch=>branch.ref==='refs/heads/master').checkedOutElsewhere,false);
+  assert.equal((await dispatch('createStudio',{root,name:'Existing'})).projectGit.targetRef,'refs/heads/master');
+  assert.equal((await dispatch('createStudio',{root,name:'Explicit',targetRef:'feature'})).projectGit.targetRef,'refs/heads/feature');
+  await git(root,['switch','feature']);
+  await git(root,['branch','-d','main','master']);
+  await assert.rejects(dispatch('createStudio',{root,name:'Choose'}),/Выберите целевую ветку/u);
+  assert.match((await dispatch('createStudio',{root,name:'Separate',targetRef:'hearth:managed'})).projectGit.targetRef,
+    /^refs\/heads\/hearth-studio\//u);
 });
 
 function router(service, options = {}) {

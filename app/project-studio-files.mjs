@@ -122,7 +122,8 @@ export function createProjectStudioFiles({validateRoot=realpath,useSymlinks=proc
     const {root,revision}=await inspect(directory);
     if(expectedRevision!==undefined && revision!==expectedRevision)throw new Error('Настройки студии изменились.');
     const entries=desiredFiles(input,useSymlinks);
-    if(await hasProjectGitDirectory(root)){
+    const hasGit=await hasProjectGitDirectory(root);
+    if(hasGit){
       const tracked=(await git(root,['ls-files','-z','--',...ignored.map(path=>path.slice(1))])).split('\0').filter(Boolean);
       if(tracked.length)throw new Error('Приватные файлы уже добавлены в Git: '+tracked.slice(0,6).join(', '));
     }
@@ -131,7 +132,13 @@ export function createProjectStudioFiles({validateRoot=realpath,useSymlinks=proc
     const previous=manifest?JSON.parse(manifest.text):{};
     const currentIgnore=await readEntry(root,'.gitignore');
     if(currentIgnore?.link)throw new Error('Существующий .gitignore должен быть обычным файлом.');
-    const lines=new Set(currentIgnore?.text.split(/\r?\n/u));
+    // Attaching the studio must not dirty a tracked ignore file on its target branch.
+    const trackedIgnore=hasGit && Boolean(await git(root,['ls-files','-z','--','.gitignore']));
+    const ignoreRoot=trackedIgnore?join(root,'.git'):root;
+    const ignorePath=trackedIgnore?'info/exclude':'.gitignore';
+    const localIgnore=trackedIgnore?await readEntry(ignoreRoot,ignorePath):currentIgnore;
+    if(localIgnore?.link)throw new Error('Список исключений Git должен быть обычным файлом.');
+    const lines=new Set([...(currentIgnore?.text.split(/\r?\n/u)??[]),...(localIgnore?.text.split(/\r?\n/u)??[])]);
     const additions=ignored.filter(path=>!lines.has(path));
     for(const [path,entry] of entries){
       const current=await readEntry(root,path);
@@ -144,8 +151,8 @@ export function createProjectStudioFiles({validateRoot=realpath,useSymlinks=proc
       if(!current || digest(current)!==digest(entry))await atomicWrite(root,path,entry);
     }
     if(additions.length){
-      const original=currentIgnore?.text ?? '';
-      await atomicWrite(root,'.gitignore',{text:original+(original&&!original.endsWith('\n')?'\n':'')+
+      const original=localIgnore?.text ?? '';
+      await atomicWrite(ignoreRoot,ignorePath,{text:original+(original&&!original.endsWith('\n')?'\n':'')+
         ['# Hearth Studio',...additions,''].join('\n')});
     }
     const next={...previous,...Object.fromEntries([...entries].map(([path,entry])=>[path,digest(entry)]))};

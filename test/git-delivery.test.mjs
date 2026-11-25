@@ -118,6 +118,95 @@ test('blocks a checked-out target, a changed target, and a conflicting candidate
   assert.equal(await readFile(join(f.worktree.path, 'project.txt'), 'utf8'), 'task version\n');
 });
 
+test('delivers an approved result into the clean project checkout', async (t) => {
+  const f = await fixture(t);
+  const repository = f.worktree.repository;
+  await git(repository, ['switch', 'delivery']);
+  await writeFile(join(repository, 'owner-notes.txt'), 'keep these notes\n');
+  await f.changeTask();
+  await writeFile(join(f.worktree.path, 'delivered.txt'), 'new result\n');
+  const { revision } = await f.candidate();
+  const approval = f.approval(revision);
+  const expected = { status: 'merged', targetOid: revision.candidateOid };
+  assert.deepEqual(await f.delivery.integrate(approval), expected);
+  assert.deepEqual(await f.delivery.integrate(approval), expected);
+  assert.equal(await f.readRef('HEAD'), revision.candidateOid);
+  assert.equal(await git(repository, ['status', '--porcelain', '--untracked-files=no']), '');
+  assert.equal(await readFile(join(repository, 'project.txt'), 'utf8'), 'task version\n');
+  assert.equal(await readFile(join(repository, 'delivered.txt'), 'utf8'), 'new result\n');
+  assert.equal(await readFile(join(repository, 'owner-notes.txt'), 'utf8'), 'keep these notes\n');
+  assert.equal(await f.delivery.isMerged(f.worktree), true);
+});
+
+test('preserves staged, unstaged and conflicting ignored files in the project checkout', async (t) => {
+  const f = await fixture(t);
+  const repository = f.worktree.repository;
+  await git(repository, ['switch', 'delivery']);
+  await f.changeTask();
+  await writeFile(join(f.worktree.path, 'result.txt'), 'reviewed result\n');
+  const { revision } = await f.candidate();
+  const approval = f.approval(revision);
+
+  await writeFile(join(repository, 'project.txt'), 'owner index\n');
+  await git(repository, ['add', 'project.txt']);
+  await writeFile(join(repository, 'project.txt'), 'owner worktree\n');
+  await assert.rejects(f.delivery.integrate(approval), { code: 'TARGET_WORKTREE_DIRTY' });
+  assert.equal(await git(repository, ['show', ':project.txt']), 'owner index\n');
+  assert.equal(await readFile(join(repository, 'project.txt'), 'utf8'), 'owner worktree\n');
+  assert.equal(await f.readRef('HEAD'), revision.targetOid);
+
+  await git(repository, ['restore', '--staged', '--worktree', '--', 'project.txt']);
+  await writeFile(join(repository, '.git', 'info', 'exclude'), 'result.txt\n');
+  await writeFile(join(repository, 'result.txt'), 'owner ignored result\n');
+  await assert.rejects(f.delivery.integrate(approval), { code: 'TARGET_PATH_CONFLICT' });
+  assert.equal(await readFile(join(repository, 'result.txt'), 'utf8'), 'owner ignored result\n');
+  assert.equal(await f.readRef('HEAD'), revision.targetOid);
+});
+
+test('rejects a checked-out target change before writing any reviewed files', async (t) => {
+  const f = await fixture(t);
+  const repository = f.worktree.repository;
+  await git(repository, ['switch', 'delivery']);
+  await f.changeTask();
+  const { revision } = await f.candidate();
+  const concurrentGit = async (root, args, options) => {
+    if (options?.beforeRefCommit) await git(root, ['commit', '--allow-empty', '-m', 'Owner update']);
+    return git(root, args, options);
+  };
+  const delivery = createGitDelivery({ storageDir: f.storageDir, git: concurrentGit });
+  await assert.rejects(delivery.integrate(f.approval(revision)), { code: 'TARGET_CHANGED' });
+  assert.notEqual(await f.readRef('HEAD'), revision.targetOid);
+  assert.equal(await readFile(join(repository, 'project.txt'), 'utf8'), 'original\n');
+});
+
+test('recovers a project checkout interrupted between the index update and ref commit', async (t) => {
+  const f = await fixture(t);
+  const repository = f.worktree.repository;
+  await git(repository, ['switch', 'delivery']);
+  await f.changeTask();
+  const { revision } = await f.candidate();
+  const approval = f.approval(revision);
+  const interrupted = createGitDelivery({
+    storageDir: f.storageDir,
+    git(root, args, options) {
+      if (!options?.beforeRefCommit) return git(root, args, options);
+      return git(root, args, { ...options, async beforeRefCommit() {
+        await options.beforeRefCommit();
+        throw new Error('Interrupted before ref commit');
+      } });
+    },
+  });
+  await assert.rejects(interrupted.integrate(approval), /Interrupted before ref commit/u);
+  assert.equal(await f.readRef('HEAD'), revision.targetOid);
+  assert.equal(await git(repository, ['show', ':project.txt']), 'task version\n');
+  await writeFile(join(repository, 'project.txt'), 'owner after interruption\n');
+  await assert.rejects(f.delivery.integrate(approval), { code: 'TARGET_WORKTREE_DIRTY' });
+  assert.equal(await readFile(join(repository, 'project.txt'), 'utf8'), 'owner after interruption\n');
+  await git(repository, ['restore', '--worktree', '--', 'project.txt']);
+  assert.deepEqual(await f.delivery.integrate(approval), { status: 'merged', targetOid: revision.candidateOid });
+  assert.equal(await git(repository, ['status', '--porcelain']), '');
+});
+
 test('promotes a clean divergent candidate that includes the independent target update', async (t) => {
   const f = await fixture(t);
   await f.changeTask();

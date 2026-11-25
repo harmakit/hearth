@@ -25,7 +25,7 @@ const gitConfig = [
 function runGit(repository, args, options = {}, config = []) {
   const {
     input, encoding = 'utf8', maxBuffer = 16 * 1024 * 1024,
-    timeout = 30_000, signal, allowExitCodes = [],
+    timeout = 30_000, signal, allowExitCodes = [], beforeRefCommit,
   } = options;
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   Object.assign(env, {
@@ -39,21 +39,40 @@ function runGit(repository, args, options = {}, config = []) {
   });
   const flags = [...gitConfig, ...config].flatMap(value => ['-c', value]);
   return new Promise((resolve, reject) => {
+    let prepared, preparationError;
     const child = execFile('git', ['--no-pager', '-C', repository, ...flags, ...args], {
       env, encoding, maxBuffer, timeout, signal, windowsHide: true,
     }, (error, stdout, stderr) => {
-      if (!error || allowExitCodes.includes(error.code)) {
-        resolve(stdout);
-      } else {
-        error.stdout = stdout;
-        error.stderr = stderr;
-        reject(error);
-      }
+      void Promise.resolve(prepared).then(() => {
+        if (preparationError) reject(preparationError);
+        else if (!error || allowExitCodes.includes(error.code)) resolve(stdout);
+        else {
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(error);
+        }
+      });
     });
     child.stdin.on('error', error => {
       if (error.code !== 'EPIPE') reject(error);
     });
-    child.stdin.end(input);
+    if (!beforeRefCommit) {
+      child.stdin.end(input);
+      return;
+    }
+    let response = '';
+    child.stdout.on('data', chunk => {
+      response += chunk;
+      if (prepared || !response.includes('prepare: ok\n')) return;
+      prepared = Promise.resolve().then(beforeRefCommit).then(
+        () => child.stdin.end('commit\n'),
+        error => {
+          preparationError = error;
+          child.stdin.end('abort\n');
+        },
+      );
+    });
+    child.stdin.write(input);
   });
 }
 

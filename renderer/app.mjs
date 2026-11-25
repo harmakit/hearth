@@ -1197,7 +1197,7 @@ function projectGitSettings(current, title) {
   const checks = git.profile?.checks ?? [];
   dialogTo(title,
     checkbox(copy('Разрешить Git-доставку для задач студии'), 'enabled', git.enabled) +
-    input(copy('Целевая локальная ветка'), 'targetRef', git.targetRef, copy('placeholder="Автоматически создать управляемую ветку"')) +
+    input(copy('Целевая локальная ветка'), 'targetRef', git.targetRef, 'placeholder="main / master"') +
     copy`<p>Проверки проекта — необязательные команды, например тесты или сборка. Hearth запускает их на изменениях задачи перед слиянием. Если обязательная проверка не проходит, Hearth ждёт исправления.</p>
       <p class="muted">Обязательные проверки · ${checks.filter(check=>check.required).length} / ${checks.length}</p>
       <p class="muted">Команды запускаются в рабочей копии задачи. Например, для <code>npm test</code> укажите команду <code>npm</code> и аргумент <code>test</code>.</p>
@@ -2060,10 +2060,10 @@ function newStudio() {
     step(1, select(copy('Где хранить проект?'), 'folderMode', option('new',copy('Создать новую папку с историей Git'),saved.folderMode) + option('existing',copy('Использовать существующую папку'),saved.folderMode)) +
       pathField(saved.root, {label:copy(existing?'Папка проекта':'Родительская папка')}) +
       copy`<div data-new-folder${existing?' hidden':''}>${input(copy('Имя новой папки'), 'newFolderName', saved.newFolderName, copy('maxlength="120" placeholder="Например, Рассказы"'))}
-      <p class="muted">Hearth создаст пустой проект с локальной историей и отдельной веткой доставки. Аккаунт GitHub не требуется.</p></div>
+      <p class="muted">Hearth создаст локальный репозиторий с веткой main. Принятые задачи появятся в папке проекта.</p></div>
       <div data-existing-folder${existing?'':' hidden'}>
         <p class="muted" data-git-folder-state role="status">Hearth подключит локальный Git, сохранив существующие файлы и историю.</p>
-        <div data-existing-branch hidden>${select(copy('Целевая локальная ветка'), 'targetRef', option('', copy('Создать отдельную ветку доставки')))}</div>
+        <div data-existing-branch hidden>${select(copy('Целевая локальная ветка'), 'targetRef', option('', copy('Выберите целевую ветку.')))}</div>
       </div>` +
       reportLanguageField(saved.language?{language:saved.language,languageMode:'studio'}:undefined) +
       languageField(copy('Язык материалов проекта'), 'projectLanguage', saved.projectLanguage||'', true)) +
@@ -2120,9 +2120,11 @@ async function refreshWizardRepository(choice) {
     region.dataset.repository=repository.state;
     if (repository.state==='existing') {
       message.textContent=copy('Репозиторий найден. Текущая ветка, индекс и файлы останутся без изменений.');
-      field.innerHTML=option('',copy('Создать отдельную ветку доставки'))+repository.branches.map(branch=>
-        branch.checkedOut ? `<option disabled value="${safe(branch.ref)}">${safe(branch.ref.replace(/^refs\/heads\//,''))} · ${safe(copy('Открыта в рабочей копии'))}</option>`
-          : option(branch.ref,branch.ref.replace(/^refs\/heads\//,''),previous)).join('');
+      const selected = previous || repository.defaultTargetRef;
+      field.innerHTML=option('',copy('Выберите целевую ветку.'))+repository.branches.map(branch=>
+        branch.checkedOutElsewhere ? `<option disabled value="${safe(branch.ref)}">${safe(branch.ref.replace(/^refs\/heads\//,''))} · ${safe(copy('Открыта в рабочей копии'))}</option>`
+          : option(branch.ref,branch.ref.replace(/^refs\/heads\//,''),selected)).join('')+
+        option('hearth:managed',copy('Создать отдельную ветку доставки'),selected);
       branches.hidden=false;
       saveWizardDraft();
     } else if (repository.state==='missing') {

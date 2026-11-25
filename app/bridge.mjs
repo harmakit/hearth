@@ -1,6 +1,6 @@
 import { access, lstat, mkdir, mkdtemp, realpath, rename, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { git, requireProjectGit } from "./git-worktrees.mjs";
+import { git, nativeGitPath, requireProjectGit } from "./git-worktrees.mjs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { reportLink } from "../renderer/report-link.mjs";
 
@@ -19,6 +19,8 @@ const serviceCommands = new Set([
   "updateCodeGraphPolicy",
 ]);
 const runtimeIds = new Set(["codex", "claude"]);
+const primaryBranches = ['refs/heads/main', 'refs/heads/master'];
+const separateDelivery = 'hearth:managed';
 
 export function isWithin(parent, target) {
   const distance = relative(parent, target);
@@ -87,8 +89,7 @@ async function newProjectFolder(parentPath, requestedName, protectedRoots) {
   await mkdir(root); // Exclusive creation protects pre-existing directories, even empty ones.
   try {
     await initializeHistory(root);
-    const {targetRef} = await createDeliveryBranch(root);
-    return {root,targetRef};
+    return {root,targetRef:primaryBranches[0]};
   } catch (error) {
     throw new Error('Папка создана, но подготовить Git не удалось. Откройте её как существующую: '+root+' — '+error.message);
   }
@@ -108,14 +109,23 @@ async function repositoryState(root) {
 
 async function inspectProjectFolder(root) {
   const state = await repositoryState(root);
-  const branches = state === 'existing'
-    ? (await git(root, ['for-each-ref', '--format=%(refname)%00%(if)%(worktreepath)%(then)yes%(else)no%(end)', 'refs/heads/']))
-      .trim().split('\n').filter(Boolean).map(line => {
-        const [ref, checkedOut] = line.split('\0');
-        return {ref, checkedOut: checkedOut === 'yes'};
-      }).filter(branch => !branch.ref.startsWith('refs/heads/hearth/'))
-    : [];
-  return {root,state,branches};
+  if (state !== 'existing') return {root,state,branches:[]};
+  const [refs, originHead, head] = await Promise.all([
+    git(root, ['for-each-ref', '--format=%(refname)%00%(worktreepath)%00', 'refs/heads/']),
+    git(root, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], {allowExitCodes:[1]}),
+    git(root, ['symbolic-ref', '--quiet', 'HEAD'], {allowExitCodes:[1]}),
+  ]);
+  const fields = refs.split('\0');
+  const branches = [];
+  for (let i = 0; i+1 < fields.length; i+=2) {
+    const ref = fields[i].trim();
+    const checkout = nativeGitPath(fields[i+1]);
+    if (!ref.startsWith('refs/heads/hearth/')) branches.push({ref, checkedOutElsewhere:Boolean(checkout && checkout !== root)});
+  }
+  const remoteBranch = originHead.trim().replace(/^refs\/remotes\/origin\//u, 'refs/heads/');
+  const defaultTargetRef = [remoteBranch, head.trim(), ...primaryBranches].find(ref =>
+    primaryBranches.includes(ref) && branches.some(branch=>branch.ref===ref && !branch.checkedOutElsewhere));
+  return {root,state,branches,defaultTargetRef};
 }
 
 async function prepareInitialBase(root) {
@@ -128,12 +138,6 @@ async function prepareInitialBase(root) {
   const tree = (await git(root, ['mktree'], {input:''})).trim();
   return (await git(root, ['-c','user.name=Hearth Studio','-c','user.email=studio@hearth.invalid',
     'commit-tree',tree,'-m','Initialize Hearth project history'])).trim();
-}
-
-async function createDeliveryBranch(root) {
-  const targetRef = 'refs/heads/hearth-studio/delivery';
-  await git(root, ['branch',targetRef.slice('refs/heads/'.length),'HEAD']);
-  return {targetRef};
 }
 
 async function requireStandaloneRepository(root) {
@@ -172,26 +176,34 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
   portable, protectedRoots = [] }) {
   const initializing = new Set();
   async function prepareExistingProject(root, requestedTarget) {
-    const state = await requireStandaloneRepository(root);
+    await requireStandaloneRepository(root);
+    const {state,defaultTargetRef} = await inspectProjectFolder(root);
     const selected = typeof requestedTarget === 'string' && requestedTarget.trim();
     if (state === 'missing') {
-      if (selected) throw new Error('В выбранной папке ещё нет этой ветки. Выберите управляемую ветку.');
+      if (selected) throw new Error('В выбранной папке ещё нет этой ветки.');
       await initializeExistingFolder(root);
-      return createDeliveryBranch(root);
+      return {targetRef:primaryBranches[0]};
     }
-    if (selected) return service.prepareProjectTarget({repository:root,targetRef:selected,create:false});
-    const baseRef = await prepareInitialBase(root);
-    return service.prepareProjectTarget({repository:root,targetRef:`refs/heads/hearth-studio/${randomUUID()}`,baseRef,create:true});
+    if (selected===separateDelivery) {
+      const baseRef = await prepareInitialBase(root);
+      return service.prepareProjectTarget({repository:root,targetRef:`refs/heads/hearth-studio/${randomUUID()}`,baseRef,create:true});
+    }
+    const targetRef = selected || defaultTargetRef;
+    if (!targetRef) throw new Error('Выберите целевую ветку.');
+    return service.prepareProjectTarget({repository:root,targetRef,create:false});
   }
 
   async function enableDefaultProject(studio) {
     if (studio.projectGit !== undefined || studio.projectDetached) return studio;
     try {
-      return await service.configureProject({studioId:studio.id,enabled:true}, async current => {
-        const root = await validateProjectRoot(current.root, protectedRoots);
-        const state = await requireStandaloneRepository(root);
-        if (state === 'missing') await initializeExistingFolder(root);
-        return prepareInitialBase(root);
+      const root = await validateProjectRoot(studio.root, protectedRoots);
+      await requireStandaloneRepository(root);
+      const {state,defaultTargetRef} = await inspectProjectFolder(root);
+      const targetRef = state==='missing' ? primaryBranches[0] : defaultTargetRef;
+      if (!targetRef) throw new Error('Выберите целевую ветку.');
+      return await service.configureProject({studioId:studio.id,enabled:true,targetRef}, async current => {
+        if (await validateProjectRoot(current.root, protectedRoots)!==root) throw new Error('Папка студии изменилась. Откройте настройки повторно.');
+        if (state==='missing') await initializeExistingFolder(root);
       });
     } catch (error) {
       return {...studio,gitSetupWarning:error.message};
@@ -217,7 +229,7 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       if (initializing.has(root)) throw new Error("Git-репозиторий уже создаётся.");
       initializing.add(root);
       try {
-        return await service.configureProject({ studioId: studio.id, enabled: true }, async current => {
+        return await service.configureProject({ studioId: studio.id, enabled: true, targetRef:primaryBranches[0] }, async current => {
           if (await validateProjectRoot(current.root, protectedRoots) !== root) {
             throw new Error("Папка студии изменилась. Откройте настройки повторно.");
           }
@@ -226,6 +238,14 @@ export function createCommandRouter({ service, selectFolder, inspect, previewImp
       } finally {
         initializing.delete(root);
       }
+    }
+    if (command === 'configureProject' && payload.enabled === true && !payload.targetRef?.trim()) {
+      const studio = service.snapshot().studios.find(row=>row.id===payload.studioId);
+      const root = await validateProjectRoot(studio?.root, protectedRoots);
+      const {defaultTargetRef} = await inspectProjectFolder(root);
+      const targetRef = studio.projectGit?.targetRef || defaultTargetRef;
+      if (!targetRef) throw new Error('Выберите целевую ветку.');
+      return service.configureProject({...payload,targetRef});
     }
     if (['inspectStudioFolder','openStudioFolder'].includes(command) && portable){
       const root=await validateProjectRoot(payload.root,protectedRoots);
