@@ -255,3 +255,52 @@ test('a final Git task receives transitive delivered files and the approved spri
   const capture=await until(service,()=>captures.find(row=>row.root==='/final'));
   assert.deepEqual(capture.paths,['second.md','first.md']);
 });
+
+test('a later Git comparison uses delivered paths and still receives standalone artifacts as context', async t => {
+  const gitRevision = 'a'.repeat(40);
+  const firstPlan = { ...plan, tasks: [
+    { ...plan.tasks[0], key:'outline', title:'Draft outline', deliveryMode:undefined, artifactPath:'outline.md', requiresAcceptance:false },
+    { ...plan.tasks[0], key:'tracked', title:'Deliver file', dependsOn:['outline'], requiresAcceptance:false },
+  ] };
+  const nextPlan = { ...plan, title:'Next sprint', tasks:[{ ...plan.tasks[0], key:'next', title:'Continue project', requiresAcceptance:false }] };
+  let plans = 0;
+  let directions = 0;
+  const comparisons = [];
+  const service = createStudioService({
+    dbPath:':memory:',
+    prepareTarget:async()=>({targetRef:'refs/heads/delivery'}),
+    writeArtifact:async({path})=>({path}),
+    projectPipeline:{
+      workScope:async({task})=>({worktreeId:task.id,scope:{root:'/work',access:'worktree-write'},release:async()=>{}}),
+      evaluate:async({task,worktreeId})=>({ worktreeId, status:'review',
+        revision:{candidateOid:task.key==='tracked'?gitRevision:'b'.repeat(40)},
+        artifactPaths:[task.key+'.md'], checks:[], evidence:[] }),
+      reviewScope:async()=>({scope:{root:'/candidate',access:'read'},release:async()=>{}}),
+      merge:async({task})=>({status:'merged',targetOid:task.gitDelivery.revision.candidateOid}),
+      priorDeliveryStatus:async(_root,comparison)=>{
+        comparisons.push(comparison);
+        return {status:'unchanged'};
+      },
+    },
+    run:async request=>{
+      const training = trainingReply(request);
+      if(training)return training;
+      if(request.purpose==='plan')return {text:JSON.stringify(++plans===1?firstPlan:nextPlan)};
+      if(request.purpose==='director')return {text:JSON.stringify({action:['next','nextSprint','finish'][directions++]})};
+      if(request.purpose==='review')return {text:'{"pass":true,"summary":"Checked"}'};
+      if(!request.scope)return {text:'{"summary":"Draft ready","artifact":"Standalone outline","artifactPath":"outline.md"}'};
+      if(plans===2)assert.match(request.prompt,/Standalone outline/);
+      return {text:'{"summary":"Work ready"}'};
+    },
+  });
+  t.after(()=>service.close());
+  const studio=service.createStudio({name:'Mixed delivery',root:'/project',wipLimit:1,approveSprints:true,groomingPolicy:{enabled:false}});
+  await service.configureProject({studioId:studio.id,enabled:true,targetRef:'delivery'});
+  service.initializeStudio({studioId:studio.id});
+  const first=await until(service,state=>state.plans[0]);
+  service.decidePlan({planId:first.id,decision:'approve'});
+  const next=await until(service,state=>state.plans.find(item=>item.title==='Next sprint'));
+  service.decidePlan({planId:next.id,decision:'approve'});
+  await until(service,state=>state.sprints.length===2&&state.sprints.every(sprint=>sprint.status==='completed'));
+  assert.deepEqual(comparisons,[{revision:gitRevision,paths:['tracked.md']},{revision:gitRevision,paths:['tracked.md']}]);
+});

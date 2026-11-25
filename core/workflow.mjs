@@ -832,15 +832,18 @@ export function createWorkflow({
     const previousSprint = task.sprintId && list('sprints').findLast(sprint => sprint.studioId === task.studioId && sprint.status === 'completed' && sprint.id !== task.sprintId);
     const previous = previousSprint ? list('tasks').filter(item => item.sprintId === previousSprint.id && item.stage === 'done').toReversed() : [];
     const pathsFor = items => [...new Set(items.flatMap(item => item.gitDelivery?.artifactPaths ?? (item.artifactPath ? [item.artifactPath] : [])))];
-    const previousPaths = pathsFor(previous.filter(item=>!item.packageMembers));
+    const previousResults = previous.filter(item => !item.packageMembers);
+    const previousPaths = pathsFor(previousResults);
+    const previousDeliveries = previousResults.filter(item => item.gitDelivery?.status === 'merged');
+    const previousGitPaths = pathsFor(previousDeliveries);
     const revision = previous.find(item=>item.packageRevision)?.packageRevision
-      ?? previous.filter(item=>item.gitDelivery?.status==='merged').sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]?.gitDelivery.targetOid;
+      ?? previousDeliveries.toSorted((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]?.gitDelivery.targetOid;
     const sprint = task.sprintId && list('sprints').find(item=>item.id===task.sprintId);
     const plan = sprint && list('plans').find(item=>item.id===sprint.planId);
     const sprintRows = plan && list('tasks').filter(item=>item.sprintId===sprint.id);
     return {
       paths: [...new Set([...pathsFor(dependencies),...previousPaths])],
-      ...(revision && previousPaths.length ? {prior:{revision,paths:previousPaths}} : {}),
+      ...(revision && previousGitPaths.length ? {prior:{revision,paths:previousGitPaths}} : {}),
       ...(plan ? {bindings:plan.tasks.map(({key,backlogTaskId})=>{
         const row=sprintRows.find(item=>item.key===key);
         return {key,backlogTaskId:backlogTaskId??null,taskId:row?.id,stage:row?.stage};
