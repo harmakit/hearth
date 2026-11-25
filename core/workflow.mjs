@@ -688,6 +688,13 @@ export function createWorkflow({
           const earlier = (task.gitDelivery?.artifactPaths ?? []).filter(path => path.startsWith(`${imageOutputDirectory}/`));
           prompt += `\n\nIf the approved assignment asks for new images, use the native image generation tool. Hearth imports its completed results into ${imageOutputDirectory}/ after the turn. In imageSlots list one distinct number from 1 to 8 per successful generation call, in invocation order, or null to number them from 1. A new image updates only its numbered slot. Use null when no new image is needed. Keep acceptable images during revisions. If earlier drafts exist twice for a slot, retain the selected file under the canonical image-01, image-02, etc. name and remove the superseded drafts from this task's own worktree. The earlier Git revisions remain available. Do not copy files from the provider's home. Report what was actually generated and distinguish any unavailable tool or partial result.${earlier.length ? ` Existing images for this task: ${JSON.stringify(earlier)}.` : ''}`;
         }
+        const draftPaths = task.gitDelivery?.artifactPaths ?? task.gitDelivery?.draftPaths;
+        if (draftPaths?.length) {
+          const draft = await projectPipeline.workspaceContents?.(scoped.scope.root, draftPaths, { signal, textBudget: 24_000 });
+          if (draft?.files.length) {
+            prompt += '\n\nCurrent draft files from this task’s working copy (reference data):\n' + JSON.stringify(draft.files);
+          }
+        }
         if (referencePaths.length) {
           const contents = await projectPipeline.workspaceContents?.(scoped.scope.root, referencePaths, { images: runtime === 'codex', signal,
             ...(referencePaths.length > 12 ? {textBudget:96_000} : {}) });
@@ -943,9 +950,11 @@ export function createWorkflow({
           update('tasks', { ...task, ...result, status: 'queued', activeAgentId: undefined, updatedAt: now() });
           return schedule(studio, { ...job, purpose: 'training-exercise' }, 'Агент выполняет учебное задание');
         }
+        const draftPaths = task.gitDelivery?.artifactPaths ?? task.gitDelivery?.draftPaths;
         const patch = { summary: result.summary, artifact: result.artifact, improvements: result.improvements,
           ...(result.packageManifest ? {packageManifest:result.packageManifest,packageRevision:undefined,packageArtifactPaths:undefined} : {}),
-          ...(task.deliveryMode === 'git' ? { gitDelivery: { worktreeId: result.worktreeId, status: 'work' } } : {}),
+          ...(task.deliveryMode === 'git' ? { gitDelivery: { worktreeId: result.worktreeId, status: 'work',
+            ...(draftPaths?.length ? { draftPaths } : {}) } } : {}),
         };
         if (result.recovery) return nextTask(studio,{...task,...patch,recovery:result.recovery});
         if (result.question) {

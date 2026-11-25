@@ -53,7 +53,12 @@ const sourcesLabel = ['Найти другие источники','Find alterna
 const alternativeLabel = ['Попробовать другой способ','Try another approach','Intentar otro método','Essayer une autre méthode','尝试其他办法'];
 
 export function continueFromInbox(text) {
-  return [...useAvailable,...findAnotherWay].map(normalized).includes(normalized(text));
+  if (ownerKeepsSourceQuestionOpen(text)) return false;
+  const reply = normalized(text);
+  return [...useAvailable, ...findAnotherWay].some(option => {
+    const choice = normalized(option);
+    return reply === choice || reply.startsWith(choice + '. ') || reply.startsWith(choice + '。');
+  });
 }
 
 const sourceWords = /источник|ссылк|dns|404|\b(?:sources?|web|websites?|archives?|fuentes?)\b|来源|资料/iu;

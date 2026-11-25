@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { createStudioService } from '../core/service.mjs';
-import { directorInboxSuggestions, explicitInboxApproval, ownerSourceDirective, reconciliationDecision, reconciliationState } from '../core/director-inbox.mjs';
+import { continueFromInbox, directorInboxSuggestions, explicitInboxApproval, ownerSourceDirective, reconciliationDecision, reconciliationState } from '../core/director-inbox.mjs';
 import { summarizeWebResearch } from '../core/web-research.mjs';
 import { trainingReply } from './fixtures/training.mjs';
 
@@ -22,6 +22,16 @@ test('polite search requests and denied source options are recognized consistent
   const item={kind:'question',title:'Источник не открылся',choices:[{label:'Разрешить поиск',answer}]};
   assert.equal(directorInboxSuggestions(item,'ru',{webSearch:'available'})[0].intent,'search');
   assert.ok(!directorInboxSuggestions(item,'ru',{webSearch:'unavailable'}).some(option=>option.text===answer));
+});
+
+test('an owner can add context to a selected continue reply without losing the action', () => {
+  const item = { kind: 'question', title: 'Which draft?', classification: 'technical' };
+  const choice = directorInboxSuggestions(item, 'ru').find(option => option.id === 'continue');
+  const reply = choice.text + ' Уточни в этой версии происхождение дощечки.';
+  assert.equal(continueFromInbox(reply), true);
+  assert.equal(ownerSourceDirective(reply), 'local');
+  assert.equal(continueFromInbox(choice.text + ' Но оставь вопрос открытым.'), false);
+  assert.equal(continueFromInbox('Поясни фразу «' + choice.text + '»'), false);
 });
 
 test('a recorded page-opening attempt remains visible when its URL was also found in search', () => {

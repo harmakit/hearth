@@ -163,6 +163,11 @@ test('a rejected sprint package reopens a member and reviews the new integrated 
       workScope: async () => ({ worktreeId: 'tree', scope: { root: '/work', access: 'worktree-write' }, release: async () => {} }),
       evaluate: async () => ({ worktreeId: 'tree', revision: {candidateOid:revisions[evaluations++]}, artifactPaths: ['character.md'], status: 'review', checks, evidence: [] }),
       reviewScope: async () => ({ scope: {root:'/candidate',access:'read'}, release: async () => {} }),
+      workspaceContents: async (root, paths) => {
+        assert.equal(root,'/work');
+        assert.deepEqual(paths,['character.md']);
+        return { files:[{path:'character.md',text:'Current working draft with the previous date.'}] };
+      },
       merge: async ({task}) => ({status:'merged',targetOid:task.gitDelivery.revision.candidateOid}),
       packageReviewScope: async ({members,referencePaths}) => {
         assembled = members;
@@ -173,6 +178,10 @@ test('a rejected sprint package reopens a member and reviews the new integrated 
     run: async request => {
       const training=trainingReply(request); if(training)return training;
       if(request.purpose==='plan')return {text:JSON.stringify({...plan,tasks:[{...plan.tasks[0],requiresAcceptance:false}]})};
+      if(request.purpose==='task' && evaluations===1) {
+        assert.match(request.prompt,/Current draft files from this task’s working copy/);
+        assert.match(request.prompt,/Current working draft with the previous date/);
+      }
       if(request.purpose==='review' && request.prompt.startsWith('Review the assembled sprint package')) {
         assert.equal(request.scope.root,'/delivered');
         assert.match(request.prompt,/character\.md/);
