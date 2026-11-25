@@ -353,3 +353,48 @@ test('an owner-approved retry carries its error context to the implementer and r
   assert.ok(attempts[1].includes(feedback));
   assert.ok(reviews[0].includes(feedback));
 });
+
+test('a text follow-up and its reviewer read an integrated Git dependency instead of the project checkout', async t => {
+  const revision={candidateOid:'accepted',digest:'digest'};
+  const scopedCalls=[];
+  const report={key:'report',title:'Проверить итог',prompt:'Проверить готовый проект',criteria:'Привести итоги проверки',
+    agentKey:'maker',reviewerKey:'reader',dependsOn:['git-file']};
+  const service=createStudioService({dbPath:':memory:',
+    prepareTarget:async()=>({targetRef:'refs/heads/delivery'}),
+    projectPipeline:{
+      workScope:async()=>({worktreeId:'tree',scope:{root:'/work',access:'worktree-write'},release:async()=>{}}),
+      evaluate:async()=>({worktreeId:'tree',revision,artifactPaths:['video/main.tsx'],status:'review',checks:[],evidence:[]}),
+      reviewScope:async()=>({scope:{root:'/candidate',access:'read'},release:async()=>{}}),
+      merge:async()=>({status:'merged',targetOid:'accepted'}),
+      packageReviewScope:async({studio,members,referencePaths})=>{
+        assert.equal(studio.projectGit.targetRef,'refs/heads/delivery');
+        assert.equal(members.length,1);
+        assert.equal(members[0].gitDelivery.targetOid,'accepted');
+        assert.deepEqual(referencePaths,['video/main.tsx']);
+        return {scope:{root:'/integrated',access:'read'},context:{revision,files:[{path:'video/main.tsx',text:'Delivered file'}],
+          checks:[{checkId:'render',status:'PASS'}]},release:async()=>{}};
+      },
+    },
+    run:async request=>{
+      const training=trainingReply(request);if(training)return training;
+      if(request.scope?.root==='/integrated'){
+        assert.equal(request.scope.access,'read');
+        assert.match(request.prompt,/Delivered file/);
+        assert.match(request.prompt,/"status":"PASS"/);
+        assert.match(request.prompt,/already recorded passing check/);
+        scopedCalls.push(request.purpose);
+      }
+      const options={plan:{...plan,tasks:[{...plan.tasks[0],requiresAcceptance:false},report]},task:{summary:'Ready'},
+        review:{pass:true,summary:'Reviewed'},director:{action:scopedCalls.length?'finish':'next'}};
+      return {text:JSON.stringify(options[request.purpose])};
+    },
+  });
+  t.after(()=>service.close());
+  const {id:studioId}=service.createStudio({name:'Report',root:'/project',wipLimit:2});
+  await service.configureProject({studioId,enabled:true,targetRef:'delivery'});
+  service.initializeStudio({studioId});
+  const draft=await until(service,state=>state.plans[0]);
+  service.decidePlan({planId:draft.id,decision:'approve'});
+  await until(service,state=>state.sprints[0]?.status==='completed');
+  assert.deepEqual(scopedCalls,['task','review']);
+});
